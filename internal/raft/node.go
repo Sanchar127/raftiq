@@ -88,6 +88,15 @@ func (n *RaftNode) becomeLeader() {
 
 	n.state.Role = Leader
 	n.state.LeaderID = n.id
+
+	nextIndex := n.log.LastIndex() + 1
+
+	for _, peer := range n.peers {
+		peerID := peer.ID()
+
+		n.state.Leader.NextIndex[peerID] = nextIndex
+		n.state.Leader.MatchIndex[peerID] = 0
+	}
 }
 
 func (n *RaftNode) RequestVote(args RequestVoteArgs) RequestVoteReply {

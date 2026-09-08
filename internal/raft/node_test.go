@@ -743,3 +743,52 @@ func TestAppendEntriesRejectsOlderTerm(t *testing.T) {
 		t.Fatalf("expected election timer to remain 2, got %d", elapsed)
 	}
 }
+
+func TestBecomeLeaderInitializesReplicationState(t *testing.T) {
+	node := NewRaftNode("A")
+
+	peerB := NewRaftNode("B")
+	peerC := NewRaftNode("C")
+
+	node.SetPeers([]Peer{peerB, peerC})
+
+	if err := node.Log().Append(LogEntry{
+		Index: 1,
+		Term:  1,
+		Data:  []byte("one"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := node.Log().Append(LogEntry{
+		Index: 2,
+		Term:  1,
+		Data:  []byte("two"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	node.becomeLeader()
+
+	state := node.State()
+
+	if state.Role != Leader {
+		t.Fatalf("expected leader, got %v", state.Role)
+	}
+
+	if state.Leader.NextIndex["B"] != 3 {
+		t.Fatalf("expected B NextIndex=3, got %d", state.Leader.NextIndex["B"])
+	}
+
+	if state.Leader.NextIndex["C"] != 3 {
+		t.Fatalf("expected C NextIndex=3, got %d", state.Leader.NextIndex["C"])
+	}
+
+	if state.Leader.MatchIndex["B"] != 0 {
+		t.Fatalf("expected B MatchIndex=0, got %d", state.Leader.MatchIndex["B"])
+	}
+
+	if state.Leader.MatchIndex["C"] != 0 {
+		t.Fatalf("expected C MatchIndex=0, got %d", state.Leader.MatchIndex["C"])
+	}
+}
