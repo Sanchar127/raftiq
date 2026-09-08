@@ -59,7 +59,7 @@ func TestNewRaftNode(t *testing.T) {
 func TestBecomeLeader(t *testing.T) {
 	node := NewRaftNode("node-1")
 
-	node.becomeCandidate()
+	node.startElection()
 	node.becomeLeader()
 
 	state := node.State()
@@ -79,7 +79,7 @@ func TestBecomeLeader(t *testing.T) {
 func TestBecomeCandidate(t *testing.T) {
 	node := NewRaftNode("node-1")
 
-	node.becomeCandidate()
+	node.startElection()
 
 	state := node.State()
 
@@ -105,7 +105,7 @@ func TestBecomeCandidate(t *testing.T) {
 func TestBecomeFollower(t *testing.T) {
 	node := NewRaftNode("node-1")
 
-	node.becomeCandidate()
+	node.startElection()
 	node.becomeLeader()
 
 	node.becomeFollower(2)
@@ -182,7 +182,7 @@ func TestRequestVoteRejectsSecondCandidate(t *testing.T) {
 func TestRequestVoteRejectsOlderTerm(t *testing.T) {
 	node := NewRaftNode("node-1")
 
-	node.becomeCandidate()
+	node.startElection()
 
 	reply := node.RequestVote(RequestVoteArgs{
 		Term:        0,
@@ -201,7 +201,7 @@ func TestRequestVoteRejectsOlderTerm(t *testing.T) {
 func TestRequestVoteUpdatesHigherTerm(t *testing.T) {
 	node := NewRaftNode("node-1")
 
-	node.becomeCandidate()
+	node.startElection()
 
 	reply := node.RequestVote(RequestVoteArgs{
 		Term:        2,
@@ -229,7 +229,7 @@ func TestRequestVoteUpdatesHigherTerm(t *testing.T) {
 func TestCandidateVotesForItself(t *testing.T) {
 	node := NewRaftNode("A")
 
-	node.becomeCandidate()
+	node.startElection()
 
 	state := node.State()
 
@@ -249,7 +249,7 @@ func TestCandidateVotesForItself(t *testing.T) {
 func TestRecordVote(t *testing.T) {
 	node := NewRaftNode("A")
 
-	node.becomeCandidate()
+	node.startElection()
 
 	term := node.State().Persistent.CurrentTerm
 
@@ -269,7 +269,7 @@ func TestRecordVote(t *testing.T) {
 func TestDuplicateVoteIsIgnored(t *testing.T) {
 	node := NewRaftNode("A")
 
-	node.becomeCandidate()
+	node.startElection()
 
 	term := node.State().Persistent.CurrentTerm
 
@@ -285,7 +285,7 @@ func TestDuplicateVoteIsIgnored(t *testing.T) {
 func TestVoteFromOldElectionIsIgnored(t *testing.T) {
 	node := NewRaftNode("A")
 
-	node.becomeCandidate()
+	node.startElection()
 
 	currentTerm := node.State().Persistent.CurrentTerm
 
@@ -302,7 +302,7 @@ func TestCandidateBecomesLeaderAfterMajority(t *testing.T) {
 		NewRaftNode("C"),
 	})
 
-	node.becomeCandidate()
+	node.startElection()
 
 	term := node.State().Persistent.CurrentTerm
 
@@ -357,7 +357,7 @@ func TestThreeNodeElection(t *testing.T) {
 func TestHigherTermVoteReplyMakesCandidateFollower(t *testing.T) {
 	node := NewRaftNode("A")
 
-	node.becomeCandidate()
+	node.startElection()
 
 	currentTerm := node.State().Persistent.CurrentTerm
 
@@ -410,12 +410,12 @@ func TestHigherTermVoteReplyMakesCandidateFollower(t *testing.T) {
 func TestStaleElectionVoteReplyIsIgnored(t *testing.T) {
 	node := NewRaftNode("A")
 
-	node.becomeCandidate()
+	node.startElection()
 
 	oldTerm := node.State().Persistent.CurrentTerm
 
 	// Start a new election.
-	node.becomeCandidate()
+	node.startElection()
 
 	currentTerm := node.State().Persistent.CurrentTerm
 
@@ -463,9 +463,9 @@ func TestSplitVoteProducesNoLeader(t *testing.T) {
 	nodeB.SetPeers([]Peer{nodeA, nodeC})
 	nodeC.SetPeers([]Peer{nodeA, nodeB})
 
-	nodeA.becomeCandidate()
-	nodeB.becomeCandidate()
-	nodeC.becomeCandidate()
+	nodeA.startElection()
+	nodeB.startElection()
+	nodeC.startElection()
 
 	if nodeA.tryBecomeLeader() {
 		t.Fatal("A should not become leader with only its own vote")
@@ -547,7 +547,7 @@ func TestTickStartsElection(t *testing.T) {
 		t.Fatal("expected election timeout after third tick")
 	}
 
-	node.becomeCandidate()
+	node.startElection()
 
 	state := node.State()
 

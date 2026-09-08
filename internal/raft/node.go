@@ -79,20 +79,6 @@ func (n *RaftNode) becomeFollower(term Term) {
 	n.state.LeaderID = ""
 }
 
-func (n *RaftNode) becomeCandidate() {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	n.state.Role = Candidate
-	n.state.Persistent.CurrentTerm++
-	n.state.Persistent.VotedFor = n.id
-	n.state.LeaderID = ""
-
-	n.state.Election.VotesReceived = map[NodeID]struct{}{
-		n.id: {},
-	}
-}
-
 func (n *RaftNode) becomeLeader() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
