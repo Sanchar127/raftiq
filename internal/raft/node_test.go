@@ -491,3 +491,17 @@ func TestSplitVoteProducesNoLeader(t *testing.T) {
 		t.Fatal("C should remain Candidate")
 	}
 }
+
+func TestSetElectionTimeout(t *testing.T) {
+	node := NewRaftNode("A")
+
+	node.SetElectionTimeout(10)
+
+	node.mu.RLock()
+	timeout := node.electionTimeout
+	node.mu.RUnlock()
+
+	if timeout != 10 {
+		t.Fatalf("expected election timeout 10, got %d", timeout)
+	}
+}

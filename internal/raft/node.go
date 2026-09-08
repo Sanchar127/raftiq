@@ -9,6 +9,9 @@ type RaftNode struct {
 	state State
 	log   *Log
 	peers []Peer
+
+	electionElapsed int
+	electionTimeout int
 }
 
 func NewRaftNode(id NodeID) *RaftNode {
@@ -285,4 +288,26 @@ func (n *RaftNode) runElection() {
 	n.startElection()
 	n.requestVotes()
 	n.tryBecomeLeader()
+}
+
+func (n *RaftNode) Tick() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.electionElapsed++
+
+	if n.electionElapsed < n.electionTimeout {
+		return false
+	}
+
+	n.electionElapsed = 0
+
+	return true
+}
+
+func (n *RaftNode) SetElectionTimeout(timeout int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.electionTimeout = timeout
 }
