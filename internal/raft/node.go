@@ -120,7 +120,7 @@ func (n *RaftNode) RequestVote(args RequestVoteArgs) RequestVoteReply {
 
 	n.state.Persistent.VotedFor = args.CandidateID
 	reply.VoteGranted = true
-
+	n.electionElapsed = 0
 	return reply
 }
 
@@ -305,4 +305,11 @@ func (n *RaftNode) onElectionTimeout() {
 
 	n.startElection()
 	n.requestVotes()
+}
+
+func (n *RaftNode) resetElectionTimer() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.electionElapsed = 0
 }

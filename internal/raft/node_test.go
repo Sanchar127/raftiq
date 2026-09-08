@@ -620,3 +620,38 @@ func TestElectionTimeoutStartsElection(t *testing.T) {
 		t.Fatalf("expected self-vote for A, got %q", state.Persistent.VotedFor)
 	}
 }
+
+func TestRequestVoteResetsElectionTimer(t *testing.T) {
+	node := NewRaftNode("A")
+	node.SetElectionTimeout(10)
+
+	node.Tick()
+	node.Tick()
+
+	node.mu.RLock()
+	elapsedBefore := node.electionElapsed
+	node.mu.RUnlock()
+
+	if elapsedBefore != 2 {
+		t.Fatalf("expected elapsed time 2, got %d", elapsedBefore)
+	}
+
+	reply := node.RequestVote(RequestVoteArgs{
+		Term:         1,
+		CandidateID:  "B",
+		LastLogIndex: 0,
+		LastLogTerm:  0,
+	})
+
+	if !reply.VoteGranted {
+		t.Fatal("expected vote to be granted")
+	}
+
+	node.mu.RLock()
+	elapsedAfter := node.electionElapsed
+	node.mu.RUnlock()
+
+	if elapsedAfter != 0 {
+		t.Fatalf("expected election timer to reset to 0, got %d", elapsedAfter)
+	}
+}
