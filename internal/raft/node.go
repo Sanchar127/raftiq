@@ -8,11 +8,13 @@ type RaftNode struct {
 	id    NodeID
 	state State
 	log   *Log
+	peers []Peer
 }
 
 func NewRaftNode(id NodeID) *RaftNode {
 	return &RaftNode{
-		id: id,
+		id:    id,
+		peers: make([]Peer, 0),
 		state: State{
 			Persistent: PersistentState{
 				CurrentTerm: 0,
@@ -34,6 +36,13 @@ func NewRaftNode(id NodeID) *RaftNode {
 		},
 		log: NewLog(),
 	}
+}
+
+func (n *RaftNode) SetPeers(peers []Peer) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.peers = append([]Peer(nil), peers...)
 }
 
 func (n *RaftNode) ID() NodeID {
@@ -94,7 +103,8 @@ func (n *RaftNode) RequestVote(args RequestVoteArgs) RequestVoteReply {
 	defer n.mu.Unlock()
 
 	reply := RequestVoteReply{
-		Term: n.state.Persistent.CurrentTerm,
+		Term:    n.state.Persistent.CurrentTerm,
+		VoterID: n.id,
 	}
 
 	if args.Term < n.state.Persistent.CurrentTerm {
@@ -175,7 +185,7 @@ func (n *RaftNode) hasElectionMajority(clusterSize int) bool {
 	return len(n.state.Election.VotesReceived) >= majority(clusterSize)
 }
 
-func (n *RaftNode) tryBecomeLeader(clusterSize int) bool {
+func (n *RaftNode) tryBecomeLeader() bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
@@ -183,7 +193,10 @@ func (n *RaftNode) tryBecomeLeader(clusterSize int) bool {
 		return false
 	}
 
-	if len(n.state.Election.VotesReceived) < majority(clusterSize) {
+	clusterSize := len(n.peers) + 1
+	requiredVotes := clusterSize/2 + 1
+
+	if len(n.state.Election.VotesReceived) < requiredVotes {
 		return false
 	}
 
@@ -191,4 +204,79 @@ func (n *RaftNode) tryBecomeLeader(clusterSize int) bool {
 	n.state.LeaderID = n.id
 
 	return true
+}
+
+type Peer interface {
+	ID() NodeID
+	RequestVote(args RequestVoteArgs) RequestVoteReply
+}
+
+func (n *RaftNode) startElection() Term {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.state.Role = Candidate
+	n.state.Persistent.CurrentTerm++
+	n.state.Persistent.VotedFor = n.id
+	n.state.LeaderID = ""
+
+	n.state.Election.VotesReceived = map[NodeID]struct{}{
+		n.id: {},
+	}
+
+	return n.state.Persistent.CurrentTerm
+}
+
+func (n *RaftNode) requestVotes() {
+	n.mu.RLock()
+
+	term := n.state.Persistent.CurrentTerm
+	lastLogIndex := n.log.LastIndex()
+	lastLogTerm := n.log.LastTerm()
+	peers := append([]Peer(nil), n.peers...)
+	n.mu.RUnlock()
+
+	args := RequestVoteArgs{
+		Term:         term,
+		CandidateID:  n.id,
+		LastLogIndex: lastLogIndex,
+		LastLogTerm:  lastLogTerm,
+	}
+
+	for _, peer := range peers {
+		reply := peer.RequestVote(args)
+		n.handleVoteReply(term, reply)
+	}
+}
+
+func (n *RaftNode) handleVoteReply(electionTerm Term, reply RequestVoteReply) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if reply.Term > n.state.Persistent.CurrentTerm {
+		n.state.Persistent.CurrentTerm = reply.Term
+		n.state.Role = Follower
+		n.state.Persistent.VotedFor = ""
+		n.state.LeaderID = ""
+
+		return
+	}
+
+	if n.state.Role != Candidate {
+		return
+	}
+
+	if electionTerm != n.state.Persistent.CurrentTerm {
+		return
+	}
+
+	if reply.Term != electionTerm {
+		return
+	}
+
+	if !reply.VoteGranted {
+		return
+	}
+
+	n.state.Election.VotesReceived[reply.VoterID] = struct{}{}
 }

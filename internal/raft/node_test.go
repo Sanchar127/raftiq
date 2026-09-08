@@ -297,17 +297,22 @@ func TestVoteFromOldElectionIsIgnored(t *testing.T) {
 func TestCandidateBecomesLeaderAfterMajority(t *testing.T) {
 	node := NewRaftNode("A")
 
+	node.SetPeers([]Peer{
+		NewRaftNode("B"),
+		NewRaftNode("C"),
+	})
+
 	node.becomeCandidate()
 
 	term := node.State().Persistent.CurrentTerm
 
-	if node.tryBecomeLeader(3) {
+	if node.tryBecomeLeader() {
 		t.Fatal("candidate should not become leader with only one vote")
 	}
 
 	node.recordVote("B", term, true)
 
-	if !node.tryBecomeLeader(3) {
+	if !node.tryBecomeLeader() {
 		t.Fatal("candidate should become leader after majority")
 	}
 

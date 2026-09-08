@@ -29,5 +29,6 @@ type RequestVoteArgs struct {
 
 type RequestVoteReply struct {
 	Term        Term
+	VoterID     NodeID
 	VoteGranted bool
 }
