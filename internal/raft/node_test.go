@@ -505,3 +505,28 @@ func TestSetElectionTimeout(t *testing.T) {
 		t.Fatalf("expected election timeout 10, got %d", timeout)
 	}
 }
+
+func TestTickTriggersElectionTimeout(t *testing.T) {
+	node := NewRaftNode("A")
+	node.SetElectionTimeout(3)
+
+	if node.Tick() {
+		t.Fatal("expected no election after first tick")
+	}
+
+	if node.Tick() {
+		t.Fatal("expected no election after second tick")
+	}
+
+	if !node.Tick() {
+		t.Fatal("expected election after third tick")
+	}
+
+	node.mu.RLock()
+	elapsed := node.electionElapsed
+	node.mu.RUnlock()
+
+	if elapsed != 0 {
+		t.Fatalf("expected election elapsed to reset to 0, got %d", elapsed)
+	}
+}
