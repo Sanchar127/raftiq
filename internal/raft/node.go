@@ -3,17 +3,17 @@ package raft
 import "sync"
 
 type RaftNode struct {
-	mu sync.RWMutex
+	mu      sync.RWMutex
+	applyMu sync.Mutex
 
-	id    NodeID
-	state State
-	log   *Log
-	peers []Peer
+	id      NodeID
+	state   State
+	log     *Log
+	peers   []Peer
+	applyCh chan LogEntry
 
 	electionElapsed int
 	electionTimeout int
-
-	applyCh chan LogEntry
 }
 
 func NewRaftNode(id NodeID) *RaftNode {
@@ -400,19 +400,36 @@ func (n *RaftNode) ApplyCh() <-chan LogEntry {
 }
 
 func (n *RaftNode) applyCommitted() {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	n.applyMu.Lock()
+	defer n.applyMu.Unlock()
 
-	for n.state.Volatile.LastApplied < n.state.Volatile.CommitIndex {
+	for {
+		n.mu.Lock()
+
+		if n.state.Volatile.LastApplied >= n.state.Volatile.CommitIndex {
+			n.mu.Unlock()
+			return
+		}
+
 		nextIndex := n.state.Volatile.LastApplied + 1
 
 		entry, ok := n.log.Get(nextIndex)
 		if !ok {
+			n.mu.Unlock()
 			return
 		}
 
+		n.mu.Unlock()
+
 		n.applyCh <- entry
-		n.state.Volatile.LastApplied = nextIndex
+
+		n.mu.Lock()
+
+		if n.state.Volatile.LastApplied < nextIndex {
+			n.state.Volatile.LastApplied = nextIndex
+		}
+
+		n.mu.Unlock()
 	}
 }
 
@@ -475,21 +492,24 @@ func (n *RaftNode) handleAppendEntriesReply(
 	reply AppendEntriesReply,
 ) {
 	n.mu.Lock()
-	defer n.mu.Unlock()
 
 	if reply.Term > n.state.Persistent.CurrentTerm {
 		n.state.Persistent.CurrentTerm = reply.Term
 		n.state.Role = Follower
 		n.state.Persistent.VotedFor = ""
 		n.state.LeaderID = ""
+
+		n.mu.Unlock()
 		return
 	}
 
 	if n.state.Role != Leader {
+		n.mu.Unlock()
 		return
 	}
 
 	if args.Term != n.state.Persistent.CurrentTerm {
+		n.mu.Unlock()
 		return
 	}
 
@@ -497,10 +517,13 @@ func (n *RaftNode) handleAppendEntriesReply(
 		if nextIndex := n.state.Leader.NextIndex[peerID]; nextIndex > 1 {
 			n.state.Leader.NextIndex[peerID]--
 		}
+
+		n.mu.Unlock()
 		return
 	}
 
 	if len(args.Entries) == 0 {
+		n.mu.Unlock()
 		return
 	}
 
@@ -510,15 +533,22 @@ func (n *RaftNode) handleAppendEntriesReply(
 		n.state.Leader.MatchIndex[peerID] = lastReplicated
 		n.state.Leader.NextIndex[peerID] = lastReplicated + 1
 	}
+
+	advanced := n.advanceCommitIndexLocked()
+
+	n.mu.Unlock()
+
+	if advanced {
+		n.applyCommitted()
+	}
 }
 
-func (n *RaftNode) advanceCommitIndex() {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
+func (n *RaftNode) advanceCommitIndexLocked() bool {
 	if n.state.Role != Leader {
-		return
+		return false
 	}
+
+	oldCommitIndex := n.state.Volatile.CommitIndex
 
 	clusterSize := len(n.peers) + 1
 	majority := clusterSize/2 + 1
@@ -528,7 +558,7 @@ func (n *RaftNode) advanceCommitIndex() {
 			continue
 		}
 
-		replicated := 1 // leader itself
+		replicated := 1
 
 		for _, peer := range n.peers {
 			if n.state.Leader.MatchIndex[peer.ID()] >= index {
@@ -540,7 +570,10 @@ func (n *RaftNode) advanceCommitIndex() {
 			n.state.Volatile.CommitIndex = index
 		}
 	}
+
+	return n.state.Volatile.CommitIndex > oldCommitIndex
 }
+
 func (n *RaftNode) logTerm(index LogIndex) Term {
 	entry, ok := n.log.Get(index)
 	if !ok {
@@ -548,4 +581,16 @@ func (n *RaftNode) logTerm(index LogIndex) Term {
 	}
 
 	return entry.Term
+}
+
+func (n *RaftNode) advanceCommitIndex() {
+	n.mu.Lock()
+
+	advanced := n.advanceCommitIndexLocked()
+
+	n.mu.Unlock()
+
+	if advanced {
+		n.applyCommitted()
+	}
 }
