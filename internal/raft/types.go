@@ -32,3 +32,14 @@ type RequestVoteReply struct {
 	VoterID     NodeID
 	VoteGranted bool
 }
+
+type AppendEntriesArgs struct {
+	Term     Term
+	LeaderID NodeID
+}
+
+type AppendEntriesReply struct {
+	Term       Term
+	FollowerID NodeID
+	Success    bool
+}

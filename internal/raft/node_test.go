@@ -655,3 +655,46 @@ func TestRequestVoteResetsElectionTimer(t *testing.T) {
 		t.Fatalf("expected election timer to reset to 0, got %d", elapsedAfter)
 	}
 }
+
+func TestAppendEntriesResetsElectionTimer(t *testing.T) {
+	node := NewRaftNode("B")
+	node.SetElectionTimeout(10)
+
+	node.Tick()
+	node.Tick()
+
+	node.mu.RLock()
+	elapsedBefore := node.electionElapsed
+	node.mu.RUnlock()
+
+	if elapsedBefore != 2 {
+		t.Fatalf("expected elapsed time 2, got %d", elapsedBefore)
+	}
+
+	reply := node.AppendEntries(AppendEntriesArgs{
+		Term:     1,
+		LeaderID: "A",
+	})
+
+	if !reply.Success {
+		t.Fatal("expected AppendEntries to succeed")
+	}
+
+	state := node.State()
+
+	if state.Role != Follower {
+		t.Fatalf("expected Follower, got %v", state.Role)
+	}
+
+	if state.LeaderID != "A" {
+		t.Fatalf("expected leader A, got %q", state.LeaderID)
+	}
+
+	node.mu.RLock()
+	elapsedAfter := node.electionElapsed
+	node.mu.RUnlock()
+
+	if elapsedAfter != 0 {
+		t.Fatalf("expected election timer to reset to 0, got %d", elapsedAfter)
+	}
+}

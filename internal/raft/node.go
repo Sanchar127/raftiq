@@ -198,6 +198,7 @@ func (n *RaftNode) tryBecomeLeader() bool {
 type Peer interface {
 	ID() NodeID
 	RequestVote(args RequestVoteArgs) RequestVoteReply
+	AppendEntries(args AppendEntriesArgs) AppendEntriesReply
 }
 
 func (n *RaftNode) startElection() Term {
@@ -312,4 +313,32 @@ func (n *RaftNode) resetElectionTimer() {
 	defer n.mu.Unlock()
 
 	n.electionElapsed = 0
+}
+
+func (n *RaftNode) AppendEntries(args AppendEntriesArgs) AppendEntriesReply {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	reply := AppendEntriesReply{
+		Term:       n.state.Persistent.CurrentTerm,
+		FollowerID: n.id,
+	}
+
+	if args.Term < n.state.Persistent.CurrentTerm {
+		return reply
+	}
+
+	if args.Term > n.state.Persistent.CurrentTerm {
+		n.state.Persistent.CurrentTerm = args.Term
+		n.state.Persistent.VotedFor = ""
+	}
+
+	n.state.Role = Follower
+	n.state.LeaderID = args.LeaderID
+	n.electionElapsed = 0
+
+	reply.Term = n.state.Persistent.CurrentTerm
+	reply.Success = true
+
+	return reply
 }
