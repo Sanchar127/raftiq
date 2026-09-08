@@ -415,3 +415,99 @@ func (n *RaftNode) applyCommitted() {
 		n.state.Volatile.LastApplied = nextIndex
 	}
 }
+
+func (n *RaftNode) buildAppendEntries(peerID NodeID) (AppendEntriesArgs, bool) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	if n.state.Role != Leader {
+		return AppendEntriesArgs{}, false
+	}
+
+	nextIndex, ok := n.state.Leader.NextIndex[peerID]
+	if !ok {
+		return AppendEntriesArgs{}, false
+	}
+
+	args := AppendEntriesArgs{
+		Term:         n.state.Persistent.CurrentTerm,
+		LeaderID:     n.id,
+		LeaderCommit: n.state.Volatile.CommitIndex,
+	}
+
+	if nextIndex > 1 {
+		prevIndex := nextIndex - 1
+		prevEntry, ok := n.log.Get(prevIndex)
+		if !ok {
+			return AppendEntriesArgs{}, false
+		}
+
+		args.PrevLogIndex = prevIndex
+		args.PrevLogTerm = prevEntry.Term
+	}
+
+	for index := nextIndex; index <= n.log.LastIndex(); index++ {
+		entry, ok := n.log.Get(index)
+		if !ok {
+			return AppendEntriesArgs{}, false
+		}
+
+		args.Entries = append(args.Entries, entry)
+	}
+
+	return args, true
+}
+
+func (n *RaftNode) replicateTo(peer Peer) {
+	args, ok := n.buildAppendEntries(peer.ID())
+	if !ok {
+		return
+	}
+
+	reply := peer.AppendEntries(args)
+
+	n.handleAppendEntriesReply(peer.ID(), args, reply)
+}
+
+func (n *RaftNode) handleAppendEntriesReply(
+	peerID NodeID,
+	args AppendEntriesArgs,
+	reply AppendEntriesReply,
+) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if reply.Term > n.state.Persistent.CurrentTerm {
+		n.state.Persistent.CurrentTerm = reply.Term
+		n.state.Role = Follower
+		n.state.Persistent.VotedFor = ""
+		n.state.LeaderID = ""
+		return
+	}
+
+	if n.state.Role != Leader {
+		return
+	}
+
+	if args.Term != n.state.Persistent.CurrentTerm {
+		return
+	}
+
+	if !reply.Success {
+		if nextIndex := n.state.Leader.NextIndex[peerID]; nextIndex > 1 {
+			n.state.Leader.NextIndex[peerID]--
+		}
+		return
+	}
+
+	if len(args.Entries) == 0 {
+		return
+	}
+
+	lastReplicated := args.Entries[len(args.Entries)-1].Index
+
+	if lastReplicated > n.state.Leader.MatchIndex[peerID] {
+		n.state.Leader.MatchIndex[peerID] = lastReplicated
+		n.state.Leader.NextIndex[peerID] = lastReplicated + 1
+	}
+}
