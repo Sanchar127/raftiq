@@ -55,3 +55,85 @@ func TestNewRaftNode(t *testing.T) {
 		)
 	}
 }
+
+func TestBecomeLeader(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	node.becomeCandidate()
+	node.becomeLeader()
+
+	state := node.State()
+
+	if state.Role != Leader {
+		t.Fatalf("expected leader role, got %v", state.Role)
+	}
+
+	if state.LeaderID != "node-1" {
+		t.Fatalf(
+			"expected leader ID node-1, got %q",
+			state.LeaderID,
+		)
+	}
+}
+
+func TestBecomeCandidate(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	node.becomeCandidate()
+
+	state := node.State()
+
+	if state.Role != Candidate {
+		t.Fatalf("expected candidate role, got %v", state.Role)
+	}
+
+	if state.Persistent.CurrentTerm != 1 {
+		t.Fatalf(
+			"expected term 1, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != "node-1" {
+		t.Fatalf(
+			"expected vote for node-1, got %q",
+			state.Persistent.VotedFor,
+		)
+	}
+}
+
+func TestBecomeFollower(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	node.becomeCandidate()
+	node.becomeLeader()
+
+	node.becomeFollower(2)
+
+	state := node.State()
+
+	if state.Role != Follower {
+		t.Fatalf("expected follower role, got %v", state.Role)
+	}
+
+	if state.Persistent.CurrentTerm != 2 {
+		t.Fatalf(
+			"expected term 2, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != "" {
+		t.Fatalf(
+			"expected vote to be cleared, got %q",
+			state.Persistent.VotedFor,
+		)
+	}
+
+	if state.LeaderID != "" {
+		t.Fatalf(
+			"expected leader ID to be cleared, got %q",
+			state.LeaderID,
+		)
+	}
+}

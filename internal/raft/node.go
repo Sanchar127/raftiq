@@ -53,3 +53,31 @@ func (n *RaftNode) Log() *Log {
 
 	return n.log
 }
+
+func (n *RaftNode) becomeFollower(term Term) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.state.Role = Follower
+	n.state.Persistent.CurrentTerm = term
+	n.state.Persistent.VotedFor = ""
+	n.state.LeaderID = ""
+}
+
+func (n *RaftNode) becomeCandidate() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.state.Role = Candidate
+	n.state.Persistent.CurrentTerm++
+	n.state.Persistent.VotedFor = n.id
+	n.state.LeaderID = ""
+}
+
+func (n *RaftNode) becomeLeader() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.state.Role = Leader
+	n.state.LeaderID = n.id
+}
