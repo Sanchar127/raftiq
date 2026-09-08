@@ -328,6 +328,13 @@ func (n *RaftNode) AppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 		return reply
 	}
 
+	if args.PrevLogIndex > 0 {
+		prevEntry, ok := n.log.Get(args.PrevLogIndex)
+		if !ok || prevEntry.Term != args.PrevLogTerm {
+			return reply
+		}
+	}
+
 	if args.Term > n.state.Persistent.CurrentTerm {
 		n.state.Persistent.CurrentTerm = args.Term
 		n.state.Persistent.VotedFor = ""
