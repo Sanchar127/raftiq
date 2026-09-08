@@ -698,3 +698,48 @@ func TestAppendEntriesResetsElectionTimer(t *testing.T) {
 		t.Fatalf("expected election timer to reset to 0, got %d", elapsedAfter)
 	}
 }
+
+func TestAppendEntriesRejectsOlderTerm(t *testing.T) {
+	node := NewRaftNode("B")
+	node.SetElectionTimeout(10)
+
+	// Move the follower's timer forward.
+	node.Tick()
+	node.Tick()
+
+	// Establish current term 5.
+	node.startElection()
+
+	node.mu.Lock()
+	node.state.Persistent.CurrentTerm = 5
+	node.state.Role = Follower
+	node.state.LeaderID = "A"
+	node.mu.Unlock()
+
+	reply := node.AppendEntries(AppendEntriesArgs{
+		Term:     4,
+		LeaderID: "C",
+	})
+
+	if reply.Success {
+		t.Fatal("expected stale AppendEntries to be rejected")
+	}
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 5 {
+		t.Fatalf("expected term 5, got %d", state.Persistent.CurrentTerm)
+	}
+
+	if state.LeaderID != "A" {
+		t.Fatalf("expected leader A to remain unchanged, got %q", state.LeaderID)
+	}
+
+	node.mu.RLock()
+	elapsed := node.electionElapsed
+	node.mu.RUnlock()
+
+	if elapsed != 2 {
+		t.Fatalf("expected election timer to remain 2, got %d", elapsed)
+	}
+}
