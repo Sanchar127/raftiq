@@ -369,6 +369,15 @@ func (n *RaftNode) AppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 		}
 	}
 
+	if args.LeaderCommit > n.state.Volatile.CommitIndex {
+		lastIndex := n.log.LastIndex()
+
+		if args.LeaderCommit < lastIndex {
+			n.state.Volatile.CommitIndex = args.LeaderCommit
+		} else {
+			n.state.Volatile.CommitIndex = lastIndex
+		}
+	}
 	reply.Term = n.state.Persistent.CurrentTerm
 	reply.Success = true
 
