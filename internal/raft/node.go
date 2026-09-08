@@ -511,3 +511,41 @@ func (n *RaftNode) handleAppendEntriesReply(
 		n.state.Leader.NextIndex[peerID] = lastReplicated + 1
 	}
 }
+
+func (n *RaftNode) advanceCommitIndex() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.state.Role != Leader {
+		return
+	}
+
+	clusterSize := len(n.peers) + 1
+	majority := clusterSize/2 + 1
+
+	for index := n.state.Volatile.CommitIndex + 1; index <= n.log.LastIndex(); index++ {
+		if n.logTerm(index) != n.state.Persistent.CurrentTerm {
+			continue
+		}
+
+		replicated := 1 // leader itself
+
+		for _, peer := range n.peers {
+			if n.state.Leader.MatchIndex[peer.ID()] >= index {
+				replicated++
+			}
+		}
+
+		if replicated >= majority {
+			n.state.Volatile.CommitIndex = index
+		}
+	}
+}
+func (n *RaftNode) logTerm(index LogIndex) Term {
+	entry, ok := n.log.Get(index)
+	if !ok {
+		return 0
+	}
+
+	return entry.Term
+}

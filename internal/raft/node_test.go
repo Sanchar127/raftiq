@@ -792,3 +792,41 @@ func TestBecomeLeaderInitializesReplicationState(t *testing.T) {
 		t.Fatalf("expected C MatchIndex=0, got %d", state.Leader.MatchIndex["C"])
 	}
 }
+
+func TestAdvanceCommitIndex(t *testing.T) {
+	leader := NewRaftNode("A")
+	peerB := NewRaftNode("B")
+	peerC := NewRaftNode("C")
+
+	leader.SetPeers([]Peer{peerB, peerC})
+
+	leader.mu.Lock()
+
+	leader.state.Role = Leader
+	leader.state.Persistent.CurrentTerm = 2
+
+	if err := leader.log.Append(LogEntry{
+		Index: 1,
+		Term:  2,
+		Data:  []byte("one"),
+	}); err != nil {
+		leader.mu.Unlock()
+		t.Fatal(err)
+	}
+
+	leader.state.Leader.MatchIndex["B"] = 1
+	leader.state.Leader.MatchIndex["C"] = 0
+
+	leader.mu.Unlock()
+
+	leader.advanceCommitIndex()
+
+	state := leader.State()
+
+	if state.Volatile.CommitIndex != 1 {
+		t.Fatalf(
+			"expected commit index 1, got %d",
+			state.Volatile.CommitIndex,
+		)
+	}
+}
