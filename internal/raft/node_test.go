@@ -530,3 +530,36 @@ func TestTickTriggersElectionTimeout(t *testing.T) {
 		t.Fatalf("expected election elapsed to reset to 0, got %d", elapsed)
 	}
 }
+
+func TestTickStartsElection(t *testing.T) {
+	node := NewRaftNode("A")
+	node.SetElectionTimeout(3)
+
+	if node.Tick() {
+		t.Fatal("expected no election after first tick")
+	}
+
+	if node.Tick() {
+		t.Fatal("expected no election after second tick")
+	}
+
+	if !node.Tick() {
+		t.Fatal("expected election timeout after third tick")
+	}
+
+	node.becomeCandidate()
+
+	state := node.State()
+
+	if state.Role != Candidate {
+		t.Fatalf("expected Candidate, got %v", state.Role)
+	}
+
+	if state.Persistent.CurrentTerm != 1 {
+		t.Fatalf("expected term 1, got %d", state.Persistent.CurrentTerm)
+	}
+
+	if state.Persistent.VotedFor != "A" {
+		t.Fatalf("expected A to vote for itself, got %q", state.Persistent.VotedFor)
+	}
+}

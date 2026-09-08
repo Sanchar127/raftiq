@@ -301,7 +301,6 @@ func (n *RaftNode) Tick() bool {
 	}
 
 	n.electionElapsed = 0
-
 	return true
 }
 
