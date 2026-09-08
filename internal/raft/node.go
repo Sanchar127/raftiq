@@ -324,10 +324,18 @@ func (n *RaftNode) AppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 		FollowerID: n.id,
 	}
 
+	// 1. Reject stale leader.
 	if args.Term < n.state.Persistent.CurrentTerm {
 		return reply
 	}
 
+	// 2. Update term if leader is newer.
+	if args.Term > n.state.Persistent.CurrentTerm {
+		n.state.Persistent.CurrentTerm = args.Term
+		n.state.Persistent.VotedFor = ""
+	}
+
+	// 3. Verify the previous log entry.
 	if args.PrevLogIndex > 0 {
 		prevEntry, ok := n.log.Get(args.PrevLogIndex)
 		if !ok || prevEntry.Term != args.PrevLogTerm {
@@ -335,14 +343,31 @@ func (n *RaftNode) AppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 		}
 	}
 
-	if args.Term > n.state.Persistent.CurrentTerm {
-		n.state.Persistent.CurrentTerm = args.Term
-		n.state.Persistent.VotedFor = ""
-	}
-
+	// 4. Become follower and reset election timer.
 	n.state.Role = Follower
 	n.state.LeaderID = args.LeaderID
 	n.electionElapsed = 0
+
+	// 5. Process replicated entries.
+	for _, entry := range args.Entries {
+		existing, ok := n.log.Get(entry.Index)
+
+		if ok {
+			if existing.Term != entry.Term {
+				n.log.TruncateFrom(entry.Index)
+
+				if err := n.log.Append(entry); err != nil {
+					return reply
+				}
+			}
+
+			continue
+		}
+
+		if err := n.log.Append(entry); err != nil {
+			return reply
+		}
+	}
 
 	reply.Term = n.state.Persistent.CurrentTerm
 	reply.Success = true
