@@ -1,0 +1,36 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+
+  enable:
+    - bodyclose
+    - copyloopvar
+    - durationcheck
+    - errcheck
+    - errorlint
+    - funlen
+    - cyclop
+    - gocritic
+    - misspell
+    - nilerr
+    - prealloc
+    - revive
+    - staticcheck
+    - testifylint
+    - unconvert
+
+  exclusions:
+    generated: lax
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
