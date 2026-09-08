@@ -26,6 +26,9 @@ func NewRaftNode(id NodeID) *RaftNode {
 				NextIndex:  make(map[NodeID]LogIndex),
 				MatchIndex: make(map[NodeID]LogIndex),
 			},
+			Election: ElectionState{
+				VotesReceived: make(map[NodeID]struct{}),
+			},
 			Role:     Follower,
 			LeaderID: "",
 		},
@@ -72,6 +75,10 @@ func (n *RaftNode) becomeCandidate() {
 	n.state.Persistent.CurrentTerm++
 	n.state.Persistent.VotedFor = n.id
 	n.state.LeaderID = ""
+
+	n.state.Election.VotesReceived = map[NodeID]struct{}{
+		n.id: {},
+	}
 }
 
 func (n *RaftNode) becomeLeader() {
@@ -130,4 +137,58 @@ func (n *RaftNode) isCandidateLogUpToDate(
 	}
 
 	return lastLogIndex >= localLastIndex
+}
+
+func (n *RaftNode) recordVote(peerID NodeID, term Term, granted bool) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.state.Role != Candidate {
+		return false
+	}
+
+	if term != n.state.Persistent.CurrentTerm {
+		return false
+	}
+
+	if !granted {
+		return false
+	}
+
+	if _, alreadyReceived := n.state.Election.VotesReceived[peerID]; alreadyReceived {
+		return false
+	}
+
+	n.state.Election.VotesReceived[peerID] = struct{}{}
+
+	return true
+}
+
+func majority(clusterSize int) int {
+	return clusterSize/2 + 1
+}
+
+func (n *RaftNode) hasElectionMajority(clusterSize int) bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	return len(n.state.Election.VotesReceived) >= majority(clusterSize)
+}
+
+func (n *RaftNode) tryBecomeLeader(clusterSize int) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.state.Role != Candidate {
+		return false
+	}
+
+	if len(n.state.Election.VotesReceived) < majority(clusterSize) {
+		return false
+	}
+
+	n.state.Role = Leader
+	n.state.LeaderID = n.id
+
+	return true
 }

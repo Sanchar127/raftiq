@@ -225,3 +225,99 @@ func TestRequestVoteUpdatesHigherTerm(t *testing.T) {
 		t.Fatalf("expected follower role, got %v", state.Role)
 	}
 }
+
+func TestCandidateVotesForItself(t *testing.T) {
+	node := NewRaftNode("A")
+
+	node.becomeCandidate()
+
+	state := node.State()
+
+	if state.Role != Candidate {
+		t.Fatalf("expected Candidate, got %v", state.Role)
+	}
+
+	if state.Persistent.VotedFor != "A" {
+		t.Fatalf("expected A to vote for itself, got %q", state.Persistent.VotedFor)
+	}
+
+	if _, ok := state.Election.VotesReceived["A"]; !ok {
+		t.Fatal("expected candidate's own vote to be recorded")
+	}
+}
+
+func TestRecordVote(t *testing.T) {
+	node := NewRaftNode("A")
+
+	node.becomeCandidate()
+
+	term := node.State().Persistent.CurrentTerm
+
+	recorded := node.recordVote("B", term, true)
+
+	if !recorded {
+		t.Fatal("expected vote to be recorded")
+	}
+
+	state := node.State()
+
+	if _, ok := state.Election.VotesReceived["B"]; !ok {
+		t.Fatal("expected B's vote to be recorded")
+	}
+}
+
+func TestDuplicateVoteIsIgnored(t *testing.T) {
+	node := NewRaftNode("A")
+
+	node.becomeCandidate()
+
+	term := node.State().Persistent.CurrentTerm
+
+	if !node.recordVote("B", term, true) {
+		t.Fatal("expected first vote to be recorded")
+	}
+
+	if node.recordVote("B", term, true) {
+		t.Fatal("expected duplicate vote to be ignored")
+	}
+}
+
+func TestVoteFromOldElectionIsIgnored(t *testing.T) {
+	node := NewRaftNode("A")
+
+	node.becomeCandidate()
+
+	currentTerm := node.State().Persistent.CurrentTerm
+
+	if node.recordVote("B", currentTerm-1, true) {
+		t.Fatal("expected vote from old term to be ignored")
+	}
+}
+
+func TestCandidateBecomesLeaderAfterMajority(t *testing.T) {
+	node := NewRaftNode("A")
+
+	node.becomeCandidate()
+
+	term := node.State().Persistent.CurrentTerm
+
+	if node.tryBecomeLeader(3) {
+		t.Fatal("candidate should not become leader with only one vote")
+	}
+
+	node.recordVote("B", term, true)
+
+	if !node.tryBecomeLeader(3) {
+		t.Fatal("candidate should become leader after majority")
+	}
+
+	state := node.State()
+
+	if state.Role != Leader {
+		t.Fatalf("expected Leader, got %v", state.Role)
+	}
+
+	if state.LeaderID != "A" {
+		t.Fatalf("expected leader A, got %q", state.LeaderID)
+	}
+}

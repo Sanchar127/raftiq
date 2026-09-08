@@ -19,6 +19,11 @@ type State struct {
 	Persistent PersistentState
 	Volatile   VolatileState
 	Leader     LeaderState
+	Election   ElectionState
 	Role       Role
 	LeaderID   NodeID
+}
+
+type ElectionState struct {
+	VotesReceived map[NodeID]struct{}
 }
