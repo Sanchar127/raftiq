@@ -563,3 +563,60 @@ func TestTickStartsElection(t *testing.T) {
 		t.Fatalf("expected A to vote for itself, got %q", state.Persistent.VotedFor)
 	}
 }
+
+func TestLeaderDoesNotStartElectionOnTimeout(t *testing.T) {
+	node := NewRaftNode("A")
+	node.SetPeers([]Peer{})
+
+	node.startElection()
+	node.tryBecomeLeader()
+
+	if node.State().Role != Leader {
+		t.Fatal("expected node to become Leader")
+	}
+
+	node.onElectionTimeout()
+
+	state := node.State()
+
+	if state.Role != Leader {
+		t.Fatalf("expected Leader to remain Leader, got %v", state.Role)
+	}
+
+	if state.Persistent.CurrentTerm != 1 {
+		t.Fatalf("expected term to remain 1, got %d", state.Persistent.CurrentTerm)
+	}
+}
+
+func TestElectionTimeoutStartsElection(t *testing.T) {
+	node := NewRaftNode("A")
+	node.SetElectionTimeout(3)
+
+	if node.Tick() {
+		t.Fatal("expected no timeout on first tick")
+	}
+
+	if node.Tick() {
+		t.Fatal("expected no timeout on second tick")
+	}
+
+	if !node.Tick() {
+		t.Fatal("expected timeout on third tick")
+	}
+
+	node.onElectionTimeout()
+
+	state := node.State()
+
+	if state.Role != Candidate {
+		t.Fatalf("expected Candidate, got %v", state.Role)
+	}
+
+	if state.Persistent.CurrentTerm != 1 {
+		t.Fatalf("expected term 1, got %d", state.Persistent.CurrentTerm)
+	}
+
+	if state.Persistent.VotedFor != "A" {
+		t.Fatalf("expected self-vote for A, got %q", state.Persistent.VotedFor)
+	}
+}

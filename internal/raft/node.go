@@ -296,3 +296,13 @@ func (n *RaftNode) SetElectionTimeout(timeout int) {
 
 	n.electionTimeout = timeout
 }
+func (n *RaftNode) onElectionTimeout() {
+	state := n.State()
+
+	if state.Role == Leader {
+		return
+	}
+
+	n.startElection()
+	n.requestVotes()
+}
