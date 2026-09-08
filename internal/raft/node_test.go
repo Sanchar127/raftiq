@@ -137,3 +137,91 @@ func TestBecomeFollower(t *testing.T) {
 		)
 	}
 }
+
+func TestRequestVoteGrantsVote(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	reply := node.RequestVote(RequestVoteArgs{
+		Term:         1,
+		CandidateID:  "node-2",
+		LastLogIndex: 0,
+		LastLogTerm:  0,
+	})
+
+	if !reply.VoteGranted {
+		t.Fatal("expected vote to be granted")
+	}
+
+	if reply.Term != 1 {
+		t.Fatalf("expected term 1, got %d", reply.Term)
+	}
+}
+
+func TestRequestVoteRejectsSecondCandidate(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	first := node.RequestVote(RequestVoteArgs{
+		Term:        1,
+		CandidateID: "node-2",
+	})
+
+	if !first.VoteGranted {
+		t.Fatal("expected first vote to be granted")
+	}
+
+	second := node.RequestVote(RequestVoteArgs{
+		Term:        1,
+		CandidateID: "node-3",
+	})
+
+	if second.VoteGranted {
+		t.Fatal("expected second vote to be rejected")
+	}
+}
+
+func TestRequestVoteRejectsOlderTerm(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	node.becomeCandidate()
+
+	reply := node.RequestVote(RequestVoteArgs{
+		Term:        0,
+		CandidateID: "node-2",
+	})
+
+	if reply.VoteGranted {
+		t.Fatal("expected older-term vote to be rejected")
+	}
+
+	if reply.Term != 1 {
+		t.Fatalf("expected current term 1, got %d", reply.Term)
+	}
+}
+
+func TestRequestVoteUpdatesHigherTerm(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	node.becomeCandidate()
+
+	reply := node.RequestVote(RequestVoteArgs{
+		Term:        2,
+		CandidateID: "node-2",
+	})
+
+	if !reply.VoteGranted {
+		t.Fatal("expected vote to be granted")
+	}
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 2 {
+		t.Fatalf(
+			"expected term 2, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Role != Follower {
+		t.Fatalf("expected follower role, got %v", state.Role)
+	}
+}

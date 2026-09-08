@@ -19,3 +19,15 @@ type LogEntry struct {
 	Term  Term
 	Data  []byte
 }
+
+type RequestVoteArgs struct {
+	Term         Term
+	CandidateID  NodeID
+	LastLogIndex LogIndex
+	LastLogTerm  Term
+}
+
+type RequestVoteReply struct {
+	Term        Term
+	VoteGranted bool
+}

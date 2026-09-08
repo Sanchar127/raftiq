@@ -81,3 +81,53 @@ func (n *RaftNode) becomeLeader() {
 	n.state.Role = Leader
 	n.state.LeaderID = n.id
 }
+
+func (n *RaftNode) RequestVote(args RequestVoteArgs) RequestVoteReply {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	reply := RequestVoteReply{
+		Term: n.state.Persistent.CurrentTerm,
+	}
+
+	if args.Term < n.state.Persistent.CurrentTerm {
+		return reply
+	}
+
+	if args.Term > n.state.Persistent.CurrentTerm {
+		n.state.Persistent.CurrentTerm = args.Term
+		n.state.Role = Follower
+		n.state.Persistent.VotedFor = ""
+		n.state.LeaderID = ""
+	}
+
+	reply.Term = n.state.Persistent.CurrentTerm
+
+	if n.state.Persistent.VotedFor != "" &&
+		n.state.Persistent.VotedFor != args.CandidateID {
+		return reply
+	}
+
+	if !n.isCandidateLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
+		return reply
+	}
+
+	n.state.Persistent.VotedFor = args.CandidateID
+	reply.VoteGranted = true
+
+	return reply
+}
+
+func (n *RaftNode) isCandidateLogUpToDate(
+	lastLogIndex LogIndex,
+	lastLogTerm Term,
+) bool {
+	localLastTerm := n.log.LastTerm()
+	localLastIndex := n.log.LastIndex()
+
+	if lastLogTerm != localLastTerm {
+		return lastLogTerm > localLastTerm
+	}
+
+	return lastLogIndex >= localLastIndex
+}
