@@ -280,3 +280,9 @@ func (n *RaftNode) handleVoteReply(electionTerm Term, reply RequestVoteReply) {
 
 	n.state.Election.VotesReceived[reply.VoterID] = struct{}{}
 }
+
+func (n *RaftNode) runElection() {
+	n.startElection()
+	n.requestVotes()
+	n.tryBecomeLeader()
+}

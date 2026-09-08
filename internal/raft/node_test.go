@@ -326,3 +326,30 @@ func TestCandidateBecomesLeaderAfterMajority(t *testing.T) {
 		t.Fatalf("expected leader A, got %q", state.LeaderID)
 	}
 }
+
+func TestThreeNodeElection(t *testing.T) {
+	nodeA := NewRaftNode("A")
+	nodeB := NewRaftNode("B")
+	nodeC := NewRaftNode("C")
+
+	nodeA.SetPeers([]Peer{nodeB, nodeC})
+
+	nodeA.runElection()
+
+	stateA := nodeA.State()
+
+	if stateA.Role != Leader {
+		t.Fatalf("expected A to become Leader, got %v", stateA.Role)
+	}
+
+	if stateA.LeaderID != "A" {
+		t.Fatalf("expected leader A, got %q", stateA.LeaderID)
+	}
+
+	if stateA.Persistent.CurrentTerm != 1 {
+		t.Fatalf(
+			"expected term 1, got %d",
+			stateA.Persistent.CurrentTerm,
+		)
+	}
+}
