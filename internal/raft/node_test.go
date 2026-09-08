@@ -453,3 +453,41 @@ func TestStaleElectionVoteReplyIsIgnored(t *testing.T) {
 		t.Fatal("stale vote from B should not have been counted")
 	}
 }
+
+func TestSplitVoteProducesNoLeader(t *testing.T) {
+	nodeA := NewRaftNode("A")
+	nodeB := NewRaftNode("B")
+	nodeC := NewRaftNode("C")
+
+	nodeA.SetPeers([]Peer{nodeB, nodeC})
+	nodeB.SetPeers([]Peer{nodeA, nodeC})
+	nodeC.SetPeers([]Peer{nodeA, nodeB})
+
+	nodeA.becomeCandidate()
+	nodeB.becomeCandidate()
+	nodeC.becomeCandidate()
+
+	if nodeA.tryBecomeLeader() {
+		t.Fatal("A should not become leader with only its own vote")
+	}
+
+	if nodeB.tryBecomeLeader() {
+		t.Fatal("B should not become leader with only its own vote")
+	}
+
+	if nodeC.tryBecomeLeader() {
+		t.Fatal("C should not become leader with only its own vote")
+	}
+
+	if nodeA.State().Role != Candidate {
+		t.Fatal("A should remain Candidate")
+	}
+
+	if nodeB.State().Role != Candidate {
+		t.Fatal("B should remain Candidate")
+	}
+
+	if nodeC.State().Role != Candidate {
+		t.Fatal("C should remain Candidate")
+	}
+}
