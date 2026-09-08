@@ -258,7 +258,7 @@ func (n *RaftNode) handleVoteReply(electionTerm Term, reply RequestVoteReply) {
 		n.state.Role = Follower
 		n.state.Persistent.VotedFor = ""
 		n.state.LeaderID = ""
-
+		n.state.Election.VotesReceived = make(map[NodeID]struct{})
 		return
 	}
 

@@ -353,3 +353,103 @@ func TestThreeNodeElection(t *testing.T) {
 		)
 	}
 }
+
+func TestHigherTermVoteReplyMakesCandidateFollower(t *testing.T) {
+	node := NewRaftNode("A")
+
+	node.becomeCandidate()
+
+	currentTerm := node.State().Persistent.CurrentTerm
+
+	node.recordVote("B", currentTerm, true)
+
+	reply := RequestVoteReply{
+		Term:        currentTerm + 1,
+		VoterID:     "C",
+		VoteGranted: false,
+	}
+
+	node.handleVoteReply(currentTerm, reply)
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != currentTerm+1 {
+		t.Fatalf(
+			"expected term %d, got %d",
+			currentTerm+1,
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Role != Follower {
+		t.Fatalf("expected Follower, got %v", state.Role)
+	}
+
+	if state.Persistent.VotedFor != "" {
+		t.Fatalf(
+			"expected VotedFor to be empty, got %q",
+			state.Persistent.VotedFor,
+		)
+	}
+
+	if state.LeaderID != "" {
+		t.Fatalf(
+			"expected LeaderID to be empty, got %q",
+			state.LeaderID,
+		)
+	}
+
+	if len(state.Election.VotesReceived) != 0 {
+		t.Fatalf(
+			"expected election votes to be cleared, got %d",
+			len(state.Election.VotesReceived),
+		)
+	}
+}
+
+func TestStaleElectionVoteReplyIsIgnored(t *testing.T) {
+	node := NewRaftNode("A")
+
+	node.becomeCandidate()
+
+	oldTerm := node.State().Persistent.CurrentTerm
+
+	// Start a new election.
+	node.becomeCandidate()
+
+	currentTerm := node.State().Persistent.CurrentTerm
+
+	if currentTerm != oldTerm+1 {
+		t.Fatalf(
+			"expected current term %d, got %d",
+			oldTerm+1,
+			currentTerm,
+		)
+	}
+
+	// Response from the old election.
+	reply := RequestVoteReply{
+		Term:        oldTerm,
+		VoterID:     "B",
+		VoteGranted: true,
+	}
+
+	node.handleVoteReply(oldTerm, reply)
+
+	state := node.State()
+
+	if state.Role != Candidate {
+		t.Fatalf("expected Candidate, got %v", state.Role)
+	}
+
+	if len(state.Election.VotesReceived) != 1 {
+		t.Fatalf(
+			"expected only self vote, got %d votes",
+			len(state.Election.VotesReceived),
+		)
+	}
+
+	if _, ok := state.Election.VotesReceived["B"]; ok {
+		t.Fatal("stale vote from B should not have been counted")
+	}
+}
