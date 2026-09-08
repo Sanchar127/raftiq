@@ -12,12 +12,15 @@ type RaftNode struct {
 
 	electionElapsed int
 	electionTimeout int
+
+	applyCh chan LogEntry
 }
 
 func NewRaftNode(id NodeID) *RaftNode {
 	return &RaftNode{
-		id:    id,
-		peers: make([]Peer, 0),
+		id:      id,
+		peers:   make([]Peer, 0),
+		applyCh: make(chan LogEntry, 100),
 		state: State{
 			Persistent: PersistentState{
 				CurrentTerm: 0,
@@ -382,4 +385,24 @@ func (n *RaftNode) AppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 	reply.Success = true
 
 	return reply
+}
+func (n *RaftNode) ApplyCh() <-chan LogEntry {
+	return n.applyCh
+}
+
+func (n *RaftNode) applyCommitted() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	for n.state.Volatile.LastApplied < n.state.Volatile.CommitIndex {
+		nextIndex := n.state.Volatile.LastApplied + 1
+
+		entry, ok := n.log.Get(nextIndex)
+		if !ok {
+			return
+		}
+
+		n.applyCh <- entry
+		n.state.Volatile.LastApplied = nextIndex
+	}
 }
