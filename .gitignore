@@ -1,0 +1,90 @@
+# =========================
+# Go
+# =========================
+bin/
+dist/
+build/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Go workspace
+go.work
+go.work.sum
+
+# =========================
+# IDE
+# =========================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Environment / Secrets
+# =========================
+.env
+.env.*
+!.env.example
+
+*.pem
+*.key
+*.crt
+secrets/
+credentials/
+
+# =========================
+# Runtime data
+# =========================
+data/
+wal/
+snapshots/
+logs/
+tmp/
+temp/
+
+# =========================
+# Docker
+# =========================
+docker-data/
+
+# =========================
+# Python / tooling
+# =========================
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+
+# =========================
+# Profiling / benchmarks
+# =========================
+*.prof
+*.pprof
+*.bench
+benchmarks/results/
+
+# =========================
+# Generated files
+# =========================
+*.gen.go
+*.pb.go
+*.pb.gw.go
