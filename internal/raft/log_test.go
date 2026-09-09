@@ -290,3 +290,191 @@ func TestLogCompactRejectsFutureSnapshot(t *testing.T) {
 		)
 	}
 }
+
+func TestLogCompactRejectsSnapshotRollback(t *testing.T) {
+	log := NewLog()
+
+	for i := LogIndex(1); i <= 5; i++ {
+		if err := log.Append(LogEntry{
+			Index: i,
+			Term:  1,
+		}); err != nil {
+			t.Fatalf("append failed: %v", err)
+		}
+	}
+
+	if err := log.Compact(model.Snapshot{
+		LastIncludedIndex: 4,
+		LastIncludedTerm:  1,
+	}); err != nil {
+		t.Fatalf("initial compact failed: %v", err)
+	}
+
+	err := log.Compact(model.Snapshot{
+		LastIncludedIndex: 3,
+		LastIncludedTerm:  1,
+	})
+
+	if err == nil {
+		t.Fatal("expected snapshot rollback to be rejected")
+	}
+
+	if log.LastIncludedIndex() != 4 {
+		t.Fatalf(
+			"snapshot boundary changed after rejected rollback: got %d",
+			log.LastIncludedIndex(),
+		)
+	}
+}
+
+func TestLogCompactRejectsTermMismatch(t *testing.T) {
+	log := NewLog()
+
+	for i := LogIndex(1); i <= 5; i++ {
+		if err := log.Append(LogEntry{
+			Index: i,
+			Term:  Term(i),
+		}); err != nil {
+			t.Fatalf("append failed: %v", err)
+		}
+	}
+
+	err := log.Compact(model.Snapshot{
+		LastIncludedIndex: 3,
+		LastIncludedTerm:  99,
+	})
+
+	if err == nil {
+		t.Fatal("expected snapshot term mismatch to be rejected")
+	}
+
+	if log.LastIncludedIndex() != 0 {
+		t.Fatalf(
+			"log changed after rejected term mismatch: snapshot index = %d",
+			log.LastIncludedIndex(),
+		)
+	}
+}
+
+func TestLogTruncateFromDoesNotRemoveSnapshotBoundary(t *testing.T) {
+	log := NewLog()
+
+	for i := LogIndex(1); i <= 5; i++ {
+		if err := log.Append(LogEntry{
+			Index: i,
+			Term:  1,
+		}); err != nil {
+			t.Fatalf("append failed: %v", err)
+		}
+	}
+
+	if err := log.Compact(model.Snapshot{
+		LastIncludedIndex: 3,
+		LastIncludedTerm:  1,
+	}); err != nil {
+		t.Fatalf("compact failed: %v", err)
+	}
+
+	log.TruncateFrom(3)
+
+	if log.LastIncludedIndex() != 3 {
+		t.Fatalf(
+			"snapshot boundary was removed: got %d",
+			log.LastIncludedIndex(),
+		)
+	}
+
+	entry, ok := log.Get(3)
+	if !ok {
+		t.Fatal("snapshot boundary should still exist")
+	}
+
+	if entry.Term != 1 {
+		t.Fatalf("expected boundary term 1, got %d", entry.Term)
+	}
+
+	if log.LastIndex() != 5 {
+		t.Fatalf(
+			"expected entries after snapshot to remain, got last index %d",
+			log.LastIndex(),
+		)
+	}
+
+	if _, ok := log.Get(4); !ok {
+		t.Fatal("entry 4 should remain after protected truncation")
+	}
+
+	if _, ok := log.Get(5); !ok {
+		t.Fatal("entry 5 should remain after protected truncation")
+	}
+}
+
+func TestLogTruncateFromBeforeSnapshotDoesNotRemoveBoundary(t *testing.T) {
+	log := NewLog()
+
+	for i := LogIndex(1); i <= 5; i++ {
+		if err := log.Append(LogEntry{
+			Index: i,
+			Term:  1,
+		}); err != nil {
+			t.Fatalf("append failed: %v", err)
+		}
+	}
+
+	if err := log.Compact(model.Snapshot{
+		LastIncludedIndex: 3,
+		LastIncludedTerm:  1,
+	}); err != nil {
+		t.Fatalf("compact failed: %v", err)
+	}
+
+	log.TruncateFrom(1)
+
+	if log.LastIncludedIndex() != 3 {
+		t.Fatalf(
+			"snapshot boundary changed: got %d",
+			log.LastIncludedIndex(),
+		)
+	}
+
+	if _, ok := log.Get(3); !ok {
+		t.Fatal("snapshot boundary should still exist")
+	}
+}
+
+func TestLogCompactSameSnapshotIsIdempotent(t *testing.T) {
+	log := NewLog()
+
+	for i := LogIndex(1); i <= 5; i++ {
+		if err := log.Append(LogEntry{
+			Index: i,
+			Term:  2,
+		}); err != nil {
+			t.Fatalf("append failed: %v", err)
+		}
+	}
+
+	snapshot := model.Snapshot{
+		LastIncludedIndex: 3,
+		LastIncludedTerm:  2,
+	}
+
+	if err := log.Compact(snapshot); err != nil {
+		t.Fatalf("first compact failed: %v", err)
+	}
+
+	if err := log.Compact(snapshot); err != nil {
+		t.Fatalf("second identical compact should succeed: %v", err)
+	}
+
+	if log.LastIncludedIndex() != 3 {
+		t.Fatalf(
+			"expected snapshot index 3, got %d",
+			log.LastIncludedIndex(),
+		)
+	}
+
+	if log.LastIndex() != 5 {
+		t.Fatalf("expected last index 5, got %d", log.LastIndex())
+	}
+}

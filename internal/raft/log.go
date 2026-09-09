@@ -56,6 +56,10 @@ func (l *Log) TruncateFrom(index LogIndex) {
 		return
 	}
 
+	if index <= l.lastIncludedIndex {
+		return
+	}
+
 	for i, entry := range l.entries {
 		if entry.Index >= index {
 			l.entries = l.entries[:i]
@@ -73,11 +77,49 @@ func (l *Log) LastIncludedTerm() Term {
 }
 
 func (l *Log) Compact(snapshot model.Snapshot) error {
+	if snapshot.LastIncludedIndex < l.lastIncludedIndex {
+		return fmt.Errorf(
+			"cannot move snapshot backwards: current %d, requested %d",
+			l.lastIncludedIndex,
+			snapshot.LastIncludedIndex,
+		)
+	}
+
 	if snapshot.LastIncludedIndex > l.LastIndex() {
 		return fmt.Errorf(
 			"cannot compact beyond last log index: snapshot %d, last index %d",
 			snapshot.LastIncludedIndex,
 			l.LastIndex(),
+		)
+	}
+
+	if snapshot.LastIncludedIndex == l.lastIncludedIndex {
+		if snapshot.LastIncludedTerm != l.lastIncludedTerm {
+			return fmt.Errorf(
+				"snapshot term mismatch at index %d: current term %d, requested term %d",
+				snapshot.LastIncludedIndex,
+				l.lastIncludedTerm,
+				snapshot.LastIncludedTerm,
+			)
+		}
+
+		return nil
+	}
+
+	entry, ok := l.Get(snapshot.LastIncludedIndex)
+	if !ok {
+		return fmt.Errorf(
+			"cannot compact: snapshot boundary index %d not found",
+			snapshot.LastIncludedIndex,
+		)
+	}
+
+	if entry.Term != snapshot.LastIncludedTerm {
+		return fmt.Errorf(
+			"snapshot term mismatch at index %d: log term %d, snapshot term %d",
+			snapshot.LastIncludedIndex,
+			entry.Term,
+			snapshot.LastIncludedTerm,
 		)
 	}
 
