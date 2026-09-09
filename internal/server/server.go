@@ -2,10 +2,10 @@ package server
 
 import (
 	"context"
-	"sync"
 	"fmt"
 	"github.com/sanchar127/raftiq/internal/kv"
 	"github.com/sanchar127/raftiq/internal/raft"
+	"sync"
 )
 
 type Server struct {
@@ -47,7 +47,6 @@ func (s *Server) Stop() {
 	s.wg.Wait()
 }
 
-
 func (s *Server) Get(ctx context.Context, key string) ([]byte, bool, error) {
 	commandData, err := kv.EncodeCommand(kv.Command{
 		Type: kv.CommandReadBarrier,
@@ -61,7 +60,7 @@ func (s *Server) Get(ctx context.Context, key string) ([]byte, bool, error) {
 		return nil, false, err
 	}
 
-	if err := s.raft.WaitApplied(ctx, index); err != nil {
+	if err := s.applier.WaitApplied(ctx, index); err != nil {
 		return nil, false, fmt.Errorf("wait for read barrier: %w", err)
 	}
 

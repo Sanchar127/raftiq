@@ -1,10 +1,10 @@
 package raft
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
-	"context"
 
 	"github.com/sanchar127/raftiq/internal/storage"
 )
@@ -89,10 +89,7 @@ func (n *RaftNode) becomeFollower(term Term) error {
 	return nil
 }
 
-func (n *RaftNode) becomeLeader() {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
+func (n *RaftNode) becomeLeaderLocked() {
 	n.state.Role = Leader
 	n.state.LeaderID = n.id
 	n.heartbeatElapsed = 0
@@ -105,6 +102,13 @@ func (n *RaftNode) becomeLeader() {
 		n.state.Leader.NextIndex[peerID] = nextIndex
 		n.state.Leader.MatchIndex[peerID] = 0
 	}
+}
+
+func (n *RaftNode) becomeLeader() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.becomeLeaderLocked()
 }
 
 func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
@@ -254,8 +258,7 @@ func (n *RaftNode) tryBecomeLeader() bool {
 		return false
 	}
 
-	n.state.Role = Leader
-	n.state.LeaderID = n.id
+	n.becomeLeaderLocked()
 
 	return true
 }
@@ -346,7 +349,10 @@ func (n *RaftNode) handleVoteReply(electionTerm Term, reply RequestVoteReply) {
 }
 
 func (n *RaftNode) runElection() {
-	n.startElection()
+	if _, err := n.startElection(); err != nil {
+		return
+	}
+
 	n.requestVotes()
 	n.tryBecomeLeader()
 }
