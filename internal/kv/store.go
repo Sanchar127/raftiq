@@ -103,10 +103,11 @@ func (s *Store) GetLock(key string) (lock.Lock, bool) {
 }
 
 type snapshotState struct {
-	Version   uint64               `json:"version"`
-	Data      map[string][]byte    `json:"data"`
-	Locks     map[string]lock.Lock `json:"locks"`
-	NextToken uint64               `json:"next_token"`
+	Version   uint64                 `json:"version"`
+	Data      map[string][]byte      `json:"data"`
+	Locks     map[string]lock.Lock   `json:"locks"`
+	NextToken uint64                 `json:"next_token"`
+	Fenced    map[string]FencedValue `json:"fenced"`
 }
 
 const snapshotVersion uint64 = 1
@@ -127,11 +128,21 @@ func (s *Store) Snapshot() ([]byte, error) {
 		locks[key] = value
 	}
 
+	fenced := make(map[string]FencedValue, len(s.fenced))
+
+	for key, value := range s.fenced {
+		fenced[key] = FencedValue{
+			Value:        append([]byte(nil), value.Value...),
+			FencingToken: value.FencingToken,
+		}
+	}
+
 	snapshot := snapshotState{
 		Version:   snapshotVersion,
 		Data:      data,
 		Locks:     locks,
 		NextToken: s.locks.NextToken,
+		Fenced:    fenced,
 	}
 
 	result, err := json.Marshal(snapshot)
@@ -181,8 +192,13 @@ func (s *Store) Restore(data []byte) error {
 			snapshot.Locks = make(map[string]lock.Lock)
 		}
 
+		if snapshot.Fenced == nil {
+			snapshot.Fenced = make(map[string]FencedValue)
+		}
+
 		restoredData := cloneData(snapshot.Data)
 		restoredLocks := cloneLocks(snapshot.Locks)
+		restoredFenced := cloneFenced(snapshot.Fenced)
 
 		s.mu.Lock()
 		s.data = restoredData
@@ -190,6 +206,7 @@ func (s *Store) Restore(data []byte) error {
 			Locks:     restoredLocks,
 			NextToken: snapshot.NextToken,
 		}
+		s.fenced = restoredFenced
 		s.mu.Unlock()
 
 		return nil
@@ -213,6 +230,7 @@ func (s *Store) Restore(data []byte) error {
 
 	// Legacy snapshots contain no lock state.
 	s.locks = lock.NewState()
+	s.fenced = make(map[string]FencedValue)
 
 	s.mu.Unlock()
 
@@ -321,4 +339,18 @@ func (s *Store) GetFenced(key string) (FencedValue, bool) {
 
 	current.Value = append([]byte(nil), current.Value...)
 	return current, true
+}
+func cloneFenced(
+	fenced map[string]FencedValue,
+) map[string]FencedValue {
+	result := make(map[string]FencedValue, len(fenced))
+
+	for key, value := range fenced {
+		result[key] = FencedValue{
+			Value:        append([]byte(nil), value.Value...),
+			FencingToken: value.FencingToken,
+		}
+	}
+
+	return result
 }
