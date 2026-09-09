@@ -1,10 +1,11 @@
 package raft
 
 import (
+	"errors"
+	"github.com/sanchar127/raftiq/internal/model"
+	"github.com/sanchar127/raftiq/internal/storage"
 	"testing"
 	"time"
-
-	"github.com/sanchar127/raftiq/internal/storage"
 )
 
 func TestNewRaftNode(t *testing.T) {
@@ -1463,5 +1464,113 @@ func TestAppendEntriesHigherTermPersistsAcrossRestart(t *testing.T) {
 
 	if state.Role != Follower {
 		t.Fatalf("expected restored node to be follower, got %v", state.Role)
+	}
+}
+
+type failingStateStorage struct {
+	*storage.MemoryStorage
+
+	saveStateErr error
+	syncErr      error
+}
+
+func (s *failingStateStorage) SaveState(
+	state model.PersistentState,
+) error {
+	if s.saveStateErr != nil {
+		return s.saveStateErr
+	}
+
+	return s.MemoryStorage.SaveState(state)
+}
+
+func (s *failingStateStorage) Sync() error {
+	if s.syncErr != nil {
+		return s.syncErr
+	}
+
+	return s.MemoryStorage.Sync()
+}
+
+func TestAppendEntriesHigherTermSaveStateFailure(t *testing.T) {
+	baseStore := storage.NewMemoryStorage()
+
+	initialState := model.PersistentState{
+		CurrentTerm: 2,
+		VotedFor:    "old-candidate",
+	}
+
+	if err := baseStore.SaveState(initialState); err != nil {
+		t.Fatalf("save initial state: %v", err)
+	}
+
+	store := &failingStateStorage{
+		MemoryStorage: baseStore,
+		saveStateErr:  errors.New("injected SaveState failure"),
+	}
+
+	node, err := NewRaftNodeWithStorage("follower", store)
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	reply := node.AppendEntries(AppendEntriesArgs{
+		Term:     5,
+		LeaderID: "leader",
+	})
+
+	if reply.Success {
+		t.Fatal("expected AppendEntries to fail when higher-term persistence fails")
+	}
+
+	persisted, err := baseStore.LoadState()
+	if err != nil {
+		t.Fatalf("load persisted state: %v", err)
+	}
+
+	if persisted.CurrentTerm != 2 {
+		t.Fatalf(
+			"expected persisted term to remain 2, got %d",
+			persisted.CurrentTerm,
+		)
+	}
+
+	if persisted.VotedFor != "old-candidate" {
+		t.Fatalf(
+			"expected persisted vote to remain old-candidate, got %q",
+			persisted.VotedFor,
+		)
+	}
+}
+
+func TestAppendEntriesHigherTermSyncFailure(t *testing.T) {
+	baseStore := storage.NewMemoryStorage()
+
+	initialState := model.PersistentState{
+		CurrentTerm: 2,
+		VotedFor:    "old-candidate",
+	}
+
+	if err := baseStore.SaveState(initialState); err != nil {
+		t.Fatalf("save initial state: %v", err)
+	}
+
+	store := &failingStateStorage{
+		MemoryStorage: baseStore,
+		syncErr:       errors.New("injected Sync failure"),
+	}
+
+	node, err := NewRaftNodeWithStorage("follower", store)
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	reply := node.AppendEntries(AppendEntriesArgs{
+		Term:     5,
+		LeaderID: "leader",
+	})
+
+	if reply.Success {
+		t.Fatal("expected AppendEntries to fail when higher-term sync fails")
 	}
 }
