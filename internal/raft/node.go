@@ -864,7 +864,6 @@ func NewRaftNodeWithStorage(
 	}, nil
 }
 
-
 func (n *RaftNode) Storage() storage.Storage {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
