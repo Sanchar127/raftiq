@@ -10,6 +10,7 @@ const (
 	CommandReadBarrier CommandType = "READ_BARRIER"
 
 	CommandLockAcquire CommandType = "LOCK_ACQUIRE"
+	CommandLockExpire  CommandType = "LOCK_EXPIRE"
 )
 
 type Command struct {
@@ -17,8 +18,9 @@ type Command struct {
 	Key   string      `json:"key"`
 	Value []byte      `json:"value,omitempty"`
 
-	OwnerID   string `json:"owner_id,omitempty"`
-	ExpiresAt int64  `json:"expires_at,omitempty"`
+	OwnerID      string `json:"owner_id,omitempty"`
+	ExpiresAt    int64  `json:"expires_at,omitempty"`
+	FencingToken uint64 `json:"fencing_token,omitempty"`
 }
 
 func EncodeCommand(command Command) ([]byte, error) {

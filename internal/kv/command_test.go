@@ -99,3 +99,45 @@ func TestApplyDelete(t *testing.T) {
 		t.Fatal("expected key to be deleted")
 	}
 }
+
+func TestEncodeDecodeLockExpireCommand(t *testing.T) {
+	original := Command{
+		Type:         CommandLockExpire,
+		Key:          "job-1",
+		FencingToken: 41,
+	}
+
+	data, err := EncodeCommand(original)
+	if err != nil {
+		t.Fatalf("encode command: %v", err)
+	}
+
+	decoded, err := DecodeCommand(data)
+	if err != nil {
+		t.Fatalf("decode command: %v", err)
+	}
+
+	if decoded.Type != CommandLockExpire {
+		t.Fatalf(
+			"expected command type %q, got %q",
+			CommandLockExpire,
+			decoded.Type,
+		)
+	}
+
+	if decoded.Key != original.Key {
+		t.Fatalf(
+			"expected key %q, got %q",
+			original.Key,
+			decoded.Key,
+		)
+	}
+
+	if decoded.FencingToken != original.FencingToken {
+		t.Fatalf(
+			"expected fencing token %d, got %d",
+			original.FencingToken,
+			decoded.FencingToken,
+		)
+	}
+}

@@ -40,6 +40,19 @@ func Apply(store *Store, entry raft.LogEntry) error {
 			)
 		}
 
+	case CommandLockExpire:
+		_, _, err := store.ExpireLock(
+			command.Key,
+			command.FencingToken,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"expire lock %q: %w",
+				command.Key,
+				err,
+			)
+		}
+
 	default:
 		return fmt.Errorf(
 			"unknown command type %q",

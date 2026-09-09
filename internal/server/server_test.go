@@ -365,3 +365,135 @@ func TestServerAcquireLockFencingTokensAreGlobal(t *testing.T) {
 		)
 	}
 }
+
+func TestStoreExpireLock(t *testing.T) {
+	store := kv.NewStore()
+
+	acquired, ok, err := store.AcquireLock(
+		"job-1",
+		"worker-a",
+		time.Now().Add(time.Minute).UnixNano(),
+		10,
+	)
+	if err != nil {
+		t.Fatalf("acquire lock: %v", err)
+	}
+
+	if !ok {
+		t.Fatal("expected lock acquisition")
+	}
+
+	if acquired.FencingToken != 1 {
+		t.Fatalf(
+			"expected fencing token 1, got %d",
+			acquired.FencingToken,
+		)
+	}
+
+	expired, ok, err := store.ExpireLock(
+		"job-1",
+		1,
+	)
+	if err != nil {
+		t.Fatalf("expire lock: %v", err)
+	}
+
+	if !ok {
+		t.Fatal("expected lock expiration")
+	}
+
+	if expired.FencingToken != 1 {
+		t.Fatalf(
+			"expected expired token 1, got %d",
+			expired.FencingToken,
+		)
+	}
+
+	if _, ok := store.GetLock("job-1"); ok {
+		t.Fatal("expected lock to be removed")
+	}
+}
+
+func TestStoreExpireLockRejectsStaleToken(t *testing.T) {
+	store := kv.NewStore()
+
+	first, ok, err := store.AcquireLock(
+		"job-1",
+		"worker-a",
+		time.Now().Add(time.Minute).UnixNano(),
+		10,
+	)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+
+	if !ok {
+		t.Fatal("expected first acquisition")
+	}
+
+	_, ok, err = store.ExpireLock(
+		"job-1",
+		first.FencingToken,
+	)
+	if err != nil {
+		t.Fatalf("first expire: %v", err)
+	}
+
+	if !ok {
+		t.Fatal("expected first expiration")
+	}
+
+	second, ok, err := store.AcquireLock(
+		"job-1",
+		"worker-b",
+		time.Now().Add(time.Minute).UnixNano(),
+		20,
+	)
+	if err != nil {
+		t.Fatalf("second acquire: %v", err)
+	}
+
+	if !ok {
+		t.Fatal("expected second acquisition")
+	}
+
+	if second.FencingToken != 2 {
+		t.Fatalf(
+			"expected fencing token 2, got %d",
+			second.FencingToken,
+		)
+	}
+
+	// Simulate an old expiration arriving late.
+	_, expired, err := store.ExpireLock(
+		"job-1",
+		first.FencingToken,
+	)
+	if err != nil {
+		t.Fatalf("stale expire: %v", err)
+	}
+
+	if expired {
+		t.Fatal("stale expiration must not remove the new lock")
+	}
+
+	current, ok := store.GetLock("job-1")
+	if !ok {
+		t.Fatal("expected new lock to remain")
+	}
+
+	if current.OwnerID != "worker-b" {
+		t.Fatalf(
+			"expected worker-b, got %s",
+			current.OwnerID,
+		)
+	}
+
+	if current.FencingToken != second.FencingToken {
+		t.Fatalf(
+			"expected token %d, got %d",
+			second.FencingToken,
+			current.FencingToken,
+		)
+	}
+}

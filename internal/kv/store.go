@@ -235,3 +235,25 @@ func cloneLocks(
 
 	return result
 }
+
+func (s *Store) ExpireLock(
+	key string,
+	expectedToken uint64,
+) (lock.Lock, bool, error) {
+	if key == "" {
+		return lock.Lock{}, false, lock.ErrInvalidKey
+	}
+
+	if expectedToken == 0 {
+		return lock.Lock{}, false, fmt.Errorf(
+			"invalid fencing token",
+		)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result, expired := s.locks.Expire(key, expectedToken)
+
+	return result, expired, nil
+}

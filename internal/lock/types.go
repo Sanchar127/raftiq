@@ -52,3 +52,20 @@ func (s *State) Acquire(
 
 	return lock, true
 }
+func (s *State) Expire(
+	key string,
+	expectedToken uint64,
+) (Lock, bool) {
+	current, exists := s.Locks[key]
+	if !exists {
+		return Lock{}, false
+	}
+
+	if current.FencingToken != expectedToken {
+		return current, false
+	}
+
+	delete(s.Locks, key)
+
+	return current, true
+}
