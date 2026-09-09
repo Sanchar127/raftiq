@@ -93,3 +93,42 @@ func waitForLeader(t *testing.T, node *raft.RaftNode) {
 
 	t.Fatalf("node %s did not become leader", node.ID())
 }
+
+func TestServerPutAndGet(t *testing.T) {
+	nodeA := raft.NewRaftNode("A")
+	nodeB := raft.NewRaftNode("B")
+	nodeC := raft.NewRaftNode("C")
+
+	nodeA.SetPeers([]raft.Peer{nodeB, nodeC})
+
+	store := kv.NewStore()
+	server := NewServer(nodeA, store)
+
+	nodeA.Start()
+	defer nodeA.Stop()
+
+	server.Start()
+	defer server.Stop()
+
+	waitForLeader(t, nodeA)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := server.Put(ctx, "name", []byte("raftiq")); err != nil {
+		t.Fatalf("Put() returned error: %v", err)
+	}
+
+	value, ok, err := server.Get(ctx, "name")
+	if err != nil {
+		t.Fatalf("Get() returned error: %v", err)
+	}
+
+	if !ok {
+		t.Fatal("expected key to exist")
+	}
+
+	if string(value) != "raftiq" {
+		t.Fatalf("expected value %q, got %q", "raftiq", string(value))
+	}
+}

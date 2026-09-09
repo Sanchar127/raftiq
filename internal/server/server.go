@@ -68,3 +68,53 @@ func (s *Server) Get(ctx context.Context, key string) ([]byte, bool, error) {
 
 	return value, ok, nil
 }
+
+func (s *Server) Put(
+	ctx context.Context,
+	key string,
+	value []byte,
+) error {
+	commandData, err := kv.EncodeCommand(kv.Command{
+		Type:  kv.CommandPut,
+		Key:   key,
+		Value: append([]byte(nil), value...),
+	})
+	if err != nil {
+		return fmt.Errorf("encode put command: %w", err)
+	}
+
+	index, err := s.raft.Propose(commandData)
+	if err != nil {
+		return fmt.Errorf("propose put command: %w", err)
+	}
+
+	if err := s.applier.WaitApplied(ctx, index); err != nil {
+		return fmt.Errorf("wait for put application: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Server) Delete(
+	ctx context.Context,
+	key string,
+) error {
+	commandData, err := kv.EncodeCommand(kv.Command{
+		Type: kv.CommandDelete,
+		Key:  key,
+	})
+	if err != nil {
+		return fmt.Errorf("encode delete command: %w", err)
+	}
+
+	index, err := s.raft.Propose(commandData)
+	if err != nil {
+		return fmt.Errorf("propose delete command: %w", err)
+	}
+
+	if err := s.applier.WaitApplied(ctx, index); err != nil {
+		return fmt.Errorf("wait for delete application: %w", err)
+	}
+
+	return nil
+}
