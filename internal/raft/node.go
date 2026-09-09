@@ -25,8 +25,9 @@ type RaftNode struct {
 
 	storage storage.Storage
 
-	electionElapsed int
-	electionTimeout int
+	electionElapsed  int
+	electionTimeout  int
+	electionInFlight bool
 
 	heartbeatElapsed int
 	heartbeatTimeout int
@@ -889,8 +890,31 @@ func (n *RaftNode) runTick() {
 	}
 
 	if electionDue {
-		go n.runElection()
+		n.startElectionIfNeeded()
 	}
+}
+
+func (n *RaftNode) startElectionIfNeeded() {
+	n.runMu.Lock()
+
+	if n.electionInFlight {
+		n.runMu.Unlock()
+		return
+	}
+
+	n.electionInFlight = true
+
+	n.runMu.Unlock()
+
+	go func() {
+		defer func() {
+			n.runMu.Lock()
+			n.electionInFlight = false
+			n.runMu.Unlock()
+		}()
+
+		n.runElection()
+	}()
 }
 
 func (n *RaftNode) Stop() {

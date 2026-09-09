@@ -2066,3 +2066,17 @@ func TestRaftNodeCanRestart(t *testing.T) {
 	require.NoError(t, node.Start())
 	node.Stop()
 }
+func TestStartElectionIfNeededPreventsDuplicateElection(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	node.runMu.Lock()
+	node.electionInFlight = true
+	node.runMu.Unlock()
+
+	node.startElectionIfNeeded()
+
+	node.runMu.Lock()
+	defer node.runMu.Unlock()
+
+	require.True(t, node.electionInFlight)
+}
