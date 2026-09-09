@@ -9,7 +9,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/sanchar127/raftiq/internal/raft"
+	"github.com/sanchar127/raftiq/internal/model"
 )
 
 const (
@@ -21,8 +21,8 @@ const (
 type WALStorage struct {
 	mu      sync.RWMutex
 	file    *os.File
-	state   raft.PersistentState
-	entries []raft.LogEntry
+	state   model.PersistentState
+	entries []model.LogEntry
 }
 
 func OpenWAL(path string) (*WALStorage, error) {
@@ -37,7 +37,7 @@ func OpenWAL(path string) (*WALStorage, error) {
 
 	storage := &WALStorage{
 		file:    file,
-		entries: make([]raft.LogEntry, 0),
+		entries: make([]model.LogEntry, 0),
 	}
 
 	if err := storage.recover(); err != nil {
@@ -49,7 +49,7 @@ func OpenWAL(path string) (*WALStorage, error) {
 	return storage, nil
 }
 
-func (s *WALStorage) SaveState(state raft.PersistentState) error {
+func (s *WALStorage) SaveState(state model.PersistentState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -67,14 +67,14 @@ func (s *WALStorage) SaveState(state raft.PersistentState) error {
 	return nil
 }
 
-func (s *WALStorage) LoadState() (raft.PersistentState, error) {
+func (s *WALStorage) LoadState() (model.PersistentState, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	return s.state, nil
 }
 
-func (s *WALStorage) AppendEntries(entries []raft.LogEntry) error {
+func (s *WALStorage) AppendEntries(entries []model.LogEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -99,11 +99,11 @@ func (s *WALStorage) AppendEntries(entries []raft.LogEntry) error {
 	return nil
 }
 
-func (s *WALStorage) LoadEntries() ([]raft.LogEntry, error) {
+func (s *WALStorage) LoadEntries() ([]model.LogEntry, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	entries := make([]raft.LogEntry, len(s.entries))
+	entries := make([]model.LogEntry, len(s.entries))
 
 	for i, entry := range s.entries {
 		entries[i] = entry
@@ -193,7 +193,7 @@ func (s *WALStorage) recover() error {
 	return nil
 }
 
-func encodeStateRecord(state raft.PersistentState) ([]byte, error) {
+func encodeStateRecord(state model.PersistentState) ([]byte, error) {
 	var payload bytes.Buffer
 
 	if err := binary.Write(
@@ -221,7 +221,7 @@ func encodeStateRecord(state raft.PersistentState) ([]byte, error) {
 	return encodeRecord(recordState, payload.Bytes())
 }
 
-func encodeEntriesRecord(entries []raft.LogEntry) ([]byte, error) {
+func encodeEntriesRecord(entries []model.LogEntry) ([]byte, error) {
 	var payload bytes.Buffer
 
 	if err := binary.Write(
@@ -373,13 +373,16 @@ func decodeRecord(reader io.Reader) (byte, []byte, error) {
 	return recordType[0], payload, nil
 }
 
-func decodeStatePayload(payload []byte) (raft.PersistentState, error) {
+func decodeStatePayload(payload []byte) (model.PersistentState, error) {
 	reader := bytes.NewReader(payload)
 
 	var term uint64
 
 	if err := binary.Read(reader, binary.BigEndian, &term); err != nil {
-		return raft.PersistentState{}, fmt.Errorf("decode current term: %w", err)
+		return model.PersistentState{}, fmt.Errorf(
+			"decode current term: %w",
+			err,
+		)
 	}
 
 	var votedForLength uint32
@@ -389,7 +392,7 @@ func decodeStatePayload(payload []byte) (raft.PersistentState, error) {
 		binary.BigEndian,
 		&votedForLength,
 	); err != nil {
-		return raft.PersistentState{}, fmt.Errorf(
+		return model.PersistentState{}, fmt.Errorf(
 			"decode voted-for length: %w",
 			err,
 		)
@@ -398,26 +401,26 @@ func decodeStatePayload(payload []byte) (raft.PersistentState, error) {
 	votedFor := make([]byte, votedForLength)
 
 	if _, err := io.ReadFull(reader, votedFor); err != nil {
-		return raft.PersistentState{}, fmt.Errorf(
+		return model.PersistentState{}, fmt.Errorf(
 			"decode voted-for: %w",
 			err,
 		)
 	}
 
 	if reader.Len() != 0 {
-		return raft.PersistentState{}, fmt.Errorf(
+		return model.PersistentState{}, fmt.Errorf(
 			"unexpected trailing state data: %d bytes",
 			reader.Len(),
 		)
 	}
 
-	return raft.PersistentState{
-		CurrentTerm: raft.Term(term),
-		VotedFor:    raft.NodeID(votedFor),
+	return model.PersistentState{
+		CurrentTerm: model.Term(term),
+		VotedFor:    model.NodeID(votedFor),
 	}, nil
 }
 
-func decodeEntriesPayload(payload []byte) ([]raft.LogEntry, error) {
+func decodeEntriesPayload(payload []byte) ([]model.LogEntry, error) {
 	reader := bytes.NewReader(payload)
 
 	var entryCount uint32
@@ -430,7 +433,7 @@ func decodeEntriesPayload(payload []byte) ([]raft.LogEntry, error) {
 		return nil, fmt.Errorf("decode entry count: %w", err)
 	}
 
-	entries := make([]raft.LogEntry, 0, entryCount)
+	entries := make([]model.LogEntry, 0, entryCount)
 
 	for i := uint32(0); i < entryCount; i++ {
 		var index uint64
@@ -469,9 +472,9 @@ func decodeEntriesPayload(payload []byte) ([]raft.LogEntry, error) {
 			return nil, fmt.Errorf("decode entry data: %w", err)
 		}
 
-		entries = append(entries, raft.LogEntry{
-			Index: raft.LogIndex(index),
-			Term:  raft.Term(term),
+		entries = append(entries, model.LogEntry{
+			Index: model.LogIndex(index),
+			Term:  model.Term(term),
 			Data:  data,
 		})
 	}

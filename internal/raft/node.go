@@ -3,6 +3,8 @@ package raft
 import (
 	"fmt"
 	"sync"
+
+	"github.com/sanchar127/raftiq/internal/storage"
 )
 
 type RaftNode struct {
@@ -14,6 +16,8 @@ type RaftNode struct {
 	log     *Log
 	peers   []Peer
 	applyCh chan LogEntry
+
+	storage storage.Storage
 
 	electionElapsed int
 	electionTimeout int

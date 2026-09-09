@@ -1,9 +1,8 @@
 package raft
 
-type PersistentState struct {
-	CurrentTerm Term
-	VotedFor    NodeID
-}
+import "github.com/sanchar127/raftiq/internal/model"
+
+type PersistentState = model.PersistentState
 
 type VolatileState struct {
 	CommitIndex LogIndex
@@ -15,6 +14,10 @@ type LeaderState struct {
 	MatchIndex map[NodeID]LogIndex
 }
 
+type ElectionState struct {
+	VotesReceived map[NodeID]struct{}
+}
+
 type State struct {
 	Persistent PersistentState
 	Volatile   VolatileState
@@ -22,8 +25,4 @@ type State struct {
 	Election   ElectionState
 	Role       Role
 	LeaderID   NodeID
-}
-
-type ElectionState struct {
-	VotesReceived map[NodeID]struct{}
 }

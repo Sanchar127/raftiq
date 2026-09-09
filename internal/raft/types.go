@@ -1,10 +1,11 @@
 package raft
 
-type NodeID string
+import "github.com/sanchar127/raftiq/internal/model"
 
-type Term uint64
-
-type LogIndex uint64
+type NodeID = model.NodeID
+type Term = model.Term
+type LogIndex = model.LogIndex
+type LogEntry = model.LogEntry
 
 type Role uint8
 
@@ -13,12 +14,6 @@ const (
 	Candidate
 	Leader
 )
-
-type LogEntry struct {
-	Index LogIndex
-	Term  Term
-	Data  []byte
-}
 
 type RequestVoteArgs struct {
 	Term         Term

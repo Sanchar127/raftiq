@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sanchar127/raftiq/internal/raft"
+	"github.com/sanchar127/raftiq/internal/model"
 )
 
 func TestWALStoragePersistsAcrossReopen(t *testing.T) {
@@ -19,12 +19,12 @@ func TestWALStoragePersistsAcrossReopen(t *testing.T) {
 		t.Fatalf("OpenWAL() error = %v", err)
 	}
 
-	state := raft.PersistentState{
+	state := model.PersistentState{
 		CurrentTerm: 7,
 		VotedFor:    "node-2",
 	}
 
-	entries := []raft.LogEntry{
+	entries := []model.LogEntry{
 		{
 			Index: 1,
 			Term:  7,
@@ -134,12 +134,12 @@ func TestWALStorageRecoversValidRecordsBeforeTruncatedTail(t *testing.T) {
 		t.Fatalf("OpenWAL() error = %v", err)
 	}
 
-	state := raft.PersistentState{
+	state := model.PersistentState{
 		CurrentTerm: 5,
 		VotedFor:    "node-1",
 	}
 
-	entries := []raft.LogEntry{
+	entries := []model.LogEntry{
 		{
 			Index: 1,
 			Term:  5,
@@ -174,7 +174,7 @@ func TestWALStorageRecoversValidRecordsBeforeTruncatedTail(t *testing.T) {
 		t.Fatalf("open WAL for corruption simulation: %v", err)
 	}
 
-	partialRecord, err := encodeEntriesRecord([]raft.LogEntry{
+	partialRecord, err := encodeEntriesRecord([]model.LogEntry{
 		{
 			Index: 3,
 			Term:  5,
@@ -339,7 +339,7 @@ func TestWALStorageRejectsMalformedEntriesPayload(t *testing.T) {
 }
 
 func TestDecodeRecordRejectsChecksumMismatch(t *testing.T) {
-	record, err := encodeEntriesRecord([]raft.LogEntry{
+	record, err := encodeEntriesRecord([]model.LogEntry{
 		{
 			Index: 1,
 			Term:  1,

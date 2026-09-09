@@ -3,13 +3,13 @@ package storage
 import (
 	"testing"
 
-	"github.com/sanchar127/raftiq/internal/raft"
+	"github.com/sanchar127/raftiq/internal/model"
 )
 
 func TestMemoryStorageStateRoundTrip(t *testing.T) {
 	storage := NewMemoryStorage()
 
-	want := raft.PersistentState{
+	want := model.PersistentState{
 		CurrentTerm: 7,
 		VotedFor:    "node-2",
 	}
@@ -31,7 +31,7 @@ func TestMemoryStorageStateRoundTrip(t *testing.T) {
 func TestMemoryStorageEntriesRoundTrip(t *testing.T) {
 	storage := NewMemoryStorage()
 
-	entries := []raft.LogEntry{
+	entries := []model.LogEntry{
 		{
 			Index: 1,
 			Term:  1,
@@ -90,7 +90,7 @@ func TestMemoryStorageEntriesRoundTrip(t *testing.T) {
 func TestMemoryStorageLoadEntriesReturnsCopy(t *testing.T) {
 	storage := NewMemoryStorage()
 
-	entries := []raft.LogEntry{
+	entries := []model.LogEntry{
 		{
 			Index: 1,
 			Term:  1,
@@ -127,7 +127,7 @@ func TestMemoryStorageAppendEntriesCopiesInput(t *testing.T) {
 
 	data := []byte("hello")
 
-	entries := []raft.LogEntry{
+	entries := []model.LogEntry{
 		{
 			Index: 1,
 			Term:  1,

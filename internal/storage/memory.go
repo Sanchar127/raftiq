@@ -3,22 +3,22 @@ package storage
 import (
 	"sync"
 
-	"github.com/sanchar127/raftiq/internal/raft"
+	"github.com/sanchar127/raftiq/internal/model"
 )
 
 type MemoryStorage struct {
 	mu      sync.RWMutex
-	state   raft.PersistentState
-	entries []raft.LogEntry
+	state   model.PersistentState
+	entries []model.LogEntry
 }
 
 func NewMemoryStorage() *MemoryStorage {
 	return &MemoryStorage{
-		entries: make([]raft.LogEntry, 0),
+		entries: make([]model.LogEntry, 0),
 	}
 }
 
-func (s *MemoryStorage) SaveState(state raft.PersistentState) error {
+func (s *MemoryStorage) SaveState(state model.PersistentState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -27,14 +27,14 @@ func (s *MemoryStorage) SaveState(state raft.PersistentState) error {
 	return nil
 }
 
-func (s *MemoryStorage) LoadState() (raft.PersistentState, error) {
+func (s *MemoryStorage) LoadState() (model.PersistentState, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	return s.state, nil
 }
 
-func (s *MemoryStorage) AppendEntries(entries []raft.LogEntry) error {
+func (s *MemoryStorage) AppendEntries(entries []model.LogEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -46,11 +46,11 @@ func (s *MemoryStorage) AppendEntries(entries []raft.LogEntry) error {
 	return nil
 }
 
-func (s *MemoryStorage) LoadEntries() ([]raft.LogEntry, error) {
+func (s *MemoryStorage) LoadEntries() ([]model.LogEntry, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	entries := make([]raft.LogEntry, len(s.entries))
+	entries := make([]model.LogEntry, len(s.entries))
 
 	for i, entry := range s.entries {
 		entries[i] = entry
