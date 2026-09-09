@@ -42,3 +42,17 @@ type AppendEntriesReply struct {
 	FollowerID NodeID
 	Success    bool
 }
+
+type InstallSnapshotArgs struct {
+	Term              Term
+	LeaderID          NodeID
+	LastIncludedIndex LogIndex
+	LastIncludedTerm  Term
+	Data              []byte
+}
+
+type InstallSnapshotReply struct {
+	Term       Term
+	FollowerID NodeID
+	Success    bool
+}

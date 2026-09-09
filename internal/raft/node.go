@@ -266,8 +266,14 @@ func (n *RaftNode) tryBecomeLeader() bool {
 
 type Peer interface {
 	ID() NodeID
+
 	RequestVote(args RequestVoteArgs) RequestVoteReply
+
 	AppendEntries(args AppendEntriesArgs) AppendEntriesReply
+
+	InstallSnapshot(
+		args InstallSnapshotArgs,
+	) InstallSnapshotReply
 }
 
 func (n *RaftNode) startElection() (Term, error) {
@@ -857,6 +863,7 @@ func NewRaftNodeWithStorage(
 		tickInterval:     100 * time.Millisecond,
 	}, nil
 }
+
 
 func (n *RaftNode) Storage() storage.Storage {
 	n.mu.RLock()
