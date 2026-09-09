@@ -520,14 +520,28 @@ func (n *RaftNode) buildAppendEntries(peerID NodeID) (AppendEntriesArgs, bool) {
 }
 
 func (n *RaftNode) replicateTo(peer Peer) {
-	args, ok := n.buildAppendEntries(peer.ID())
-	if !ok {
-		return
+	for {
+		args, ok := n.buildAppendEntries(peer.ID())
+		if !ok {
+			return
+		}
+
+		reply := peer.AppendEntries(args)
+
+		n.handleAppendEntriesReply(peer.ID(), args, reply)
+
+		if reply.Success {
+			return
+		}
+
+		n.mu.RLock()
+		role := n.state.Role
+		n.mu.RUnlock()
+
+		if role != Leader {
+			return
+		}
 	}
-
-	reply := peer.AppendEntries(args)
-
-	n.handleAppendEntriesReply(peer.ID(), args, reply)
 }
 
 func (n *RaftNode) handleAppendEntriesReply(
