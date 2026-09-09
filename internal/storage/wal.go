@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"sync"
@@ -286,6 +287,16 @@ func encodeRecord(recordType byte, payload []byte) ([]byte, error) {
 		return nil, fmt.Errorf("encode record payload: %w", err)
 	}
 
+	checksum := crc32.ChecksumIEEE(record.Bytes())
+
+	if err := binary.Write(
+		&record,
+		binary.BigEndian,
+		checksum,
+	); err != nil {
+		return nil, fmt.Errorf("encode record checksum: %w", err)
+	}
+
 	return record.Bytes(), nil
 }
 
@@ -310,6 +321,44 @@ func decodeRecord(reader io.Reader) (byte, []byte, error) {
 
 	if _, err := io.ReadFull(reader, payload); err != nil {
 		return 0, nil, err
+	}
+
+	var storedChecksum uint32
+
+	if err := binary.Read(
+		reader,
+		binary.BigEndian,
+		&storedChecksum,
+	); err != nil {
+		return 0, nil, err
+	}
+
+	var headerAndPayload bytes.Buffer
+
+	if err := headerAndPayload.WriteByte(recordType[0]); err != nil {
+		return 0, nil, err
+	}
+
+	if err := binary.Write(
+		&headerAndPayload,
+		binary.BigEndian,
+		payloadLength,
+	); err != nil {
+		return 0, nil, err
+	}
+
+	if _, err := headerAndPayload.Write(payload); err != nil {
+		return 0, nil, err
+	}
+
+	expectedChecksum := crc32.ChecksumIEEE(headerAndPayload.Bytes())
+
+	if storedChecksum != expectedChecksum {
+		return 0, nil, fmt.Errorf(
+			"WAL checksum mismatch: got %08x, want %08x",
+			storedChecksum,
+			expectedChecksum,
+		)
 	}
 
 	return recordType[0], payload, nil

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -333,5 +334,26 @@ func TestWALStorageRejectsMalformedEntriesPayload(t *testing.T) {
 	_, err = OpenWAL(path)
 	if err == nil {
 		t.Fatal("OpenWAL() error = nil, want malformed entries error")
+	}
+}
+
+func TestDecodeRecordRejectsChecksumMismatch(t *testing.T) {
+	record, err := encodeEntriesRecord([]raft.LogEntry{
+		{
+			Index: 1,
+			Term:  1,
+			Data:  []byte("hello"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("encodeEntriesRecord() error = %v", err)
+	}
+
+	// Keep the record structurally valid but corrupt one payload byte.
+	record[5] ^= 0xff
+
+	_, _, err = decodeRecord(bytes.NewReader(record))
+	if err == nil {
+		t.Fatal("decodeRecord() error = nil, want checksum mismatch")
 	}
 }
