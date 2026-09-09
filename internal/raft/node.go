@@ -27,6 +27,8 @@ type RaftNode struct {
 
 	storage storage.Storage
 
+	snapshotRestore func(model.Snapshot) error
+
 	electionElapsed  int
 	electionTimeout  int
 	electionInFlight bool
@@ -1082,4 +1084,102 @@ func (n *RaftNode) Snapshot() (model.Snapshot, error) {
 	snapshot.Data = append([]byte(nil), snapshot.Data...)
 
 	return snapshot, nil
+}
+
+func (n *RaftNode) SetSnapshotRestore(
+	restore func(model.Snapshot) error,
+) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.snapshotRestore = restore
+}
+
+func (n *RaftNode) InstallSnapshot(
+	args InstallSnapshotArgs,
+) InstallSnapshotReply {
+	n.mu.Lock()
+
+	reply := InstallSnapshotReply{
+		Term:       n.state.Persistent.CurrentTerm,
+		FollowerID: n.id,
+	}
+
+	// 1. Reject snapshots from an older term.
+	if args.Term < n.state.Persistent.CurrentTerm {
+		n.mu.Unlock()
+		return reply
+	}
+
+	// 2. Adopt the newer term.
+	if args.Term > n.state.Persistent.CurrentTerm {
+		n.state.Persistent.CurrentTerm = args.Term
+		n.state.Persistent.VotedFor = ""
+	}
+
+	// 3. This node is now following the snapshot sender.
+	n.state.Role = Follower
+	n.state.LeaderID = args.LeaderID
+	n.electionElapsed = 0
+
+	reply.Term = n.state.Persistent.CurrentTerm
+
+	// 4. Ignore a snapshot that is already covered by our
+	// current snapshot boundary.
+	if args.LastIncludedIndex <= n.log.LastIncludedIndex() {
+		reply.Success = true
+		n.mu.Unlock()
+		return reply
+	}
+
+	snapshot := model.Snapshot{
+		LastIncludedIndex: args.LastIncludedIndex,
+		LastIncludedTerm:  args.LastIncludedTerm,
+		Data:              append([]byte(nil), args.Data...),
+	}
+
+	// 5. Persist the snapshot before modifying the logical log.
+	if err := n.storage.SaveSnapshot(snapshot); err != nil {
+		n.mu.Unlock()
+		return reply
+	}
+
+	if err := n.storage.Sync(); err != nil {
+		n.mu.Unlock()
+		return reply
+	}
+
+	// 6. Restore the state machine before declaring the snapshot
+	// installed in Raft state.
+	restore := n.snapshotRestore
+
+	n.mu.Unlock()
+
+	if restore != nil {
+		if err := restore(snapshot); err != nil {
+			return reply
+		}
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	// 7. Establish the new snapshot boundary.
+	if err := n.log.RestoreSnapshot(snapshot); err != nil {
+		return reply
+	}
+
+	// 8. The snapshot represents committed/applied state.
+	if n.state.Volatile.CommitIndex < snapshot.LastIncludedIndex {
+		n.state.Volatile.CommitIndex = snapshot.LastIncludedIndex
+	}
+
+	if n.state.Volatile.LastApplied < snapshot.LastIncludedIndex {
+		n.state.Volatile.LastApplied = snapshot.LastIncludedIndex
+	}
+
+	reply.Term = n.state.Persistent.CurrentTerm
+	reply.Success = true
+
+	return reply
 }
