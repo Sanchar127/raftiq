@@ -19,10 +19,14 @@ type Server struct {
 }
 
 func NewServer(raftNode *raft.RaftNode, store *kv.Store) *Server {
+	applier := kv.NewApplier(store)
+
+	raftNode.SetSnapshotRestore(applier.RestoreSnapshot)
+
 	return &Server{
 		raft:    raftNode,
 		store:   store,
-		applier: kv.NewApplier(store),
+		applier: applier,
 	}
 }
 
