@@ -33,8 +33,6 @@ func NewApplier(store *Store) *Applier {
 		results: make(map[model.LogIndex]ApplyResult),
 	}
 
-	applier.cond = sync.NewCond(&applier.mu)
-
 	return applier
 }
 
@@ -60,7 +58,9 @@ func (a *Applier) Run(
 				a.lastApplied = entry.Index
 			}
 
-			a.results[entry.Index] = result
+			if commandNeedsResult(entry) {
+				a.results[entry.Index] = result
+			}
 
 			if result.Err != nil &&
 				!errors.Is(result.Err, lock.ErrStaleFencingToken) &&
@@ -73,13 +73,10 @@ func (a *Applier) Run(
 
 				err := a.applyErr
 
-				a.cond.Broadcast()
 				a.mu.Unlock()
 
 				return err
 			}
-
-			a.cond.Broadcast()
 			a.mu.Unlock()
 		}
 	}
@@ -167,4 +164,13 @@ func (a *Applier) RestoreSnapshot(
 	a.mu.Unlock()
 
 	return nil
+}
+
+func commandNeedsResult(entry raft.LogEntry) bool {
+	command, err := DecodeCommand(entry.Data)
+	if err != nil {
+		return false
+	}
+
+	return command.Type == CommandFencedPut
 }
