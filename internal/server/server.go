@@ -318,3 +318,53 @@ func (s *Server) proposeLockExpiration(
 
 	_ = s.applier.WaitApplied(s.ctx, index)
 }
+
+func (s *Server) FencedPut(
+	ctx context.Context,
+	key string,
+	value []byte,
+	fencingToken uint64,
+) error {
+	if key == "" {
+		return lock.ErrInvalidKey
+	}
+
+	if fencingToken == 0 {
+		return lock.ErrStaleFencingToken
+	}
+
+	commandData, err := kv.EncodeCommand(kv.Command{
+		Type:         kv.CommandFencedPut,
+		Key:          key,
+		Value:        value,
+		FencingToken: fencingToken,
+	})
+	if err != nil {
+		return fmt.Errorf(
+			"encode fenced put command: %w",
+			err,
+		)
+	}
+
+	index, err := s.raft.Propose(commandData)
+	if err != nil {
+		return fmt.Errorf(
+			"propose fenced put command: %w",
+			err,
+		)
+	}
+
+	result, err := s.applier.WaitResult(ctx, index)
+	if err != nil {
+		return fmt.Errorf(
+			"wait for fenced put: %w",
+			err,
+		)
+	}
+
+	if result.Err != nil {
+		return result.Err
+	}
+
+	return nil
+}

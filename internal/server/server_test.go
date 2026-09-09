@@ -625,3 +625,127 @@ func TestServerExpiredLockCanBeReacquired(t *testing.T) {
 		)
 	}
 }
+
+func TestServerRejectsZombieWorkerWithStaleFencingToken(t *testing.T) {
+	nodeA := raft.NewRaftNode("A")
+	nodeB := raft.NewRaftNode("B")
+	nodeC := raft.NewRaftNode("C")
+
+	nodeA.SetPeers([]raft.Peer{nodeB, nodeC})
+
+	store := kv.NewStore()
+	server := NewServer(nodeA, store)
+
+	nodeA.Start()
+	defer nodeA.Stop()
+
+	server.Start()
+	defer server.Stop()
+
+	waitForLeader(t, nodeA)
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		3*time.Second,
+	)
+	defer cancel()
+
+	first, err := server.AcquireLock(
+		ctx,
+		"job:1",
+		"worker-A",
+		100,
+	)
+	if err != nil {
+		t.Fatalf("first AcquireLock(): %v", err)
+	}
+
+	if first.FencingToken != 1 {
+		t.Fatalf(
+			"expected first fencing token 1, got %d",
+			first.FencingToken,
+		)
+	}
+
+	if err := server.FencedPut(
+		ctx,
+		"job:1",
+		[]byte("worker-a-result"),
+		first.FencingToken,
+	); err != nil {
+		t.Fatalf("worker-A FencedPut(): %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+
+	for time.Now().Before(deadline) {
+		if _, ok := store.GetLock("job:1"); !ok {
+			break
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if _, ok := store.GetLock("job:1"); ok {
+		t.Fatal("worker-A lock did not expire")
+	}
+
+	second, err := server.AcquireLock(
+		ctx,
+		"job:1",
+		"worker-B",
+		1000,
+	)
+	if err != nil {
+		t.Fatalf("second AcquireLock(): %v", err)
+	}
+
+	if second.FencingToken != 2 {
+		t.Fatalf(
+			"expected second fencing token 2, got %d",
+			second.FencingToken,
+		)
+	}
+
+	err = server.FencedPut(
+		ctx,
+		"job:1",
+		[]byte("zombie-worker-a-result"),
+		first.FencingToken,
+	)
+	if !errors.Is(err, lock.ErrStaleFencingToken) {
+		t.Fatalf(
+			"expected ErrStaleFencingToken, got %v",
+			err,
+		)
+	}
+
+	if err := server.FencedPut(
+		ctx,
+		"job:1",
+		[]byte("worker-b-result"),
+		second.FencingToken,
+	); err != nil {
+		t.Fatalf("worker-B FencedPut(): %v", err)
+	}
+
+	value, ok := store.GetFenced("job:1")
+	if !ok {
+		t.Fatal("expected fenced resource to exist")
+	}
+
+	if string(value.Value) != "worker-b-result" {
+		t.Fatalf(
+			"expected worker-B result, got %q",
+			value.Value,
+		)
+	}
+
+	if value.FencingToken != second.FencingToken {
+		t.Fatalf(
+			"expected fencing token %d, got %d",
+			second.FencingToken,
+			value.FencingToken,
+		)
+	}
+}
