@@ -792,6 +792,11 @@ func NewRaftNodeWithStorage(
 		return nil, fmt.Errorf("load log entries: %w", err)
 	}
 
+	snapshot, err := store.LoadSnapshot()
+	if err != nil {
+		return nil, fmt.Errorf("load snapshot: %w", err)
+	}
+
 	log := NewLog()
 
 	for _, entry := range entries {
@@ -804,6 +809,21 @@ func NewRaftNodeWithStorage(
 		}
 	}
 
+	commitIndex := LogIndex(0)
+	lastApplied := LogIndex(0)
+
+	if snapshot.LastIncludedIndex > 0 {
+		if err := log.RestoreSnapshot(snapshot); err != nil {
+			return nil, fmt.Errorf(
+				"restore snapshot boundary: %w",
+				err,
+			)
+		}
+
+		commitIndex = snapshot.LastIncludedIndex
+		lastApplied = snapshot.LastIncludedIndex
+	}
+
 	return &RaftNode{
 		id:      id,
 		storage: store,
@@ -814,8 +834,8 @@ func NewRaftNodeWithStorage(
 			Persistent: persistentState,
 
 			Volatile: VolatileState{
-				CommitIndex: 0,
-				LastApplied: 0,
+				CommitIndex: commitIndex,
+				LastApplied: lastApplied,
 			},
 
 			Leader: LeaderState{
@@ -834,7 +854,7 @@ func NewRaftNodeWithStorage(
 		log:              log,
 		electionTimeout:  10,
 		heartbeatTimeout: 1,
-		tickInterval:     100 * time.Millisecond, // Set default here
+		tickInterval:     100 * time.Millisecond,
 	}, nil
 }
 
@@ -1039,4 +1059,21 @@ func (n *RaftNode) CreateSnapshot(
 	}
 
 	return nil
+}
+
+func (n *RaftNode) Snapshot() (model.Snapshot, error) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	snapshot, err := n.storage.LoadSnapshot()
+	if err != nil {
+		return model.Snapshot{}, fmt.Errorf(
+			"load snapshot: %w",
+			err,
+		)
+	}
+
+	snapshot.Data = append([]byte(nil), snapshot.Data...)
+
+	return snapshot, nil
 }

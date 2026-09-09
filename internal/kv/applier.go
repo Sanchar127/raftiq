@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sanchar127/raftiq/internal/model"
 	"github.com/sanchar127/raftiq/internal/raft"
 )
 
@@ -87,4 +88,19 @@ func (a *Applier) WaitApplied(
 		case <-ticker.C:
 		}
 	}
+}
+
+func (a *Applier) RestoreSnapshot(
+	snapshot model.Snapshot,
+) error {
+	if err := a.store.Restore(snapshot.Data); err != nil {
+		return fmt.Errorf("restore KV snapshot: %w", err)
+	}
+
+	a.mu.Lock()
+	a.lastApplied = snapshot.LastIncludedIndex
+	a.applyErr = nil
+	a.mu.Unlock()
+
+	return nil
 }

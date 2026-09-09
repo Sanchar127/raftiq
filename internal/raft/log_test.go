@@ -1,9 +1,9 @@
 package raft
 
 import (
-	"testing"
-
+	"fmt"
 	"github.com/sanchar127/raftiq/internal/model"
+	"testing"
 )
 
 func TestNewLog(t *testing.T) {
@@ -476,5 +476,74 @@ func TestLogCompactSameSnapshotIsIdempotent(t *testing.T) {
 
 	if log.LastIndex() != 5 {
 		t.Fatalf("expected last index 5, got %d", log.LastIndex())
+	}
+}
+
+func TestLogRestoreSnapshot(t *testing.T) {
+	log := NewLog()
+
+	for i := LogIndex(1); i <= 5; i++ {
+		if err := log.Append(LogEntry{
+			Index: i,
+			Term:  1,
+			Data:  []byte(fmt.Sprintf("entry-%d", i)),
+		}); err != nil {
+			t.Fatalf("append failed: %v", err)
+		}
+	}
+
+	snapshot := model.Snapshot{
+		LastIncludedIndex: 3,
+		LastIncludedTerm:  1,
+		Data:              []byte(`{"key":"value"}`),
+	}
+
+	if err := log.RestoreSnapshot(snapshot); err != nil {
+		t.Fatalf("restore snapshot failed: %v", err)
+	}
+
+	if log.LastIncludedIndex() != 3 {
+		t.Fatalf(
+			"expected snapshot boundary 3, got %d",
+			log.LastIncludedIndex(),
+		)
+	}
+
+	if log.LastIncludedTerm() != 1 {
+		t.Fatalf(
+			"expected snapshot term 1, got %d",
+			log.LastIncludedTerm(),
+		)
+	}
+
+	if log.LastIndex() != 5 {
+		t.Fatalf(
+			"expected last index 5, got %d",
+			log.LastIndex(),
+		)
+	}
+
+	entry, ok := log.Get(3)
+	if !ok {
+		t.Fatal("expected snapshot boundary to be readable")
+	}
+
+	if entry.Term != 1 {
+		t.Fatalf(
+			"expected boundary term 1, got %d",
+			entry.Term,
+		)
+	}
+
+	if _, ok := log.Get(2); ok {
+		t.Fatal("expected compacted entry 2 to be unavailable")
+	}
+
+	if _, ok := log.Get(4); !ok {
+		t.Fatal("expected entry 4 to remain")
+	}
+
+	if _, ok := log.Get(5); !ok {
+		t.Fatal("expected entry 5 to remain")
 	}
 }

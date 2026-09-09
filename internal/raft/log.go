@@ -154,3 +154,40 @@ func (l *Log) Get(index LogIndex) (LogEntry, bool) {
 
 	return LogEntry{}, false
 }
+
+func (l *Log) RestoreSnapshot(snapshot model.Snapshot) error {
+	if snapshot.LastIncludedIndex < l.lastIncludedIndex {
+		return fmt.Errorf(
+			"cannot restore snapshot backwards: current %d, requested %d",
+			l.lastIncludedIndex,
+			snapshot.LastIncludedIndex,
+		)
+	}
+
+	for _, entry := range l.entries {
+		if entry.Index == snapshot.LastIncludedIndex {
+			if entry.Term != snapshot.LastIncludedTerm {
+				return fmt.Errorf(
+					"snapshot term mismatch at index %d: log term %d, snapshot term %d",
+					snapshot.LastIncludedIndex,
+					entry.Term,
+					snapshot.LastIncludedTerm,
+				)
+			}
+		}
+	}
+
+	remaining := make([]LogEntry, 0, len(l.entries))
+
+	for _, entry := range l.entries {
+		if entry.Index > snapshot.LastIncludedIndex {
+			remaining = append(remaining, entry)
+		}
+	}
+
+	l.entries = remaining
+	l.lastIncludedIndex = snapshot.LastIncludedIndex
+	l.lastIncludedTerm = snapshot.LastIncludedTerm
+
+	return nil
+}

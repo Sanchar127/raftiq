@@ -26,8 +26,21 @@ func NewServer(raftNode *raft.RaftNode, store *kv.Store) *Server {
 	}
 }
 
-func (s *Server) Start() {
+func (s *Server) Start() error {
 	s.ctx, s.cancel = context.WithCancel(context.Background())
+
+	snapshot, err := s.raft.Snapshot()
+	if err != nil {
+		s.cancel()
+		return fmt.Errorf("load raft snapshot: %w", err)
+	}
+
+	if snapshot.LastIncludedIndex > 0 {
+		if err := s.applier.RestoreSnapshot(snapshot); err != nil {
+			s.cancel()
+			return fmt.Errorf("restore snapshot: %w", err)
+		}
+	}
 
 	s.wg.Add(1)
 
@@ -36,6 +49,8 @@ func (s *Server) Start() {
 
 		_ = s.applier.Run(s.ctx, s.raft.ApplyCh())
 	}()
+
+	return nil
 }
 
 func (s *Server) Stop() {
