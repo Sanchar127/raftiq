@@ -17,6 +17,9 @@ type RaftNode struct {
 
 	electionElapsed int
 	electionTimeout int
+
+	heartbeatElapsed int
+	heartbeatTimeout int
 }
 
 func NewRaftNode(id NodeID) *RaftNode {
@@ -24,6 +27,7 @@ func NewRaftNode(id NodeID) *RaftNode {
 		id:      id,
 		peers:   make([]Peer, 0),
 		applyCh: make(chan LogEntry, 100),
+
 		state: State{
 			Persistent: PersistentState{
 				CurrentTerm: 0,
@@ -43,7 +47,10 @@ func NewRaftNode(id NodeID) *RaftNode {
 			Role:     Follower,
 			LeaderID: "",
 		},
-		log: NewLog(),
+
+		log:              NewLog(),
+		electionTimeout:  10,
+		heartbeatTimeout: 1,
 	}
 }
 
@@ -91,6 +98,7 @@ func (n *RaftNode) becomeLeader() {
 
 	n.state.Role = Leader
 	n.state.LeaderID = n.id
+	n.heartbeatElapsed = 0
 
 	nextIndex := n.log.LastIndex() + 1
 
@@ -659,5 +667,72 @@ func (n *RaftNode) advanceCommitIndex() {
 
 	if advanced {
 		n.applyCommitted()
+	}
+}
+
+func (n *RaftNode) heartbeatDue() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.state.Role != Leader {
+		return false
+	}
+
+	n.heartbeatElapsed++
+
+	if n.heartbeatElapsed < n.heartbeatTimeout {
+		return false
+	}
+
+	n.heartbeatElapsed = 0
+	return true
+}
+
+func (n *RaftNode) sendHeartbeats() {
+	n.mu.RLock()
+
+	if n.state.Role != Leader {
+		n.mu.RUnlock()
+		return
+	}
+
+	peers := append([]Peer(nil), n.peers...)
+
+	n.mu.RUnlock()
+
+	for _, peer := range peers {
+		go n.replicateTo(peer)
+	}
+}
+
+func (n *RaftNode) sendHeartbeat(peer Peer) {
+	args, ok := n.buildAppendEntries(peer.ID())
+	if !ok {
+		return
+	}
+
+	if len(args.Entries) > 0 {
+		return
+	}
+
+	reply := peer.AppendEntries(args)
+
+	n.handleAppendEntriesReply(peer.ID(), args, reply)
+}
+
+func (n *RaftNode) heartbeat() {
+	n.mu.RLock()
+
+	if n.state.Role != Leader {
+		n.mu.RUnlock()
+		return
+	}
+
+	peers := append([]Peer(nil), n.peers...)
+
+	n.mu.RUnlock()
+
+	for _, peer := range peers {
+		go n.sendHeartbeat(peer)
 	}
 }

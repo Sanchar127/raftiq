@@ -1102,3 +1102,61 @@ func TestProposeReplicatesAndCommits(t *testing.T) {
 		)
 	}
 }
+
+func TestHeartbeatDueOnlyForLeader(t *testing.T) {
+	node := NewRaftNode("A")
+
+	if node.heartbeatDue() {
+		t.Fatal("follower should not send heartbeat")
+	}
+
+	node.startElection()
+	node.becomeLeader()
+
+	if !node.heartbeatDue() {
+		t.Fatal("leader should send heartbeat when heartbeat timer expires")
+	}
+}
+
+func TestHeartbeatResetsFollowerElectionTimer(t *testing.T) {
+	leader := NewRaftNode("leader")
+	follower := NewRaftNode("follower")
+
+	leader.SetPeers([]Peer{follower})
+	follower.SetPeers([]Peer{leader})
+
+	leader.startElection()
+	leader.becomeLeader()
+
+	follower.mu.Lock()
+	follower.electionElapsed = 5
+	follower.mu.Unlock()
+
+	args, ok := leader.buildAppendEntries(follower.ID())
+	if !ok {
+		t.Fatal("failed to build heartbeat")
+	}
+
+	if len(args.Entries) != 0 {
+		t.Fatal("expected empty heartbeat")
+	}
+
+	reply := follower.AppendEntries(args)
+	if !reply.Success {
+		t.Fatal("heartbeat should succeed")
+	}
+
+	state := follower.State()
+
+	if state.Role != Follower {
+		t.Fatalf("expected follower role, got %v", state.Role)
+	}
+
+	follower.mu.RLock()
+	electionElapsed := follower.electionElapsed
+	follower.mu.RUnlock()
+
+	if electionElapsed != 0 {
+		t.Fatalf("expected election timer reset, got %d", electionElapsed)
+	}
+}
