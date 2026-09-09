@@ -1,6 +1,9 @@
 package raft
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestNewRaftNode(t *testing.T) {
 	node := NewRaftNode("node-1")
@@ -827,6 +830,63 @@ func TestAdvanceCommitIndex(t *testing.T) {
 		t.Fatalf(
 			"expected commit index 1, got %d",
 			state.Volatile.CommitIndex,
+		)
+	}
+}
+
+func TestAppendEntriesAppliesCommittedEntry(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	entry := LogEntry{
+		Index: 1,
+		Term:  1,
+		Data:  []byte("command"),
+	}
+
+	reply := node.AppendEntries(AppendEntriesArgs{
+		Term:         1,
+		LeaderID:     "leader",
+		Entries:      []LogEntry{entry},
+		LeaderCommit: 1,
+	})
+
+	if !reply.Success {
+		t.Fatal("expected AppendEntries to succeed")
+	}
+
+	select {
+	case applied := <-node.ApplyCh():
+		if applied.Index != 1 {
+			t.Fatalf(
+				"expected applied index 1, got %d",
+				applied.Index,
+			)
+		}
+
+		if string(applied.Data) != "command" {
+			t.Fatalf(
+				"expected applied data command, got %q",
+				applied.Data,
+			)
+		}
+
+	case <-time.After(time.Second):
+		t.Fatal("expected committed entry to be applied")
+	}
+
+	state := node.State()
+
+	if state.Volatile.CommitIndex != 1 {
+		t.Fatalf(
+			"expected commit index 1, got %d",
+			state.Volatile.CommitIndex,
+		)
+	}
+
+	if state.Volatile.LastApplied != 1 {
+		t.Fatalf(
+			"expected last applied 1, got %d",
+			state.Volatile.LastApplied,
 		)
 	}
 }
