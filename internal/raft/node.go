@@ -308,6 +308,11 @@ func (n *RaftNode) handleVoteReply(electionTerm Term, reply RequestVoteReply) {
 		n.state.Persistent.VotedFor = ""
 		n.state.LeaderID = ""
 		n.state.Election.VotesReceived = make(map[NodeID]struct{})
+
+		if err := n.persistStateLocked(); err != nil {
+			return
+		}
+
 		return
 	}
 
@@ -606,6 +611,10 @@ func (n *RaftNode) handleAppendEntriesReply(
 		n.state.Persistent.VotedFor = ""
 		n.state.LeaderID = ""
 
+		if err := n.persistStateLocked(); err != nil {
+			n.mu.Unlock()
+			return
+		}
 		n.mu.Unlock()
 		return
 	}
