@@ -1019,3 +1019,86 @@ func TestLeaderBacktracksNextIndexOnReplicationFailure(t *testing.T) {
 		)
 	}
 }
+
+func TestProposeReplicatesAndCommits(t *testing.T) {
+	leader := NewRaftNode("leader")
+	follower1 := NewRaftNode("follower-1")
+	follower2 := NewRaftNode("follower-2")
+
+	leader.SetPeers([]Peer{follower1, follower2})
+	follower1.SetPeers([]Peer{leader, follower2})
+	follower2.SetPeers([]Peer{leader, follower1})
+
+	// Make the leader authoritative for this test.
+	leader.startElection()
+	leader.becomeLeader()
+
+	index, err := leader.Propose([]byte("hello"))
+	if err != nil {
+		t.Fatalf("Propose() returned error: %v", err)
+	}
+
+	if index != 1 {
+		t.Fatalf("expected proposed index 1, got %d", index)
+	}
+
+	// Verify both followers received the entry.
+	for _, follower := range []*RaftNode{follower1, follower2} {
+		entry, ok := follower.Log().Get(1)
+		if !ok {
+			t.Fatalf("follower %s does not have entry 1", follower.ID())
+		}
+
+		if string(entry.Data) != "hello" {
+			t.Fatalf(
+				"follower %s has data %q, expected %q",
+				follower.ID(),
+				string(entry.Data),
+				"hello",
+			)
+		}
+	}
+
+	// The leader should have committed the entry after reaching
+	// a majority.
+	state := leader.State()
+
+	if state.Volatile.CommitIndex != 1 {
+		t.Fatalf(
+			"expected leader CommitIndex 1, got %d",
+			state.Volatile.CommitIndex,
+		)
+	}
+
+	// The committed entry should eventually appear on ApplyCh.
+	select {
+	case entry := <-leader.ApplyCh():
+		if entry.Index != 1 {
+			t.Fatalf(
+				"expected applied index 1, got %d",
+				entry.Index,
+			)
+		}
+
+		if string(entry.Data) != "hello" {
+			t.Fatalf(
+				"expected applied data %q, got %q",
+				"hello",
+				string(entry.Data),
+			)
+		}
+
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for committed entry")
+	}
+
+	// The entry should now be marked as applied.
+	state = leader.State()
+
+	if state.Volatile.LastApplied != 1 {
+		t.Fatalf(
+			"expected LastApplied 1, got %d",
+			state.Volatile.LastApplied,
+		)
+	}
+}

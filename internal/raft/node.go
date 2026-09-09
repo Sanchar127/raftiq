@@ -104,9 +104,9 @@ func (n *RaftNode) becomeLeader() {
 
 func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 	n.mu.Lock()
-	defer n.mu.Unlock()
 
 	if n.state.Role != Leader {
+		n.mu.Unlock()
 		return 0, fmt.Errorf("node %s is not the leader", n.id)
 	}
 
@@ -119,7 +119,16 @@ func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 	}
 
 	if err := n.log.Append(entry); err != nil {
+		n.mu.Unlock()
 		return 0, fmt.Errorf("append proposed entry: %w", err)
+	}
+
+	peers := append([]Peer(nil), n.peers...)
+
+	n.mu.Unlock()
+
+	for _, peer := range peers {
+		n.replicateTo(peer)
 	}
 
 	return index, nil
