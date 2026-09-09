@@ -329,7 +329,6 @@ func (n *RaftNode) resetElectionTimer() {
 
 func (n *RaftNode) AppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 	n.mu.Lock()
-	defer n.mu.Unlock()
 
 	reply := AppendEntriesReply{
 		Term:       n.state.Persistent.CurrentTerm,
@@ -338,6 +337,7 @@ func (n *RaftNode) AppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 
 	// 1. Reject stale leader.
 	if args.Term < n.state.Persistent.CurrentTerm {
+		n.mu.Unlock()
 		return reply
 	}
 
@@ -351,6 +351,7 @@ func (n *RaftNode) AppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 	if args.PrevLogIndex > 0 {
 		prevEntry, ok := n.log.Get(args.PrevLogIndex)
 		if !ok || prevEntry.Term != args.PrevLogTerm {
+			n.mu.Unlock()
 			return reply
 		}
 	}
@@ -369,6 +370,7 @@ func (n *RaftNode) AppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 				n.log.TruncateFrom(entry.Index)
 
 				if err := n.log.Append(entry); err != nil {
+					n.mu.Unlock()
 					return reply
 				}
 			}
@@ -377,24 +379,40 @@ func (n *RaftNode) AppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 		}
 
 		if err := n.log.Append(entry); err != nil {
+			n.mu.Unlock()
 			return reply
 		}
 	}
 
+	commitAdvanced := false
+
+	// 6. Advance commit index.
 	if args.LeaderCommit > n.state.Volatile.CommitIndex {
 		lastIndex := n.log.LastIndex()
+		oldCommitIndex := n.state.Volatile.CommitIndex
 
 		if args.LeaderCommit < lastIndex {
 			n.state.Volatile.CommitIndex = args.LeaderCommit
 		} else {
 			n.state.Volatile.CommitIndex = lastIndex
 		}
+
+		commitAdvanced = n.state.Volatile.CommitIndex > oldCommitIndex
 	}
+
 	reply.Term = n.state.Persistent.CurrentTerm
 	reply.Success = true
 
+	n.mu.Unlock()
+
+	// 7. Apply committed entries outside the Raft lock.
+	if commitAdvanced {
+		n.applyCommitted()
+	}
+
 	return reply
 }
+
 func (n *RaftNode) ApplyCh() <-chan LogEntry {
 	return n.applyCh
 }
