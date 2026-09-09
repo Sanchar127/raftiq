@@ -22,8 +22,8 @@ func NewState() *State {
 }
 
 func (s *State) Get(key string) (Lock, bool) {
-	lock, ok := s.Locks[key]
-	return lock, ok
+	current, ok := s.Locks[key]
+	return current, ok
 }
 
 func (s *State) Acquire(
@@ -33,14 +33,13 @@ func (s *State) Acquire(
 	grantIndex model.LogIndex,
 ) (Lock, bool) {
 	current, exists := s.Locks[key]
-
 	if exists {
 		return current, false
 	}
 
 	s.NextToken++
 
-	lock := Lock{
+	current = Lock{
 		Key:          key,
 		OwnerID:      ownerID,
 		FencingToken: s.NextToken,
@@ -48,10 +47,11 @@ func (s *State) Acquire(
 		GrantIndex:   grantIndex,
 	}
 
-	s.Locks[key] = lock
+	s.Locks[key] = current
 
-	return lock, true
+	return current, true
 }
+
 func (s *State) Expire(
 	key string,
 	expectedToken uint64,
