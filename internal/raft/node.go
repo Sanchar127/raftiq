@@ -1,6 +1,9 @@
 package raft
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+)
 
 type RaftNode struct {
 	mu      sync.RWMutex
@@ -97,6 +100,29 @@ func (n *RaftNode) becomeLeader() {
 		n.state.Leader.NextIndex[peerID] = nextIndex
 		n.state.Leader.MatchIndex[peerID] = 0
 	}
+}
+
+func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.state.Role != Leader {
+		return 0, fmt.Errorf("node %s is not the leader", n.id)
+	}
+
+	index := n.log.LastIndex() + 1
+
+	entry := LogEntry{
+		Index: index,
+		Term:  n.state.Persistent.CurrentTerm,
+		Data:  append([]byte(nil), data...),
+	}
+
+	if err := n.log.Append(entry); err != nil {
+		return 0, fmt.Errorf("append proposed entry: %w", err)
+	}
+
+	return index, nil
 }
 
 func (n *RaftNode) RequestVote(args RequestVoteArgs) RequestVoteReply {

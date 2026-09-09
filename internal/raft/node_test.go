@@ -890,3 +890,31 @@ func TestAppendEntriesAppliesCommittedEntry(t *testing.T) {
 		)
 	}
 }
+func TestProposeAsLeader(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	node.startElection()
+	node.becomeLeader()
+
+	index, err := node.Propose([]byte("hello"))
+	if err != nil {
+		t.Fatalf("Propose() returned error: %v", err)
+	}
+
+	if index != 1 {
+		t.Fatalf("expected index 1, got %d", index)
+	}
+
+	entry, ok := node.Log().Get(index)
+	if !ok {
+		t.Fatalf("expected proposed entry at index %d", index)
+	}
+
+	if string(entry.Data) != "hello" {
+		t.Fatalf("expected data %q, got %q", "hello", string(entry.Data))
+	}
+
+	if entry.Term != 1 {
+		t.Fatalf("expected term 1, got %d", entry.Term)
+	}
+}
