@@ -3,9 +3,12 @@ package server
 import (
 	"context"
 	"fmt"
-	"github.com/sanchar127/raftiq/internal/kv"
-	"github.com/sanchar127/raftiq/internal/raft"
 	"sync"
+	"time"
+
+	"github.com/sanchar127/raftiq/internal/kv"
+	"github.com/sanchar127/raftiq/internal/lock"
+	"github.com/sanchar127/raftiq/internal/raft"
 )
 
 type Server struct {
@@ -16,6 +19,13 @@ type Server struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+}
+
+type LockGrant struct {
+	Key          string
+	OwnerID      string
+	FencingToken uint64
+	ExpiresAt    int64
 }
 
 func NewServer(raftNode *raft.RaftNode, store *kv.Store) *Server {
@@ -136,4 +146,71 @@ func (s *Server) Delete(
 	}
 
 	return nil
+}
+
+func (s *Server) AcquireLock(
+	ctx context.Context,
+	key string,
+	ownerID string,
+	leaseMillis int64,
+) (LockGrant, error) {
+	if key == "" {
+		return LockGrant{}, lock.ErrInvalidKey
+	}
+
+	if ownerID == "" {
+		return LockGrant{}, lock.ErrInvalidOwner
+	}
+
+	if leaseMillis <= 0 {
+		return LockGrant{}, fmt.Errorf("lease duration must be positive")
+	}
+
+	expiresAt := time.Now().
+		Add(time.Duration(leaseMillis) * time.Millisecond).
+		UnixNano()
+
+	commandData, err := kv.EncodeCommand(kv.Command{
+		Type:      kv.CommandLockAcquire,
+		Key:       key,
+		OwnerID:   ownerID,
+		ExpiresAt: expiresAt,
+	})
+	if err != nil {
+		return LockGrant{}, fmt.Errorf(
+			"encode lock acquire command: %w",
+			err,
+		)
+	}
+
+	index, err := s.raft.Propose(commandData)
+	if err != nil {
+		return LockGrant{}, fmt.Errorf(
+			"propose lock acquire command: %w",
+			err,
+		)
+	}
+
+	if err := s.applier.WaitApplied(ctx, index); err != nil {
+		return LockGrant{}, fmt.Errorf(
+			"wait for lock acquisition: %w",
+			err,
+		)
+	}
+
+	current, ok := s.store.GetLock(key)
+	if !ok || current.GrantIndex != index {
+		return LockGrant{}, lock.ErrLockBusy
+	}
+
+	if current.OwnerID != ownerID {
+		return LockGrant{}, lock.ErrLockBusy
+	}
+
+	return LockGrant{
+		Key:          current.Key,
+		OwnerID:      current.OwnerID,
+		FencingToken: current.FencingToken,
+		ExpiresAt:    current.ExpiresAt,
+	}, nil
 }
