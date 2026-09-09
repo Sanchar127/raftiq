@@ -123,7 +123,9 @@ func TestBecomeFollower(t *testing.T) {
 	}
 
 	node.becomeLeader()
-	node.becomeFollower(2)
+	if err := node.becomeFollower(2); err != nil {
+		t.Fatalf("become follower: %v", err)
+	}
 
 	state := node.State()
 
@@ -1353,5 +1355,113 @@ func TestRaftNodeRestoresPersistentState(t *testing.T) {
 			"expected votedFor B, got %q",
 			state.Persistent.VotedFor,
 		)
+	}
+}
+
+func TestRequestVoteHigherTermPersistsAcrossRestart(t *testing.T) {
+	store := storage.NewMemoryStorage()
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	node.mu.Lock()
+	node.state.Persistent.CurrentTerm = 2
+	node.state.Persistent.VotedFor = "old-candidate"
+
+	if err := node.persistStateLocked(); err != nil {
+		node.mu.Unlock()
+		t.Fatalf("persist initial state: %v", err)
+	}
+	node.mu.Unlock()
+
+	reply := node.RequestVote(RequestVoteArgs{
+		Term:        5,
+		CandidateID: "node-2",
+	})
+
+	if !reply.VoteGranted {
+		t.Fatal("expected vote to be granted")
+	}
+
+	restored, err := NewRaftNodeWithStorage("node-1", store)
+	if err != nil {
+		t.Fatalf("restore node: %v", err)
+	}
+
+	state := restored.State()
+
+	if state.Persistent.CurrentTerm != 5 {
+		t.Fatalf(
+			"expected restored term 5, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != "node-2" {
+		t.Fatalf(
+			"expected restored vote for node-2, got %q",
+			state.Persistent.VotedFor,
+		)
+	}
+
+	if state.Role != Follower {
+		t.Fatalf("expected restored node to be follower, got %v", state.Role)
+	}
+}
+
+func TestAppendEntriesHigherTermPersistsAcrossRestart(t *testing.T) {
+	store := storage.NewMemoryStorage()
+
+	node, err := NewRaftNodeWithStorage("follower", store)
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	node.mu.Lock()
+	node.state.Persistent.CurrentTerm = 2
+	node.state.Persistent.VotedFor = "old-candidate"
+
+	if err := node.persistStateLocked(); err != nil {
+		node.mu.Unlock()
+		t.Fatalf("persist initial state: %v", err)
+	}
+	node.mu.Unlock()
+
+	reply := node.AppendEntries(AppendEntriesArgs{
+		Term:         5,
+		LeaderID:     "leader",
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+	})
+
+	if !reply.Success {
+		t.Fatal("expected AppendEntries to succeed")
+	}
+
+	restored, err := NewRaftNodeWithStorage("follower", store)
+	if err != nil {
+		t.Fatalf("restore node: %v", err)
+	}
+
+	state := restored.State()
+
+	if state.Persistent.CurrentTerm != 5 {
+		t.Fatalf(
+			"expected restored term 5, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != "" {
+		t.Fatalf(
+			"expected restored vote to be cleared, got %q",
+			state.Persistent.VotedFor,
+		)
+	}
+
+	if state.Role != Follower {
+		t.Fatalf("expected restored node to be follower, got %v", state.Role)
 	}
 }

@@ -63,7 +63,7 @@ func (n *RaftNode) Log() *Log {
 	return n.log
 }
 
-func (n *RaftNode) becomeFollower(term Term) {
+func (n *RaftNode) becomeFollower(term Term) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
@@ -71,6 +71,12 @@ func (n *RaftNode) becomeFollower(term Term) {
 	n.state.Persistent.CurrentTerm = term
 	n.state.Persistent.VotedFor = ""
 	n.state.LeaderID = ""
+
+	if err := n.persistStateLocked(); err != nil {
+		return fmt.Errorf("persist follower transition: %w", err)
+	}
+
+	return nil
 }
 
 func (n *RaftNode) becomeLeader() {
@@ -406,7 +412,14 @@ func (n *RaftNode) AppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 	// 2. Update term if leader is newer.
 	if args.Term > n.state.Persistent.CurrentTerm {
 		n.state.Persistent.CurrentTerm = args.Term
+		n.state.Role = Follower
 		n.state.Persistent.VotedFor = ""
+		n.state.LeaderID = ""
+
+		if err := n.persistStateLocked(); err != nil {
+			n.mu.Unlock()
+			return reply
+		}
 	}
 
 	// 3. Verify the previous log entry.
