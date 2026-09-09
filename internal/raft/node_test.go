@@ -1207,3 +1207,43 @@ func TestLeaderTickSendsHeartbeat(t *testing.T) {
 		)
 	}
 }
+
+func TestFollowerRejectsStaleHeartbeat(t *testing.T) {
+	follower := NewRaftNode("follower")
+
+	follower.mu.Lock()
+	follower.state.Persistent.CurrentTerm = 5
+	follower.electionElapsed = 4
+	follower.mu.Unlock()
+
+	args := AppendEntriesArgs{
+		Term:     4,
+		LeaderID: "old-leader",
+	}
+
+	reply := follower.AppendEntries(args)
+
+	if reply.Success {
+		t.Fatal("follower should reject stale heartbeat")
+	}
+
+	state := follower.State()
+
+	if state.Persistent.CurrentTerm != 5 {
+		t.Fatalf(
+			"expected term 5, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	follower.mu.RLock()
+	electionElapsed := follower.electionElapsed
+	follower.mu.RUnlock()
+
+	if electionElapsed != 4 {
+		t.Fatalf(
+			"expected election timer to remain 4, got %d",
+			electionElapsed,
+		)
+	}
+}
