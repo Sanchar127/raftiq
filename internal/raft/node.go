@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"context"
 
 	"github.com/sanchar127/raftiq/internal/storage"
 )
@@ -955,4 +956,24 @@ func (n *RaftNode) tick() (electionDue, heartbeatDue bool) {
 	}
 
 	return electionDue, heartbeatDue
+}
+func (n *RaftNode) WaitApplied(ctx context.Context, index LogIndex) error {
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		n.mu.RLock()
+		applied := n.state.Volatile.LastApplied >= index
+		n.mu.RUnlock()
+
+		if applied {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }

@@ -7,6 +7,7 @@ type CommandType string
 const (
 	CommandPut    CommandType = "PUT"
 	CommandDelete CommandType = "DELETE"
+	CommandReadBarrier CommandType = "READ_BARRIER"
 )
 
 type Command struct {
