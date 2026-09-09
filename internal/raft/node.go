@@ -27,35 +27,12 @@ type RaftNode struct {
 }
 
 func NewRaftNode(id NodeID) *RaftNode {
-	return &RaftNode{
-		id:      id,
-		peers:   make([]Peer, 0),
-		applyCh: make(chan LogEntry, 100),
-
-		state: State{
-			Persistent: PersistentState{
-				CurrentTerm: 0,
-				VotedFor:    "",
-			},
-			Volatile: VolatileState{
-				CommitIndex: 0,
-				LastApplied: 0,
-			},
-			Leader: LeaderState{
-				NextIndex:  make(map[NodeID]LogIndex),
-				MatchIndex: make(map[NodeID]LogIndex),
-			},
-			Election: ElectionState{
-				VotesReceived: make(map[NodeID]struct{}),
-			},
-			Role:     Follower,
-			LeaderID: "",
-		},
-
-		log:              NewLog(),
-		electionTimeout:  10,
-		heartbeatTimeout: 1,
+	node, err := NewRaftNodeWithStorage(id, storage.NewMemoryStorage())
+	if err != nil {
+		panic(err)
 	}
+
+	return node
 }
 
 func (n *RaftNode) SetPeers(peers []Peer) {
@@ -756,4 +733,74 @@ func (n *RaftNode) heartbeat() {
 	for _, peer := range peers {
 		n.sendHeartbeat(peer)
 	}
+}
+
+func NewRaftNodeWithStorage(
+	id NodeID,
+	store storage.Storage,
+) (*RaftNode, error) {
+	if store == nil {
+		return nil, fmt.Errorf("storage must not be nil")
+	}
+
+	persistentState, err := store.LoadState()
+	if err != nil {
+		return nil, fmt.Errorf("load persistent state: %w", err)
+	}
+
+	entries, err := store.LoadEntries()
+	if err != nil {
+		return nil, fmt.Errorf("load log entries: %w", err)
+	}
+
+	log := NewLog()
+
+	for _, entry := range entries {
+		if err := log.Append(entry); err != nil {
+			return nil, fmt.Errorf(
+				"restore log entry %d: %w",
+				entry.Index,
+				err,
+			)
+		}
+	}
+
+	return &RaftNode{
+		id:      id,
+		storage: store,
+		peers:   make([]Peer, 0),
+		applyCh: make(chan LogEntry, 100),
+
+		state: State{
+			Persistent: persistentState,
+
+			Volatile: VolatileState{
+				CommitIndex: 0,
+				LastApplied: 0,
+			},
+
+			Leader: LeaderState{
+				NextIndex:  make(map[NodeID]LogIndex),
+				MatchIndex: make(map[NodeID]LogIndex),
+			},
+
+			Election: ElectionState{
+				VotesReceived: make(map[NodeID]struct{}),
+			},
+
+			Role:     Follower,
+			LeaderID: "",
+		},
+
+		log:              log,
+		electionTimeout:  10,
+		heartbeatTimeout: 1,
+	}, nil
+}
+
+func (n *RaftNode) Storage() storage.Storage {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	return n.storage
 }
