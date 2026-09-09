@@ -1694,3 +1694,247 @@ func TestHandleAppendEntriesReplyHigherTermPersistsAcrossRestart(t *testing.T) {
 		)
 	}
 }
+
+func TestRequestVoteStaleTermDoesNotChangeState(t *testing.T) {
+	store := storage.NewMemoryStorage()
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	node.mu.Lock()
+	node.state.Role = Leader
+	node.state.Persistent.CurrentTerm = 5
+	node.state.Persistent.VotedFor = node.id
+	node.state.LeaderID = node.id
+
+	if err := node.persistStateLocked(); err != nil {
+		node.mu.Unlock()
+		t.Fatalf("persist initial state: %v", err)
+	}
+	node.mu.Unlock()
+
+	reply := node.RequestVote(RequestVoteArgs{
+		Term:         3,
+		CandidateID:  "node-2",
+		LastLogIndex: 0,
+		LastLogTerm:  0,
+	})
+
+	if reply.VoteGranted {
+		t.Fatal("expected stale-term vote to be rejected")
+	}
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 5 {
+		t.Fatalf(
+			"expected term to remain 5, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != node.id {
+		t.Fatalf(
+			"expected vote to remain for %q, got %q",
+			node.id,
+			state.Persistent.VotedFor,
+		)
+	}
+
+	if state.Role != Leader {
+		t.Fatalf(
+			"expected role to remain Leader, got %v",
+			state.Role,
+		)
+	}
+
+	if state.LeaderID != node.id {
+		t.Fatalf(
+			"expected leader ID to remain %q, got %q",
+			node.id,
+			state.LeaderID,
+		)
+	}
+}
+
+func TestAppendEntriesStaleTermDoesNotChangeState(t *testing.T) {
+	store := storage.NewMemoryStorage()
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	node.mu.Lock()
+	node.state.Role = Leader
+	node.state.Persistent.CurrentTerm = 5
+	node.state.Persistent.VotedFor = node.id
+	node.state.LeaderID = node.id
+
+	if err := node.persistStateLocked(); err != nil {
+		node.mu.Unlock()
+		t.Fatalf("persist initial state: %v", err)
+	}
+	node.mu.Unlock()
+
+	reply := node.AppendEntries(AppendEntriesArgs{
+		Term:         3,
+		LeaderID:     "node-2",
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+		LeaderCommit: 0,
+	})
+
+	if reply.Success {
+		t.Fatal("expected stale-term AppendEntries to be rejected")
+	}
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 5 {
+		t.Fatalf(
+			"expected term to remain 5, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != node.id {
+		t.Fatalf(
+			"expected vote to remain for %q, got %q",
+			node.id,
+			state.Persistent.VotedFor,
+		)
+	}
+
+	if state.Role != Leader {
+		t.Fatalf(
+			"expected role to remain Leader, got %v",
+			state.Role,
+		)
+	}
+
+	if state.LeaderID != node.id {
+		t.Fatalf(
+			"expected leader ID to remain %q, got %q",
+			node.id,
+			state.LeaderID,
+		)
+	}
+}
+
+func TestHandleVoteReplyStaleTermDoesNotChangeState(t *testing.T) {
+	store := storage.NewMemoryStorage()
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	node.mu.Lock()
+	node.state.Role = Candidate
+	node.state.Persistent.CurrentTerm = 5
+	node.state.Persistent.VotedFor = node.id
+	node.state.LeaderID = ""
+
+	node.state.Election.VotesReceived = map[NodeID]struct{}{
+		node.id: {},
+	}
+	node.mu.Unlock()
+
+	node.handleVoteReply(5, RequestVoteReply{
+		Term:        3,
+		VoterID:     "node-2",
+		VoteGranted: true,
+	})
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 5 {
+		t.Fatalf("expected term to remain 5, got %d",
+			state.Persistent.CurrentTerm)
+	}
+
+	if state.Role != Candidate {
+		t.Fatalf("expected role to remain Candidate, got %v",
+			state.Role)
+	}
+
+	if state.Persistent.VotedFor != node.id {
+		t.Fatalf("expected vote to remain for %q, got %q",
+			node.id, state.Persistent.VotedFor)
+	}
+
+	if _, ok := state.Election.VotesReceived["node-2"]; ok {
+		t.Fatal("stale vote reply must not be counted")
+	}
+}
+
+func TestHandleAppendEntriesReplyStaleTermDoesNotChangeState(t *testing.T) {
+	store := storage.NewMemoryStorage()
+
+	node, err := NewRaftNodeWithStorage("leader", store)
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	node.mu.Lock()
+	node.state.Role = Leader
+	node.state.Persistent.CurrentTerm = 6
+	node.state.Persistent.VotedFor = node.id
+	node.state.LeaderID = node.id
+
+	node.state.Leader.NextIndex["follower"] = 3
+	node.state.Leader.MatchIndex["follower"] = 1
+	node.mu.Unlock()
+
+	node.handleAppendEntriesReply(
+		"follower",
+		AppendEntriesArgs{
+			Term: 5,
+			Entries: []LogEntry{
+				{
+					Index: 2,
+					Term:  5,
+					Data:  []byte("value"),
+				},
+			},
+		},
+		AppendEntriesReply{
+			Term:       5,
+			FollowerID: "follower",
+			Success:    true,
+		},
+	)
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 6 {
+		t.Fatalf(
+			"expected term to remain 6, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Role != Leader {
+		t.Fatalf(
+			"expected role to remain Leader, got %v",
+			state.Role,
+		)
+	}
+
+	if state.Leader.NextIndex["follower"] != 3 {
+		t.Fatalf(
+			"expected NextIndex to remain 3, got %d",
+			state.Leader.NextIndex["follower"],
+		)
+	}
+
+	if state.Leader.MatchIndex["follower"] != 1 {
+		t.Fatalf(
+			"expected MatchIndex to remain 1, got %d",
+			state.Leader.MatchIndex["follower"],
+		)
+	}
+}
