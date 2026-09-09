@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -355,5 +356,26 @@ func TestDecodeRecordRejectsChecksumMismatch(t *testing.T) {
 	_, _, err = decodeRecord(bytes.NewReader(record))
 	if err == nil {
 		t.Fatal("decodeRecord() error = nil, want checksum mismatch")
+	}
+}
+
+func TestDecodeRecordRejectsOversizedPayload(t *testing.T) {
+	var record bytes.Buffer
+
+	if err := record.WriteByte(recordEntries); err != nil {
+		t.Fatalf("WriteByte() error = %v", err)
+	}
+
+	if err := binary.Write(
+		&record,
+		binary.BigEndian,
+		maxRecordPayloadSize+1,
+	); err != nil {
+		t.Fatalf("binary.Write() error = %v", err)
+	}
+
+	_, _, err := decodeRecord(bytes.NewReader(record.Bytes()))
+	if err == nil {
+		t.Fatal("decodeRecord() error = nil, want oversized payload error")
 	}
 }

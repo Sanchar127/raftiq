@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	recordState   byte = 1
-	recordEntries byte = 2
+	recordState          byte   = 1
+	recordEntries        byte   = 2
+	maxRecordPayloadSize uint32 = 16 << 20
 )
 
 type WALStorage struct {
@@ -315,6 +316,14 @@ func decodeRecord(reader io.Reader) (byte, []byte, error) {
 		&payloadLength,
 	); err != nil {
 		return 0, nil, err
+	}
+
+	if payloadLength > maxRecordPayloadSize {
+		return 0, nil, fmt.Errorf(
+			"WAL record payload too large: %d bytes, maximum %d",
+			payloadLength,
+			maxRecordPayloadSize,
+		)
 	}
 
 	payload := make([]byte, payloadLength)
