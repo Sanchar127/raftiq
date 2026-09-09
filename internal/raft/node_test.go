@@ -2258,3 +2258,46 @@ func TestInstallSnapshotPersistsHigherTerm(t *testing.T) {
 		restartedState.Persistent.VotedFor,
 	)
 }
+
+func TestInstallSnapshotRestoresStateMachine(t *testing.T) {
+	store := storage.NewMemoryStorage()
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	require.NoError(t, err)
+
+	var restored model.Snapshot
+
+	node.SetSnapshotRestore(func(snapshot model.Snapshot) error {
+		restored = snapshot
+		return nil
+	})
+
+	require.NoError(t, node.Log().Append(LogEntry{
+		Index: 1,
+		Term:  1,
+		Data:  []byte("entry-1"),
+	}))
+
+	reply := node.InstallSnapshot(InstallSnapshotArgs{
+		Term:              2,
+		LeaderID:          "node-2",
+		LastIncludedIndex: 1,
+		LastIncludedTerm:  1,
+		Data:              []byte(`{"name":"raftiq"}`),
+	})
+
+	require.True(t, reply.Success)
+
+	require.Equal(t, LogIndex(1), restored.LastIncludedIndex)
+	require.Equal(t, Term(1), restored.LastIncludedTerm)
+	require.Equal(
+		t,
+		[]byte(`{"name":"raftiq"}`),
+		restored.Data,
+	)
+
+	state := node.State()
+
+	require.Equal(t, LogIndex(1), state.Volatile.CommitIndex)
+	require.Equal(t, LogIndex(1), state.Volatile.LastApplied)
+}
