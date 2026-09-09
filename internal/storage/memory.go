@@ -7,15 +7,40 @@ import (
 )
 
 type MemoryStorage struct {
-	mu      sync.RWMutex
-	state   model.PersistentState
-	entries []model.LogEntry
+	mu       sync.RWMutex
+	state    model.PersistentState
+	entries  []model.LogEntry
+	snapshot *model.Snapshot
 }
 
 func NewMemoryStorage() *MemoryStorage {
 	return &MemoryStorage{
 		entries: make([]model.LogEntry, 0),
 	}
+}
+
+func (s *MemoryStorage) SaveSnapshot(snapshot model.Snapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	snapshot.Data = append([]byte(nil), snapshot.Data...)
+	s.snapshot = &snapshot
+
+	return nil
+}
+
+func (s *MemoryStorage) LoadSnapshot() (model.Snapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.snapshot == nil {
+		return model.Snapshot{}, nil
+	}
+
+	snapshot := *s.snapshot
+	snapshot.Data = append([]byte(nil), s.snapshot.Data...)
+
+	return snapshot, nil
 }
 
 func (s *MemoryStorage) SaveState(state model.PersistentState) error {

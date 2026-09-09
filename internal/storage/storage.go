@@ -9,6 +9,9 @@ type Storage interface {
 	AppendEntries(entries []model.LogEntry) error
 	LoadEntries() ([]model.LogEntry, error)
 
+	SaveSnapshot(snapshot model.Snapshot) error
+	LoadSnapshot() (model.Snapshot, error)
+
 	Sync() error
 	Close() error
 }

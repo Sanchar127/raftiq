@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -15,14 +16,16 @@ import (
 const (
 	recordState          byte   = 1
 	recordEntries        byte   = 2
+	recordSnapshot              = 3
 	maxRecordPayloadSize uint32 = 16 << 20
 )
 
 type WALStorage struct {
-	mu      sync.RWMutex
-	file    *os.File
-	state   model.PersistentState
-	entries []model.LogEntry
+	mu       sync.RWMutex
+	file     *os.File
+	state    model.PersistentState
+	entries  []model.LogEntry
+	snapshot *model.Snapshot
 }
 
 func OpenWAL(path string) (*WALStorage, error) {
@@ -180,6 +183,15 @@ func (s *WALStorage) recover() error {
 				entry.Data = append([]byte(nil), entry.Data...)
 				s.entries = append(s.entries, entry)
 			}
+
+		case recordSnapshot:
+			snapshot, err := decodeSnapshotPayload(payload)
+			if err != nil {
+				return fmt.Errorf("decode snapshot: %w", err)
+			}
+
+			snapshot.Data = append([]byte(nil), snapshot.Data...)
+			s.snapshot = &snapshot
 
 		default:
 			return fmt.Errorf("unknown WAL record type: %d", recordType)
@@ -490,3 +502,63 @@ func decodeEntriesPayload(payload []byte) ([]model.LogEntry, error) {
 }
 
 var _ Storage = (*WALStorage)(nil)
+
+func (s *WALStorage) SaveSnapshot(snapshot model.Snapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	payload, err := encodeSnapshotPayload(snapshot)
+	if err != nil {
+		return err
+	}
+
+	record, err := encodeRecord(recordSnapshot, payload)
+	if err != nil {
+		return err
+	}
+
+	if _, err := s.file.Write(record); err != nil {
+		return fmt.Errorf("write snapshot record: %w", err)
+	}
+
+	snapshot.Data = append([]byte(nil), snapshot.Data...)
+	s.snapshot = &snapshot
+
+	return nil
+}
+
+func (s *WALStorage) LoadSnapshot() (model.Snapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.snapshot == nil {
+		return model.Snapshot{}, nil
+	}
+
+	snapshot := *s.snapshot
+	snapshot.Data = append([]byte(nil), s.snapshot.Data...)
+
+	return snapshot, nil
+}
+
+func encodeSnapshotPayload(snapshot model.Snapshot) ([]byte, error) {
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return nil, fmt.Errorf("encode snapshot: %w", err)
+	}
+
+	return data, nil
+}
+
+func decodeSnapshotPayload(payload []byte) (model.Snapshot, error) {
+	var snapshot model.Snapshot
+
+	if err := json.Unmarshal(payload, &snapshot); err != nil {
+		return model.Snapshot{}, fmt.Errorf(
+			"decode snapshot payload: %w",
+			err,
+		)
+	}
+
+	return snapshot, nil
+}
