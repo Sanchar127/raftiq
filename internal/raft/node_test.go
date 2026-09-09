@@ -1967,3 +1967,33 @@ func TestRaftNodeStopWithoutStart(t *testing.T) {
 		node.Stop()
 	})
 }
+
+func TestTickDoesNotTriggerElectionBeforeTimeout(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	for i := 0; i < node.electionTimeout-1; i++ {
+		electionDue, heartbeatDue := node.tick()
+
+		require.False(t, electionDue)
+		require.False(t, heartbeatDue)
+	}
+
+	electionDue, heartbeatDue := node.tick()
+
+	require.True(t, electionDue)
+	require.False(t, heartbeatDue)
+}
+
+func TestTickTriggersHeartbeatForLeader(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	node.mu.Lock()
+	node.state.Role = Leader
+	node.heartbeatElapsed = node.heartbeatTimeout - 1
+	node.mu.Unlock()
+
+	electionDue, heartbeatDue := node.tick()
+
+	require.False(t, electionDue)
+	require.True(t, heartbeatDue)
+}

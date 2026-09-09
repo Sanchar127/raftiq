@@ -350,28 +350,7 @@ func (n *RaftNode) runElection() {
 }
 
 func (n *RaftNode) Tick() bool {
-	n.mu.Lock()
-
-	n.electionElapsed++
-
-	heartbeatDue := false
-
-	if n.state.Role == Leader {
-		n.heartbeatElapsed++
-
-		if n.heartbeatElapsed >= n.heartbeatTimeout {
-			n.heartbeatElapsed = 0
-			heartbeatDue = true
-		}
-	}
-
-	electionDue := n.electionElapsed >= n.electionTimeout
-
-	if electionDue {
-		n.electionElapsed = 0
-	}
-
-	n.mu.Unlock()
+	electionDue, heartbeatDue := n.tick()
 
 	if heartbeatDue {
 		n.heartbeat()
@@ -903,7 +882,11 @@ func (n *RaftNode) run() {
 }
 
 func (n *RaftNode) runTick() {
-	electionDue := n.Tick()
+	electionDue, heartbeatDue := n.tick()
+
+	if heartbeatDue {
+		go n.heartbeat()
+	}
 
 	if electionDue {
 		go n.runElection()
@@ -925,4 +908,27 @@ func (n *RaftNode) Stop() {
 	n.runMu.Unlock()
 
 	<-doneCh
+}
+func (n *RaftNode) tick() (electionDue, heartbeatDue bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.electionElapsed++
+
+	if n.state.Role == Leader {
+		n.heartbeatElapsed++
+
+		if n.heartbeatElapsed >= n.heartbeatTimeout {
+			n.heartbeatElapsed = 0
+			heartbeatDue = true
+		}
+	}
+
+	electionDue = n.electionElapsed >= n.electionTimeout
+
+	if electionDue {
+		n.electionElapsed = 0
+	}
+
+	return electionDue, heartbeatDue
 }
