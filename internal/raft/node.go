@@ -736,3 +736,20 @@ func (n *RaftNode) heartbeat() {
 		go n.sendHeartbeat(peer)
 	}
 }
+func (n *RaftNode) heartbeatDue() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.state.Role != Leader {
+		return false
+	}
+
+	n.heartbeatElapsed++
+
+	if n.heartbeatElapsed < n.heartbeatTimeout {
+		return false
+	}
+
+	n.heartbeatElapsed = 0
+	return true
+}
