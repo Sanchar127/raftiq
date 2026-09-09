@@ -1997,3 +1997,72 @@ func TestTickTriggersHeartbeatForLeader(t *testing.T) {
 	require.False(t, electionDue)
 	require.True(t, heartbeatDue)
 }
+func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatal("condition was not satisfied before timeout")
+}
+
+func TestRaftNodeStartDrivesElection(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	node.SetElectionTimeout(3)
+
+	require.NoError(t, node.Start())
+	defer node.Stop()
+
+	waitForCondition(t, time.Second, func() bool {
+		state := node.State()
+		return state.Role == Candidate || state.Role == Leader
+	})
+}
+
+func TestRaftNodeStartAdvancesElectionTimer(t *testing.T) {
+	node := NewRaftNode("node-1")
+	node.SetElectionTimeout(100)
+
+	require.NoError(t, node.Start())
+
+	waitForCondition(t, time.Second, func() bool {
+		node.mu.RLock()
+		defer node.mu.RUnlock()
+
+		return node.electionElapsed > 0
+	})
+
+	node.Stop()
+}
+
+func TestRaftNodeStopWaitsForRunLoop(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	require.NoError(t, node.Start())
+
+	node.Stop()
+
+	node.runMu.Lock()
+	running := node.running
+	node.runMu.Unlock()
+
+	require.False(t, running)
+}
+
+func TestRaftNodeCanRestart(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	require.NoError(t, node.Start())
+	node.Stop()
+
+	require.NoError(t, node.Start())
+	node.Stop()
+}
