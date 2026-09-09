@@ -257,3 +257,15 @@ func (s *Store) ExpireLock(
 
 	return result, expired, nil
 }
+func (s *Store) ListLocks() []lock.Lock {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make([]lock.Lock, 0, len(s.locks.Locks))
+
+	for _, current := range s.locks.Locks {
+		result = append(result, current)
+	}
+
+	return result
+}

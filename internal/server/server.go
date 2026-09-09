@@ -19,8 +19,10 @@ type Server struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
-}
 
+	expirationMu      sync.Mutex
+	pendingExpiration map[string]uint64
+}
 type LockGrant struct {
 	Key          string
 	OwnerID      string
@@ -34,9 +36,10 @@ func NewServer(raftNode *raft.RaftNode, store *kv.Store) *Server {
 	raftNode.SetSnapshotRestore(applier.RestoreSnapshot)
 
 	return &Server{
-		raft:    raftNode,
-		store:   store,
-		applier: applier,
+		raft:              raftNode,
+		store:             store,
+		applier:           applier,
+		pendingExpiration: make(map[string]uint64),
 	}
 }
 
@@ -62,6 +65,13 @@ func (s *Server) Start() error {
 		defer s.wg.Done()
 
 		_ = s.applier.Run(s.ctx, s.raft.ApplyCh())
+	}()
+
+	s.wg.Add(1)
+
+	go func() {
+		defer s.wg.Done()
+		s.runLockExpirationWorker()
 	}()
 
 	return nil
@@ -213,4 +223,98 @@ func (s *Server) AcquireLock(
 		FencingToken: current.FencingToken,
 		ExpiresAt:    current.ExpiresAt,
 	}, nil
+}
+
+const lockExpirationPollInterval = 50 * time.Millisecond
+
+func (s *Server) runLockExpirationWorker() {
+	ticker := time.NewTicker(lockExpirationPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+
+		case <-ticker.C:
+			s.expireLocks()
+		}
+	}
+}
+
+func (s *Server) expireLocks() {
+	if s.raft.State().Role != raft.Leader {
+		return
+	}
+
+	now := time.Now().UnixNano()
+
+	for _, current := range s.store.ListLocks() {
+		if current.ExpiresAt <= 0 || current.ExpiresAt > now {
+			continue
+		}
+
+		if !s.markExpirationPending(current.Key, current.FencingToken) {
+			continue
+		}
+
+		go s.proposeLockExpiration(
+			current.Key,
+			current.FencingToken,
+		)
+	}
+}
+
+func (s *Server) markExpirationPending(
+	key string,
+	token uint64,
+) bool {
+	s.expirationMu.Lock()
+	defer s.expirationMu.Unlock()
+
+	current, ok := s.pendingExpiration[key]
+	if ok && current == token {
+		return false
+	}
+
+	s.pendingExpiration[key] = token
+	return true
+}
+
+func (s *Server) clearExpirationPending(
+	key string,
+	token uint64,
+) {
+	s.expirationMu.Lock()
+	defer s.expirationMu.Unlock()
+
+	current, ok := s.pendingExpiration[key]
+	if !ok || current != token {
+		return
+	}
+
+	delete(s.pendingExpiration, key)
+}
+
+func (s *Server) proposeLockExpiration(
+	key string,
+	token uint64,
+) {
+	defer s.clearExpirationPending(key, token)
+
+	commandData, err := kv.EncodeCommand(kv.Command{
+		Type:         kv.CommandLockExpire,
+		Key:          key,
+		FencingToken: token,
+	})
+	if err != nil {
+		return
+	}
+
+	index, err := s.raft.Propose(commandData)
+	if err != nil {
+		return
+	}
+
+	_ = s.applier.WaitApplied(s.ctx, index)
 }

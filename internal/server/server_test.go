@@ -497,3 +497,131 @@ func TestStoreExpireLockRejectsStaleToken(t *testing.T) {
 		)
 	}
 }
+
+func TestServerLockExpiresAutomatically(t *testing.T) {
+	nodeA := raft.NewRaftNode("A")
+	nodeB := raft.NewRaftNode("B")
+	nodeC := raft.NewRaftNode("C")
+
+	nodeA.SetPeers([]raft.Peer{nodeB, nodeC})
+
+	store := kv.NewStore()
+	server := NewServer(nodeA, store)
+
+	nodeA.Start()
+	defer nodeA.Stop()
+
+	server.Start()
+	defer server.Stop()
+
+	waitForLeader(t, nodeA)
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		3*time.Second,
+	)
+	defer cancel()
+
+	first, err := server.AcquireLock(
+		ctx,
+		"job:1",
+		"worker-A",
+		100,
+	)
+	if err != nil {
+		t.Fatalf("AcquireLock() returned error: %v", err)
+	}
+
+	if first.FencingToken != 1 {
+		t.Fatalf(
+			"expected fencing token 1, got %d",
+			first.FencingToken,
+		)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+
+	for time.Now().Before(deadline) {
+		if _, ok := store.GetLock("job:1"); !ok {
+			return
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatal("lock did not expire automatically")
+}
+
+func TestServerExpiredLockCanBeReacquired(t *testing.T) {
+	nodeA := raft.NewRaftNode("A")
+	nodeB := raft.NewRaftNode("B")
+	nodeC := raft.NewRaftNode("C")
+
+	nodeA.SetPeers([]raft.Peer{nodeB, nodeC})
+
+	store := kv.NewStore()
+	server := NewServer(nodeA, store)
+
+	nodeA.Start()
+	defer nodeA.Stop()
+
+	server.Start()
+	defer server.Stop()
+
+	waitForLeader(t, nodeA)
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		3*time.Second,
+	)
+	defer cancel()
+
+	first, err := server.AcquireLock(
+		ctx,
+		"job:1",
+		"worker-A",
+		100,
+	)
+	if err != nil {
+		t.Fatalf("first AcquireLock(): %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+
+	for time.Now().Before(deadline) {
+		if _, ok := store.GetLock("job:1"); !ok {
+			break
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if _, ok := store.GetLock("job:1"); ok {
+		t.Fatal("first lock did not expire")
+	}
+
+	second, err := server.AcquireLock(
+		ctx,
+		"job:1",
+		"worker-B",
+		1000,
+	)
+	if err != nil {
+		t.Fatalf("second AcquireLock(): %v", err)
+	}
+
+	if second.OwnerID != "worker-B" {
+		t.Fatalf(
+			"expected worker-B, got %q",
+			second.OwnerID,
+		)
+	}
+
+	if second.FencingToken != first.FencingToken+1 {
+		t.Fatalf(
+			"expected fencing token %d, got %d",
+			first.FencingToken+1,
+			second.FencingToken,
+		)
+	}
+}

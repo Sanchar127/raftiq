@@ -48,3 +48,4 @@ func TestStoreDeleteMissingKey(t *testing.T) {
 		t.Fatal("expected delete to report false")
 	}
 }
+
