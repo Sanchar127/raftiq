@@ -164,28 +164,45 @@ func (l *Log) RestoreSnapshot(snapshot model.Snapshot) error {
 		)
 	}
 
-	for _, entry := range l.entries {
-		if entry.Index == snapshot.LastIncludedIndex {
-			if entry.Term != snapshot.LastIncludedTerm {
-				return fmt.Errorf(
-					"snapshot term mismatch at index %d: log term %d, snapshot term %d",
-					snapshot.LastIncludedIndex,
-					entry.Term,
-					snapshot.LastIncludedTerm,
-				)
+	if snapshot.LastIncludedIndex == l.lastIncludedIndex {
+		if snapshot.LastIncludedTerm != l.lastIncludedTerm {
+			return fmt.Errorf(
+				"snapshot term mismatch at index %d: current term %d, requested term %d",
+				snapshot.LastIncludedIndex,
+				l.lastIncludedTerm,
+				snapshot.LastIncludedTerm,
+			)
+		}
+
+		return nil
+	}
+
+	// Determine whether the follower has the same log entry
+	// as the snapshot boundary.
+	boundaryMatches := false
+
+	if entry, ok := l.Get(snapshot.LastIncludedIndex); ok {
+		boundaryMatches = entry.Term == snapshot.LastIncludedTerm
+	}
+
+	if boundaryMatches {
+		// The snapshot agrees with our log at the boundary.
+		// Preserve the suffix after the snapshot index.
+		remaining := make([]LogEntry, 0, len(l.entries))
+
+		for _, entry := range l.entries {
+			if entry.Index > snapshot.LastIncludedIndex {
+				remaining = append(remaining, entry)
 			}
 		}
+
+		l.entries = remaining
+	} else {
+		// The snapshot conflicts with our log or the boundary
+		// is missing. The existing suffix cannot be trusted.
+		l.entries = nil
 	}
 
-	remaining := make([]LogEntry, 0, len(l.entries))
-
-	for _, entry := range l.entries {
-		if entry.Index > snapshot.LastIncludedIndex {
-			remaining = append(remaining, entry)
-		}
-	}
-
-	l.entries = remaining
 	l.lastIncludedIndex = snapshot.LastIncludedIndex
 	l.lastIncludedTerm = snapshot.LastIncludedTerm
 

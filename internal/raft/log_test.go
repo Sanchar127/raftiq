@@ -3,6 +3,7 @@ package raft
 import (
 	"fmt"
 	"github.com/sanchar127/raftiq/internal/model"
+	"github.com/stretchr/testify/require"
 	"testing"
 )
 
@@ -546,4 +547,71 @@ func TestLogRestoreSnapshot(t *testing.T) {
 	if _, ok := log.Get(5); !ok {
 		t.Fatal("expected entry 5 to remain")
 	}
+}
+
+func TestLogRestoreSnapshotKeepsMatchingSuffix(t *testing.T) {
+	log := NewLog()
+
+	entries := []LogEntry{
+		{Index: 1, Term: 1},
+		{Index: 2, Term: 1},
+		{Index: 3, Term: 2},
+		{Index: 4, Term: 2},
+	}
+
+	for _, entry := range entries {
+		require.NoError(t, log.Append(entry))
+	}
+
+	snapshot := model.Snapshot{
+		LastIncludedIndex: 2,
+		LastIncludedTerm:  1,
+		Data:              []byte("snapshot"),
+	}
+
+	require.NoError(t, log.RestoreSnapshot(snapshot))
+
+	require.Equal(t, LogIndex(2), log.LastIncludedIndex())
+	require.Equal(t, Term(1), log.LastIncludedTerm())
+
+	entry, ok := log.Get(3)
+	require.True(t, ok)
+	require.Equal(t, LogIndex(3), entry.Index)
+
+	entry, ok = log.Get(4)
+	require.True(t, ok)
+	require.Equal(t, LogIndex(4), entry.Index)
+}
+
+func TestLogRestoreSnapshotDiscardsConflictingSuffix(t *testing.T) {
+	log := NewLog()
+
+	entries := []LogEntry{
+		{Index: 1, Term: 1},
+		{Index: 2, Term: 2},
+		{Index: 3, Term: 2},
+		{Index: 4, Term: 3},
+	}
+
+	for _, entry := range entries {
+		require.NoError(t, log.Append(entry))
+	}
+
+	snapshot := model.Snapshot{
+		LastIncludedIndex: 2,
+		LastIncludedTerm:  5,
+		Data:              []byte("snapshot"),
+	}
+
+	require.NoError(t, log.RestoreSnapshot(snapshot))
+
+	require.Equal(t, LogIndex(2), log.LastIncludedIndex())
+	require.Equal(t, Term(5), log.LastIncludedTerm())
+	require.Equal(t, LogIndex(2), log.LastIndex())
+
+	_, ok := log.Get(3)
+	require.False(t, ok)
+
+	_, ok = log.Get(4)
+	require.False(t, ok)
 }
