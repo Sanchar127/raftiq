@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sanchar127/raftiq/internal/model"
 	"github.com/sanchar127/raftiq/internal/storage"
 )
 
@@ -982,4 +983,60 @@ func (n *RaftNode) WaitApplied(ctx context.Context, index LogIndex) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+func (n *RaftNode) CreateSnapshot(
+	index LogIndex,
+	data []byte,
+) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if index > n.state.Volatile.LastApplied {
+		return fmt.Errorf(
+			"cannot snapshot unapplied index %d: last applied %d",
+			index,
+			n.state.Volatile.LastApplied,
+		)
+	}
+
+	if index > n.state.Volatile.CommitIndex {
+		return fmt.Errorf(
+			"cannot snapshot uncommitted index %d: commit index %d",
+			index,
+			n.state.Volatile.CommitIndex,
+		)
+	}
+
+	if index == 0 {
+		return fmt.Errorf("cannot snapshot index 0")
+	}
+
+	entry, ok := n.log.Get(index)
+	if !ok {
+		return fmt.Errorf(
+			"cannot snapshot missing log index %d",
+			index,
+		)
+	}
+
+	snapshot := model.Snapshot{
+		LastIncludedIndex: index,
+		LastIncludedTerm:  entry.Term,
+		Data:              append([]byte(nil), data...),
+	}
+
+	if err := n.storage.SaveSnapshot(snapshot); err != nil {
+		return fmt.Errorf("save snapshot: %w", err)
+	}
+
+	if err := n.storage.Sync(); err != nil {
+		return fmt.Errorf("sync snapshot: %w", err)
+	}
+
+	if err := n.log.Compact(snapshot); err != nil {
+		return fmt.Errorf("compact log after snapshot: %w", err)
+	}
+
+	return nil
 }
