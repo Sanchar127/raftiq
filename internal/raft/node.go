@@ -579,6 +579,10 @@ func (n *RaftNode) buildAppendEntries(peerID NodeID) (AppendEntriesArgs, bool) {
 
 func (n *RaftNode) replicateTo(peer Peer) {
 	for {
+		if n.sendInstallSnapshot(peer) {
+			continue
+		}
+
 		args, ok := n.buildAppendEntries(peer.ID())
 		if !ok {
 			return
@@ -1182,4 +1186,114 @@ func (n *RaftNode) InstallSnapshot(
 	reply.Success = true
 
 	return reply
+}
+
+func (n *RaftNode) buildInstallSnapshot(
+	peerID NodeID,
+) (InstallSnapshotArgs, bool) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	if n.state.Role != Leader {
+		return InstallSnapshotArgs{}, false
+	}
+
+	nextIndex, ok := n.state.Leader.NextIndex[peerID]
+	if !ok {
+		return InstallSnapshotArgs{}, false
+	}
+
+	snapshot, err := n.storage.LoadSnapshot()
+	if err != nil {
+		return InstallSnapshotArgs{}, false
+	}
+
+	if snapshot.LastIncludedIndex == 0 {
+		return InstallSnapshotArgs{}, false
+	}
+
+	if nextIndex > snapshot.LastIncludedIndex {
+		return InstallSnapshotArgs{}, false
+	}
+
+	return InstallSnapshotArgs{
+		Term:              n.state.Persistent.CurrentTerm,
+		LeaderID:          n.id,
+		LastIncludedIndex: snapshot.LastIncludedIndex,
+		LastIncludedTerm:  snapshot.LastIncludedTerm,
+		Data:              append([]byte(nil), snapshot.Data...),
+	}, true
+}
+
+func (n *RaftNode) handleInstallSnapshotReply(
+	peerID NodeID,
+	args InstallSnapshotArgs,
+	reply InstallSnapshotReply,
+) {
+	n.mu.Lock()
+
+	if reply.Term > n.state.Persistent.CurrentTerm {
+		n.state.Persistent.CurrentTerm = reply.Term
+		n.state.Role = Follower
+		n.state.Persistent.VotedFor = ""
+		n.state.LeaderID = ""
+
+		if err := n.persistStateLocked(); err != nil {
+			n.mu.Unlock()
+			return
+		}
+
+		n.mu.Unlock()
+		return
+	}
+
+	if n.state.Role != Leader {
+		n.mu.Unlock()
+		return
+	}
+
+	if args.Term != n.state.Persistent.CurrentTerm {
+		n.mu.Unlock()
+		return
+	}
+
+	if !reply.Success {
+		n.mu.Unlock()
+		return
+	}
+
+	if args.LastIncludedIndex > n.state.Leader.MatchIndex[peerID] {
+		n.state.Leader.MatchIndex[peerID] = args.LastIncludedIndex
+	}
+
+	nextIndex := args.LastIncludedIndex + 1
+
+	if nextIndex > n.state.Leader.NextIndex[peerID] {
+		n.state.Leader.NextIndex[peerID] = nextIndex
+	}
+
+	advanced := n.advanceCommitIndexLocked()
+
+	n.mu.Unlock()
+
+	if advanced {
+		n.applyCommitted()
+	}
+}
+
+func (n *RaftNode) sendInstallSnapshot(peer Peer) bool {
+	args, ok := n.buildInstallSnapshot(peer.ID())
+	if !ok {
+		return false
+	}
+
+	reply := peer.InstallSnapshot(args)
+
+	n.handleInstallSnapshotReply(
+		peer.ID(),
+		args,
+		reply,
+	)
+
+	return reply.Success
 }
