@@ -918,3 +918,104 @@ func TestProposeAsLeader(t *testing.T) {
 		t.Fatalf("expected term 1, got %d", entry.Term)
 	}
 }
+
+func TestLeaderBacktracksNextIndexOnReplicationFailure(t *testing.T) {
+	leader := NewRaftNode("leader")
+	follower := NewRaftNode("follower")
+
+	leader.SetPeers([]Peer{follower})
+	follower.SetPeers([]Peer{leader})
+
+	// Put the leader into leader state.
+	leader.startElection()
+	leader.becomeLeader()
+
+	// Leader has three entries.
+	if err := leader.Log().Append(LogEntry{
+		Index: 1,
+		Term:  1,
+		Data:  []byte("one"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := leader.Log().Append(LogEntry{
+		Index: 2,
+		Term:  1,
+		Data:  []byte("two"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := leader.Log().Append(LogEntry{
+		Index: 3,
+		Term:  2,
+		Data:  []byte("three"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pretend the leader believes the follower is caught up.
+	leader.mu.Lock()
+	leader.state.Leader.NextIndex[follower.ID()] = 4
+	leader.mu.Unlock()
+
+	// The follower does not have entry 3, so the first attempt
+	// must fail because PrevLogIndex=3 cannot be found.
+	args, ok := leader.buildAppendEntries(follower.ID())
+	if !ok {
+		t.Fatal("expected AppendEntries arguments to be built")
+	}
+
+	reply := follower.AppendEntries(args)
+
+	if reply.Success {
+		t.Fatal("expected replication to fail")
+	}
+
+	// Process the failed replication response.
+	leader.handleAppendEntriesReply(follower.ID(), args, reply)
+
+	// The leader should back up from 4 to 3.
+	leader.mu.RLock()
+	nextIndex := leader.state.Leader.NextIndex[follower.ID()]
+	leader.mu.RUnlock()
+
+	if nextIndex != 3 {
+		t.Fatalf("expected NextIndex 3 after failure, got %d", nextIndex)
+	}
+
+	// Build the retry.
+	retryArgs, ok := leader.buildAppendEntries(follower.ID())
+	if !ok {
+		t.Fatal("expected retry AppendEntries arguments to be built")
+	}
+
+	if retryArgs.PrevLogIndex != 2 {
+		t.Fatalf(
+			"expected retry PrevLogIndex 2, got %d",
+			retryArgs.PrevLogIndex,
+		)
+	}
+
+	if retryArgs.PrevLogTerm != 1 {
+		t.Fatalf(
+			"expected retry PrevLogTerm 1, got %d",
+			retryArgs.PrevLogTerm,
+		)
+	}
+
+	if len(retryArgs.Entries) != 1 {
+		t.Fatalf(
+			"expected retry to contain 1 entry, got %d",
+			len(retryArgs.Entries),
+		)
+	}
+
+	if retryArgs.Entries[0].Index != 3 {
+		t.Fatalf(
+			"expected retry entry index 3, got %d",
+			retryArgs.Entries[0].Index,
+		)
+	}
+}
