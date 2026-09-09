@@ -253,3 +253,85 @@ func TestWALStorageRecoversValidRecordsBeforeTruncatedTail(t *testing.T) {
 		}
 	}
 }
+
+func TestWALStorageRejectsUnknownRecordType(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("OpenWAL() error = %v", err)
+	}
+
+	if err := storage.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+
+	unknownRecord, err := encodeRecord(99, []byte("invalid"))
+	if err != nil {
+		file.Close()
+		t.Fatalf("encodeRecord() error = %v", err)
+	}
+
+	if _, err := file.Write(unknownRecord); err != nil {
+		file.Close()
+		t.Fatalf("write unknown record: %v", err)
+	}
+
+	if err := file.Close(); err != nil {
+		t.Fatalf("close WAL: %v", err)
+	}
+
+	_, err = OpenWAL(path)
+	if err == nil {
+		t.Fatal("OpenWAL() error = nil, want unknown record error")
+	}
+}
+
+func TestWALStorageRejectsMalformedStatePayload(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq.wal")
+
+	record, err := encodeRecord(recordState, []byte{1, 2, 3})
+	if err != nil {
+		t.Fatalf("encodeRecord() error = %v", err)
+	}
+
+	if err := os.WriteFile(path, record, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	_, err = OpenWAL(path)
+	if err == nil {
+		t.Fatal("OpenWAL() error = nil, want malformed state error")
+	}
+}
+
+func TestWALStorageRejectsMalformedEntriesPayload(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq.wal")
+
+	record, err := encodeRecord(recordEntries, []byte{
+		0,
+		0,
+		0,
+		1,
+	})
+	if err != nil {
+		t.Fatalf("encodeRecord() error = %v", err)
+	}
+
+	if err := os.WriteFile(path, record, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	_, err = OpenWAL(path)
+	if err == nil {
+		t.Fatal("OpenWAL() error = nil, want malformed entries error")
+	}
+}
