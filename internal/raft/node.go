@@ -750,6 +750,6 @@ func (n *RaftNode) heartbeat() {
 	n.mu.RUnlock()
 
 	for _, peer := range peers {
-		go n.sendHeartbeat(peer)
+		n.sendHeartbeat(peer)
 	}
 }

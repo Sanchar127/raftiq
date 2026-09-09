@@ -1160,3 +1160,50 @@ func TestHeartbeatResetsFollowerElectionTimer(t *testing.T) {
 		t.Fatalf("expected election timer reset, got %d", electionElapsed)
 	}
 }
+
+func TestLeaderTickSendsHeartbeat(t *testing.T) {
+	leader := NewRaftNode("leader")
+	follower := NewRaftNode("follower")
+
+	leader.SetPeers([]Peer{follower})
+	follower.SetPeers([]Peer{leader})
+
+	leader.startElection()
+	leader.becomeLeader()
+
+	follower.mu.Lock()
+	follower.electionElapsed = 5
+	follower.mu.Unlock()
+
+	leader.mu.Lock()
+	leader.heartbeatTimeout = 1
+	leader.mu.Unlock()
+
+	electionDue := leader.Tick()
+
+	if electionDue {
+		t.Fatal("leader should not start an election")
+	}
+
+	follower.mu.RLock()
+	electionElapsed := follower.electionElapsed
+	followerRole := follower.state.Role
+	followerLeaderID := follower.state.LeaderID
+	follower.mu.RUnlock()
+
+	if electionElapsed != 0 {
+		t.Fatalf("expected follower election timer to reset, got %d", electionElapsed)
+	}
+
+	if followerRole != Follower {
+		t.Fatalf("expected follower role, got %v", followerRole)
+	}
+
+	if followerLeaderID != leader.ID() {
+		t.Fatalf(
+			"expected leader ID %q, got %q",
+			leader.ID(),
+			followerLeaderID,
+		)
+	}
+}
