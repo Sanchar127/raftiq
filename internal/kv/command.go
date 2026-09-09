@@ -8,12 +8,17 @@ const (
 	CommandPut         CommandType = "PUT"
 	CommandDelete      CommandType = "DELETE"
 	CommandReadBarrier CommandType = "READ_BARRIER"
+
+	CommandLockAcquire CommandType = "LOCK_ACQUIRE"
 )
 
 type Command struct {
 	Type  CommandType `json:"type"`
 	Key   string      `json:"key"`
 	Value []byte      `json:"value,omitempty"`
+
+	OwnerID   string `json:"owner_id,omitempty"`
+	ExpiresAt int64  `json:"expires_at,omitempty"`
 }
 
 func EncodeCommand(command Command) ([]byte, error) {
