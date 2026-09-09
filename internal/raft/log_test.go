@@ -1,6 +1,10 @@
 package raft
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/sanchar127/raftiq/internal/model"
+)
 
 func TestNewLog(t *testing.T) {
 	log := NewLog()
@@ -145,5 +149,144 @@ func TestLogTruncateFromBeyondEnd(t *testing.T) {
 
 	if log.LastIndex() != 3 {
 		t.Fatalf("expected log to remain unchanged, got last index %d", log.LastIndex())
+	}
+}
+
+func TestLogCompact(t *testing.T) {
+	log := NewLog()
+
+	for i := LogIndex(1); i <= 5; i++ {
+		if err := log.Append(LogEntry{
+			Index: i,
+			Term:  Term(i),
+			Data:  []byte{byte(i)},
+		}); err != nil {
+			t.Fatalf("append failed: %v", err)
+		}
+	}
+
+	snapshot := model.Snapshot{
+		LastIncludedIndex: 3,
+		LastIncludedTerm:  3,
+		Data:              []byte(`{"x":"value"}`),
+	}
+
+	if err := log.Compact(snapshot); err != nil {
+		t.Fatalf("compact failed: %v", err)
+	}
+
+	if log.LastIncludedIndex() != 3 {
+		t.Fatalf(
+			"expected last included index 3, got %d",
+			log.LastIncludedIndex(),
+		)
+	}
+
+	if log.LastIncludedTerm() != 3 {
+		t.Fatalf(
+			"expected last included term 3, got %d",
+			log.LastIncludedTerm(),
+		)
+	}
+
+	if log.LastIndex() != 5 {
+		t.Fatalf("expected last index 5, got %d", log.LastIndex())
+	}
+
+	entry, ok := log.Get(3)
+	if !ok {
+		t.Fatal("expected snapshot boundary entry to exist")
+	}
+
+	if entry.Index != 3 {
+		t.Fatalf("expected boundary index 3, got %d", entry.Index)
+	}
+
+	if entry.Term != 3 {
+		t.Fatalf("expected boundary term 3, got %d", entry.Term)
+	}
+
+	if _, ok := log.Get(1); ok {
+		t.Fatal("entry 1 should have been compacted")
+	}
+
+	if _, ok := log.Get(2); ok {
+		t.Fatal("entry 2 should have been compacted")
+	}
+
+	if _, ok := log.Get(4); !ok {
+		t.Fatal("entry 4 should remain after compaction")
+	}
+
+	if _, ok := log.Get(5); !ok {
+		t.Fatal("entry 5 should remain after compaction")
+	}
+}
+
+func TestLogCompactEntireLog(t *testing.T) {
+	log := NewLog()
+
+	for i := LogIndex(1); i <= 5; i++ {
+		if err := log.Append(LogEntry{
+			Index: i,
+			Term:  2,
+		}); err != nil {
+			t.Fatalf("append failed: %v", err)
+		}
+	}
+
+	snapshot := model.Snapshot{
+		LastIncludedIndex: 5,
+		LastIncludedTerm:  2,
+		Data:              []byte(`snapshot`),
+	}
+
+	if err := log.Compact(snapshot); err != nil {
+		t.Fatalf("compact failed: %v", err)
+	}
+
+	if log.LastIndex() != 5 {
+		t.Fatalf("expected last index 5, got %d", log.LastIndex())
+	}
+
+	if log.LastTerm() != 2 {
+		t.Fatalf("expected last term 2, got %d", log.LastTerm())
+	}
+
+	if _, ok := log.Get(5); !ok {
+		t.Fatal("expected snapshot boundary entry to exist")
+	}
+
+	if _, ok := log.Get(4); ok {
+		t.Fatal("entry 4 should have been compacted")
+	}
+}
+
+func TestLogCompactRejectsFutureSnapshot(t *testing.T) {
+	log := NewLog()
+
+	for i := LogIndex(1); i <= 3; i++ {
+		if err := log.Append(LogEntry{
+			Index: i,
+			Term:  1,
+		}); err != nil {
+			t.Fatalf("append failed: %v", err)
+		}
+	}
+
+	err := log.Compact(model.Snapshot{
+		LastIncludedIndex: 4,
+		LastIncludedTerm:  1,
+	})
+
+	if err == nil {
+		t.Fatal("expected compact beyond log to fail")
+	}
+
+	if log.LastIndex() != 3 {
+		t.Fatalf(
+			"log changed after rejected compaction: last index = %d",
+			log.LastIndex(),
+		)
 	}
 }

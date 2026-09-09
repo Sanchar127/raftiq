@@ -1,9 +1,15 @@
 package raft
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/sanchar127/raftiq/internal/model"
+)
 
 type Log struct {
-	entries []LogEntry
+	entries           []LogEntry
+	lastIncludedIndex LogIndex
+	lastIncludedTerm  Term
 }
 
 func NewLog() *Log {
@@ -14,7 +20,7 @@ func NewLog() *Log {
 
 func (l *Log) LastIndex() LogIndex {
 	if len(l.entries) == 0 {
-		return 0
+		return l.lastIncludedIndex
 	}
 
 	return l.entries[len(l.entries)-1].Index
@@ -22,20 +28,10 @@ func (l *Log) LastIndex() LogIndex {
 
 func (l *Log) LastTerm() Term {
 	if len(l.entries) == 0 {
-		return 0
+		return l.lastIncludedTerm
 	}
 
 	return l.entries[len(l.entries)-1].Term
-}
-
-func (l *Log) Get(index LogIndex) (LogEntry, bool) {
-	for _, entry := range l.entries {
-		if entry.Index == index {
-			return entry, true
-		}
-	}
-
-	return LogEntry{}, false
 }
 
 func (l *Log) Append(entry LogEntry) error {
@@ -66,4 +62,53 @@ func (l *Log) TruncateFrom(index LogIndex) {
 			return
 		}
 	}
+}
+
+func (l *Log) LastIncludedIndex() LogIndex {
+	return l.lastIncludedIndex
+}
+
+func (l *Log) LastIncludedTerm() Term {
+	return l.lastIncludedTerm
+}
+
+func (l *Log) Compact(snapshot model.Snapshot) error {
+	if snapshot.LastIncludedIndex > l.LastIndex() {
+		return fmt.Errorf(
+			"cannot compact beyond last log index: snapshot %d, last index %d",
+			snapshot.LastIncludedIndex,
+			l.LastIndex(),
+		)
+	}
+
+	remaining := make([]LogEntry, 0, len(l.entries))
+
+	for _, entry := range l.entries {
+		if entry.Index > snapshot.LastIncludedIndex {
+			remaining = append(remaining, entry)
+		}
+	}
+
+	l.entries = remaining
+	l.lastIncludedIndex = snapshot.LastIncludedIndex
+	l.lastIncludedTerm = snapshot.LastIncludedTerm
+
+	return nil
+}
+
+func (l *Log) Get(index LogIndex) (LogEntry, bool) {
+	if index == l.lastIncludedIndex && index != 0 {
+		return LogEntry{
+			Index: index,
+			Term:  l.lastIncludedTerm,
+		}, true
+	}
+
+	for _, entry := range l.entries {
+		if entry.Index == index {
+			return entry, true
+		}
+	}
+
+	return LogEntry{}, false
 }
