@@ -141,6 +141,11 @@ func (n *RaftNode) RequestVote(args RequestVoteArgs) RequestVoteReply {
 		n.state.Role = Follower
 		n.state.Persistent.VotedFor = ""
 		n.state.LeaderID = ""
+
+		if err := n.persistStateLocked(); err != nil {
+			reply.Term = n.state.Persistent.CurrentTerm
+			return reply
+		}
 	}
 
 	reply.Term = n.state.Persistent.CurrentTerm
@@ -155,8 +160,16 @@ func (n *RaftNode) RequestVote(args RequestVoteArgs) RequestVoteReply {
 	}
 
 	n.state.Persistent.VotedFor = args.CandidateID
+
+	if err := n.persistStateLocked(); err != nil {
+		reply.Term = n.state.Persistent.CurrentTerm
+		return reply
+	}
+
+	reply.Term = n.state.Persistent.CurrentTerm
 	reply.VoteGranted = true
 	n.electionElapsed = 0
+
 	return reply
 }
 
@@ -237,7 +250,7 @@ type Peer interface {
 	AppendEntries(args AppendEntriesArgs) AppendEntriesReply
 }
 
-func (n *RaftNode) startElection() Term {
+func (n *RaftNode) startElection() (Term, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
@@ -250,7 +263,11 @@ func (n *RaftNode) startElection() Term {
 		n.id: {},
 	}
 
-	return n.state.Persistent.CurrentTerm
+	if err := n.persistStateLocked(); err != nil {
+		return 0, err
+	}
+
+	return n.state.Persistent.CurrentTerm, nil
 }
 
 func (n *RaftNode) requestVotes() {
@@ -350,6 +367,7 @@ func (n *RaftNode) SetElectionTimeout(timeout int) {
 
 	n.electionTimeout = timeout
 }
+
 func (n *RaftNode) onElectionTimeout() {
 	state := n.State()
 
@@ -357,7 +375,10 @@ func (n *RaftNode) onElectionTimeout() {
 		return
 	}
 
-	n.startElection()
+	if _, err := n.startElection(); err != nil {
+		return
+	}
+
 	n.requestVotes()
 }
 
@@ -803,4 +824,16 @@ func (n *RaftNode) Storage() storage.Storage {
 	defer n.mu.RUnlock()
 
 	return n.storage
+}
+
+func (n *RaftNode) persistStateLocked() error {
+	if err := n.storage.SaveState(n.state.Persistent); err != nil {
+		return fmt.Errorf("save persistent state: %w", err)
+	}
+
+	if err := n.storage.Sync(); err != nil {
+		return fmt.Errorf("sync persistent state: %w", err)
+	}
+
+	return nil
 }

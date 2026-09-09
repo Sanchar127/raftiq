@@ -3,6 +3,8 @@ package raft
 import (
 	"testing"
 	"time"
+
+	"github.com/sanchar127/raftiq/internal/storage"
 )
 
 func TestNewRaftNode(t *testing.T) {
@@ -62,7 +64,11 @@ func TestNewRaftNode(t *testing.T) {
 func TestBecomeLeader(t *testing.T) {
 	node := NewRaftNode("node-1")
 
-	node.startElection()
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
+
 	node.becomeLeader()
 
 	state := node.State()
@@ -82,7 +88,10 @@ func TestBecomeLeader(t *testing.T) {
 func TestBecomeCandidate(t *testing.T) {
 	node := NewRaftNode("node-1")
 
-	node.startElection()
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
 
 	state := node.State()
 
@@ -108,9 +117,12 @@ func TestBecomeCandidate(t *testing.T) {
 func TestBecomeFollower(t *testing.T) {
 	node := NewRaftNode("node-1")
 
-	node.startElection()
-	node.becomeLeader()
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
 
+	node.becomeLeader()
 	node.becomeFollower(2)
 
 	state := node.State()
@@ -185,7 +197,10 @@ func TestRequestVoteRejectsSecondCandidate(t *testing.T) {
 func TestRequestVoteRejectsOlderTerm(t *testing.T) {
 	node := NewRaftNode("node-1")
 
-	node.startElection()
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
 
 	reply := node.RequestVote(RequestVoteArgs{
 		Term:        0,
@@ -204,7 +219,10 @@ func TestRequestVoteRejectsOlderTerm(t *testing.T) {
 func TestRequestVoteUpdatesHigherTerm(t *testing.T) {
 	node := NewRaftNode("node-1")
 
-	node.startElection()
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
 
 	reply := node.RequestVote(RequestVoteArgs{
 		Term:        2,
@@ -232,7 +250,10 @@ func TestRequestVoteUpdatesHigherTerm(t *testing.T) {
 func TestCandidateVotesForItself(t *testing.T) {
 	node := NewRaftNode("A")
 
-	node.startElection()
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
 
 	state := node.State()
 
@@ -252,7 +273,10 @@ func TestCandidateVotesForItself(t *testing.T) {
 func TestRecordVote(t *testing.T) {
 	node := NewRaftNode("A")
 
-	node.startElection()
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
 
 	term := node.State().Persistent.CurrentTerm
 
@@ -272,7 +296,10 @@ func TestRecordVote(t *testing.T) {
 func TestDuplicateVoteIsIgnored(t *testing.T) {
 	node := NewRaftNode("A")
 
-	node.startElection()
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
 
 	term := node.State().Persistent.CurrentTerm
 
@@ -288,7 +315,10 @@ func TestDuplicateVoteIsIgnored(t *testing.T) {
 func TestVoteFromOldElectionIsIgnored(t *testing.T) {
 	node := NewRaftNode("A")
 
-	node.startElection()
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
 
 	currentTerm := node.State().Persistent.CurrentTerm
 
@@ -305,7 +335,10 @@ func TestCandidateBecomesLeaderAfterMajority(t *testing.T) {
 		NewRaftNode("C"),
 	})
 
-	node.startElection()
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
 
 	term := node.State().Persistent.CurrentTerm
 
@@ -360,7 +393,10 @@ func TestThreeNodeElection(t *testing.T) {
 func TestHigherTermVoteReplyMakesCandidateFollower(t *testing.T) {
 	node := NewRaftNode("A")
 
-	node.startElection()
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
 
 	currentTerm := node.State().Persistent.CurrentTerm
 
@@ -413,12 +449,17 @@ func TestHigherTermVoteReplyMakesCandidateFollower(t *testing.T) {
 func TestStaleElectionVoteReplyIsIgnored(t *testing.T) {
 	node := NewRaftNode("A")
 
-	node.startElection()
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
 
 	oldTerm := node.State().Persistent.CurrentTerm
 
-	// Start a new election.
-	node.startElection()
+	_, err = node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
 
 	currentTerm := node.State().Persistent.CurrentTerm
 
@@ -430,7 +471,6 @@ func TestStaleElectionVoteReplyIsIgnored(t *testing.T) {
 		)
 	}
 
-	// Response from the old election.
 	reply := RequestVoteReply{
 		Term:        oldTerm,
 		VoterID:     "B",
@@ -466,9 +506,17 @@ func TestSplitVoteProducesNoLeader(t *testing.T) {
 	nodeB.SetPeers([]Peer{nodeA, nodeC})
 	nodeC.SetPeers([]Peer{nodeA, nodeB})
 
-	nodeA.startElection()
-	nodeB.startElection()
-	nodeC.startElection()
+	if _, err := nodeA.startElection(); err != nil {
+		t.Fatalf("start election: %v", err)
+	}
+
+	if _, err := nodeB.startElection(); err != nil {
+		t.Fatalf("start election: %v", err)
+	}
+
+	if _, err := nodeC.startElection(); err != nil {
+		t.Fatalf("start election: %v", err)
+	}
 
 	if nodeA.tryBecomeLeader() {
 		t.Fatal("A should not become leader with only its own vote")
@@ -550,7 +598,10 @@ func TestTickStartsElection(t *testing.T) {
 		t.Fatal("expected election timeout after third tick")
 	}
 
-	node.startElection()
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
 
 	state := node.State()
 
@@ -571,7 +622,11 @@ func TestLeaderDoesNotStartElectionOnTimeout(t *testing.T) {
 	node := NewRaftNode("A")
 	node.SetPeers([]Peer{})
 
-	node.startElection()
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
+
 	node.tryBecomeLeader()
 
 	if node.State().Role != Leader {
@@ -706,12 +761,13 @@ func TestAppendEntriesRejectsOlderTerm(t *testing.T) {
 	node := NewRaftNode("B")
 	node.SetElectionTimeout(10)
 
-	// Move the follower's timer forward.
 	node.Tick()
 	node.Tick()
 
-	// Establish current term 5.
-	node.startElection()
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
 
 	node.mu.Lock()
 	node.state.Persistent.CurrentTerm = 5
@@ -890,10 +946,15 @@ func TestAppendEntriesAppliesCommittedEntry(t *testing.T) {
 		)
 	}
 }
+
 func TestProposeAsLeader(t *testing.T) {
 	node := NewRaftNode("node-1")
 
-	node.startElection()
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
+
 	node.becomeLeader()
 
 	index, err := node.Propose([]byte("hello"))
@@ -926,11 +987,12 @@ func TestLeaderBacktracksNextIndexOnReplicationFailure(t *testing.T) {
 	leader.SetPeers([]Peer{follower})
 	follower.SetPeers([]Peer{leader})
 
-	// Put the leader into leader state.
-	leader.startElection()
+	if _, err := leader.startElection(); err != nil {
+		t.Fatalf("start election: %v", err)
+	}
+
 	leader.becomeLeader()
 
-	// Leader has three entries.
 	if err := leader.Log().Append(LogEntry{
 		Index: 1,
 		Term:  1,
@@ -955,13 +1017,10 @@ func TestLeaderBacktracksNextIndexOnReplicationFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Pretend the leader believes the follower is caught up.
 	leader.mu.Lock()
 	leader.state.Leader.NextIndex[follower.ID()] = 4
 	leader.mu.Unlock()
 
-	// The follower does not have entry 3, so the first attempt
-	// must fail because PrevLogIndex=3 cannot be found.
 	args, ok := leader.buildAppendEntries(follower.ID())
 	if !ok {
 		t.Fatal("expected AppendEntries arguments to be built")
@@ -973,10 +1032,8 @@ func TestLeaderBacktracksNextIndexOnReplicationFailure(t *testing.T) {
 		t.Fatal("expected replication to fail")
 	}
 
-	// Process the failed replication response.
 	leader.handleAppendEntriesReply(follower.ID(), args, reply)
 
-	// The leader should back up from 4 to 3.
 	leader.mu.RLock()
 	nextIndex := leader.state.Leader.NextIndex[follower.ID()]
 	leader.mu.RUnlock()
@@ -985,7 +1042,6 @@ func TestLeaderBacktracksNextIndexOnReplicationFailure(t *testing.T) {
 		t.Fatalf("expected NextIndex 3 after failure, got %d", nextIndex)
 	}
 
-	// Build the retry.
 	retryArgs, ok := leader.buildAppendEntries(follower.ID())
 	if !ok {
 		t.Fatal("expected retry AppendEntries arguments to be built")
@@ -1029,8 +1085,10 @@ func TestProposeReplicatesAndCommits(t *testing.T) {
 	follower1.SetPeers([]Peer{leader, follower2})
 	follower2.SetPeers([]Peer{leader, follower1})
 
-	// Make the leader authoritative for this test.
-	leader.startElection()
+	if _, err := leader.startElection(); err != nil {
+		t.Fatalf("start election: %v", err)
+	}
+
 	leader.becomeLeader()
 
 	index, err := leader.Propose([]byte("hello"))
@@ -1042,7 +1100,6 @@ func TestProposeReplicatesAndCommits(t *testing.T) {
 		t.Fatalf("expected proposed index 1, got %d", index)
 	}
 
-	// Verify both followers received the entry.
 	for _, follower := range []*RaftNode{follower1, follower2} {
 		entry, ok := follower.Log().Get(1)
 		if !ok {
@@ -1059,8 +1116,6 @@ func TestProposeReplicatesAndCommits(t *testing.T) {
 		}
 	}
 
-	// The leader should have committed the entry after reaching
-	// a majority.
 	state := leader.State()
 
 	if state.Volatile.CommitIndex != 1 {
@@ -1070,7 +1125,6 @@ func TestProposeReplicatesAndCommits(t *testing.T) {
 		)
 	}
 
-	// The committed entry should eventually appear on ApplyCh.
 	select {
 	case entry := <-leader.ApplyCh():
 		if entry.Index != 1 {
@@ -1092,7 +1146,6 @@ func TestProposeReplicatesAndCommits(t *testing.T) {
 		t.Fatal("timed out waiting for committed entry")
 	}
 
-	// The entry should now be marked as applied.
 	state = leader.State()
 
 	if state.Volatile.LastApplied != 1 {
@@ -1110,7 +1163,11 @@ func TestHeartbeatDueOnlyForLeader(t *testing.T) {
 		t.Fatal("follower should not send heartbeat")
 	}
 
-	node.startElection()
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
+
 	node.becomeLeader()
 
 	if !node.heartbeatDue() {
@@ -1125,7 +1182,10 @@ func TestHeartbeatResetsFollowerElectionTimer(t *testing.T) {
 	leader.SetPeers([]Peer{follower})
 	follower.SetPeers([]Peer{leader})
 
-	leader.startElection()
+	if _, err := leader.startElection(); err != nil {
+		t.Fatalf("start election: %v", err)
+	}
+
 	leader.becomeLeader()
 
 	follower.mu.Lock()
@@ -1168,7 +1228,10 @@ func TestLeaderTickSendsHeartbeat(t *testing.T) {
 	leader.SetPeers([]Peer{follower})
 	follower.SetPeers([]Peer{leader})
 
-	leader.startElection()
+	if _, err := leader.startElection(); err != nil {
+		t.Fatalf("start election: %v", err)
+	}
+
 	leader.becomeLeader()
 
 	follower.mu.Lock()
@@ -1192,7 +1255,10 @@ func TestLeaderTickSendsHeartbeat(t *testing.T) {
 	follower.mu.RUnlock()
 
 	if electionElapsed != 0 {
-		t.Fatalf("expected follower election timer to reset, got %d", electionElapsed)
+		t.Fatalf(
+			"expected follower election timer to reset, got %d",
+			electionElapsed,
+		)
 	}
 
 	if followerRole != Follower {
@@ -1244,6 +1310,48 @@ func TestFollowerRejectsStaleHeartbeat(t *testing.T) {
 		t.Fatalf(
 			"expected election timer to remain 4, got %d",
 			electionElapsed,
+		)
+	}
+}
+
+func TestRaftNodeRestoresPersistentState(t *testing.T) {
+	store := storage.NewMemoryStorage()
+
+	node, err := NewRaftNodeWithStorage("A", store)
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	node.mu.Lock()
+
+	node.state.Persistent.CurrentTerm = 7
+	node.state.Persistent.VotedFor = "B"
+
+	if err := node.persistStateLocked(); err != nil {
+		node.mu.Unlock()
+		t.Fatalf("persist state: %v", err)
+	}
+
+	node.mu.Unlock()
+
+	restored, err := NewRaftNodeWithStorage("A", store)
+	if err != nil {
+		t.Fatalf("restore node: %v", err)
+	}
+
+	state := restored.State()
+
+	if state.Persistent.CurrentTerm != 7 {
+		t.Fatalf(
+			"expected term 7, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != "B" {
+		t.Fatalf(
+			"expected votedFor B, got %q",
+			state.Persistent.VotedFor,
 		)
 	}
 }
