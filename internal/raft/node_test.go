@@ -2,11 +2,11 @@ package raft
 
 import (
 	"errors"
+	"fmt"
 	"github.com/sanchar127/raftiq/internal/model"
 	"github.com/sanchar127/raftiq/internal/storage"
 	"testing"
 	"time"
-	"fmt"
 
 	"github.com/stretchr/testify/require"
 )
@@ -2217,4 +2217,44 @@ func TestCreateSnapshotRejectsIndexZero(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected index zero snapshot to be rejected")
 	}
+}
+
+func TestInstallSnapshotPersistsHigherTerm(t *testing.T) {
+	store := storage.NewMemoryStorage()
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	require.NoError(t, err)
+
+	reply := node.InstallSnapshot(InstallSnapshotArgs{
+		Term:              2,
+		LeaderID:          "node-2",
+		LastIncludedIndex: 1,
+		LastIncludedTerm:  2,
+		Data:              []byte(`{"key":"value"}`),
+	})
+
+	require.True(t, reply.Success)
+	require.Equal(t, Term(2), reply.Term)
+
+	state := node.State()
+
+	require.Equal(t, Term(2), state.Persistent.CurrentTerm)
+	require.Equal(t, NodeID(""), state.Persistent.VotedFor)
+
+	restarted, err := NewRaftNodeWithStorage("node-1", store)
+	require.NoError(t, err)
+
+	restartedState := restarted.State()
+
+	require.Equal(
+		t,
+		Term(2),
+		restartedState.Persistent.CurrentTerm,
+	)
+
+	require.Equal(
+		t,
+		NodeID(""),
+		restartedState.Persistent.VotedFor,
+	)
 }
