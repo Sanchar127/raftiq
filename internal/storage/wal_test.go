@@ -1,86 +1,124 @@
 package storage
 
 import (
-	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/sanchar127/raftiq/internal/raft"
 )
 
-func TestEncodeStateRecordRoundTrip(t *testing.T) {
-	want := raft.PersistentState{
-		CurrentTerm: 42,
+func TestWALStoragePersistsAcrossReopen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("OpenWAL() error = %v", err)
+	}
+
+	state := raft.PersistentState{
+		CurrentTerm: 7,
 		VotedFor:    "node-2",
 	}
 
-	record, err := encodeStateRecord(want)
-	if err != nil {
-		t.Fatalf("encodeStateRecord() error = %v", err)
-	}
-
-	recordType, payload, err := decodeRecord(bytes.NewReader(record))
-	if err != nil {
-		t.Fatalf("decodeRecord() error = %v", err)
-	}
-
-	if recordType != recordState {
-		t.Fatalf("record type = %d, want %d", recordType, recordState)
-	}
-
-	if len(payload) == 0 {
-		t.Fatal("decoded state payload is empty")
-	}
-}
-
-func TestEncodeEntriesRecordRoundTrip(t *testing.T) {
 	entries := []raft.LogEntry{
 		{
 			Index: 1,
-			Term:  3,
-			Data:  []byte("first"),
+			Term:  7,
+			Data:  []byte("put:key=value"),
 		},
 		{
 			Index: 2,
-			Term:  3,
-			Data:  []byte("second"),
+			Term:  7,
+			Data:  []byte("put:other=value"),
 		},
 	}
 
-	record, err := encodeEntriesRecord(entries)
+	if err := storage.SaveState(state); err != nil {
+		t.Fatalf("SaveState() error = %v", err)
+	}
+
+	if err := storage.AppendEntries(entries); err != nil {
+		t.Fatalf("AppendEntries() error = %v", err)
+	}
+
+	if err := storage.Sync(); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+
+	if err := storage.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened, err := OpenWAL(path)
 	if err != nil {
-		t.Fatalf("encodeEntriesRecord() error = %v", err)
+		t.Fatalf("reopen WAL error = %v", err)
 	}
+	defer reopened.Close()
 
-	recordType, payload, err := decodeRecord(bytes.NewReader(record))
+	gotState, err := reopened.LoadState()
 	if err != nil {
-		t.Fatalf("decodeRecord() error = %v", err)
+		t.Fatalf("LoadState() error = %v", err)
 	}
 
-	if recordType != recordEntries {
-		t.Fatalf("record type = %d, want %d", recordType, recordEntries)
+	if gotState != state {
+		t.Fatalf("LoadState() = %+v, want %+v", gotState, state)
 	}
 
-	if len(payload) == 0 {
-		t.Fatal("decoded entries payload is empty")
+	gotEntries, err := reopened.LoadEntries()
+	if err != nil {
+		t.Fatalf("LoadEntries() error = %v", err)
+	}
+
+	if len(gotEntries) != len(entries) {
+		t.Fatalf(
+			"LoadEntries() returned %d entries, want %d",
+			len(gotEntries),
+			len(entries),
+		)
+	}
+
+	for i := range entries {
+		if gotEntries[i].Index != entries[i].Index {
+			t.Errorf(
+				"entry %d index = %d, want %d",
+				i,
+				gotEntries[i].Index,
+				entries[i].Index,
+			)
+		}
+
+		if gotEntries[i].Term != entries[i].Term {
+			t.Errorf(
+				"entry %d term = %d, want %d",
+				i,
+				gotEntries[i].Term,
+				entries[i].Term,
+			)
+		}
+
+		if string(gotEntries[i].Data) != string(entries[i].Data) {
+			t.Errorf(
+				"entry %d data = %q, want %q",
+				i,
+				gotEntries[i].Data,
+				entries[i].Data,
+			)
+		}
 	}
 }
 
-func TestDecodeRecordRejectsTruncatedRecord(t *testing.T) {
-	record, err := encodeEntriesRecord([]raft.LogEntry{
-		{
-			Index: 1,
-			Term:  1,
-			Data:  []byte("hello"),
-		},
-	})
-	if err != nil {
-		t.Fatalf("encodeEntriesRecord() error = %v", err)
+func TestWALStorageCreatesFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nested", "raftiq.wal")
+
+	_, err := OpenWAL(path)
+	if err == nil {
+		t.Fatal("OpenWAL() error = nil, want error for missing directory")
 	}
 
-	truncated := record[:len(record)-1]
-
-	_, _, err = decodeRecord(bytes.NewReader(truncated))
-	if err == nil {
-		t.Fatal("decodeRecord() error = nil, want error")
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("WAL file unexpectedly exists")
 	}
 }
