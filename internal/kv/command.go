@@ -11,6 +11,7 @@ const (
 
 	CommandLockAcquire CommandType = "LOCK_ACQUIRE"
 	CommandLockExpire  CommandType = "LOCK_EXPIRE"
+	CommandFencedPut   CommandType = "FENCED_PUT" // <-- Moved here
 )
 
 type Command struct {

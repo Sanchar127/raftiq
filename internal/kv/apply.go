@@ -1,8 +1,10 @@
 package kv
 
 import (
+	"errors"
 	"fmt"
 
+	"github.com/sanchar127/raftiq/internal/lock"
 	"github.com/sanchar127/raftiq/internal/raft"
 )
 
@@ -48,6 +50,24 @@ func Apply(store *Store, entry raft.LogEntry) error {
 		if err != nil {
 			return fmt.Errorf(
 				"expire lock %q: %w",
+				command.Key,
+				err,
+			)
+		}
+
+	case CommandFencedPut:
+		if err := store.FencedPut(
+			command.Key,
+			command.Value,
+			command.FencingToken,
+		); err != nil {
+			if errors.Is(err, lock.ErrStaleFencingToken) ||
+				errors.Is(err, lock.ErrLockNotFound) {
+				return nil
+			}
+
+			return fmt.Errorf(
+				"fenced put %q: %w",
 				command.Key,
 				err,
 			)
