@@ -2,29 +2,46 @@ package kv
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/sanchar127/raftiq/internal/lock"
 	"github.com/sanchar127/raftiq/internal/model"
 	"github.com/sanchar127/raftiq/internal/raft"
 )
 
+type ApplyResult struct {
+	Err error
+}
+
 type Applier struct {
 	store *Store
 
-	mu          sync.RWMutex
-	lastApplied raft.LogIndex
+	mu          sync.Mutex
+	lastApplied model.LogIndex
 	applyErr    error
+
+	results map[model.LogIndex]ApplyResult
+	cond    *sync.Cond
 }
 
 func NewApplier(store *Store) *Applier {
-	return &Applier{
-		store: store,
+	applier := &Applier{
+		store:   store,
+		results: make(map[model.LogIndex]ApplyResult),
 	}
+
+	applier.cond = sync.NewCond(&applier.mu)
+
+	return applier
 }
 
-func (a *Applier) Run(ctx context.Context, applyCh <-chan raft.LogEntry) error {
+func (a *Applier) Run(
+	ctx context.Context,
+	applyCh <-chan raft.LogEntry,
+) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -35,17 +52,7 @@ func (a *Applier) Run(ctx context.Context, applyCh <-chan raft.LogEntry) error {
 				return nil
 			}
 
-			if err := Apply(a.store, entry); err != nil {
-				a.mu.Lock()
-				a.applyErr = fmt.Errorf(
-					"apply entry %d: %w",
-					entry.Index,
-					err,
-				)
-				a.mu.Unlock()
-
-				return a.applyErr
-			}
+			result := Apply(a.store, entry)
 
 			a.mu.Lock()
 
@@ -53,6 +60,26 @@ func (a *Applier) Run(ctx context.Context, applyCh <-chan raft.LogEntry) error {
 				a.lastApplied = entry.Index
 			}
 
+			a.results[entry.Index] = result
+
+			if result.Err != nil &&
+				!errors.Is(result.Err, lock.ErrStaleFencingToken) &&
+				!errors.Is(result.Err, lock.ErrLockNotFound) {
+				a.applyErr = fmt.Errorf(
+					"apply entry %d: %w",
+					entry.Index,
+					result.Err,
+				)
+
+				err := a.applyErr
+
+				a.cond.Broadcast()
+				a.mu.Unlock()
+
+				return err
+			}
+
+			a.cond.Broadcast()
 			a.mu.Unlock()
 		}
 	}
@@ -60,18 +87,18 @@ func (a *Applier) Run(ctx context.Context, applyCh <-chan raft.LogEntry) error {
 
 func (a *Applier) WaitApplied(
 	ctx context.Context,
-	index raft.LogIndex,
+	index model.LogIndex,
 ) error {
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
-		a.mu.RLock()
+		a.mu.Lock()
 
 		applied := a.lastApplied >= index
 		err := a.applyErr
 
-		a.mu.RUnlock()
+		a.mu.Unlock()
 
 		if err != nil {
 			return err
@@ -90,6 +117,42 @@ func (a *Applier) WaitApplied(
 	}
 }
 
+func (a *Applier) WaitResult(
+	ctx context.Context,
+	index model.LogIndex,
+) (ApplyResult, error) {
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		a.mu.Lock()
+
+		result, ok := a.results[index]
+		if ok {
+			delete(a.results, index)
+			a.mu.Unlock()
+
+			return result, nil
+		}
+
+		if a.applyErr != nil {
+			err := a.applyErr
+			a.mu.Unlock()
+
+			return ApplyResult{}, err
+		}
+
+		a.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return ApplyResult{}, ctx.Err()
+
+		case <-ticker.C:
+		}
+	}
+}
+
 func (a *Applier) RestoreSnapshot(
 	snapshot model.Snapshot,
 ) error {
@@ -100,6 +163,7 @@ func (a *Applier) RestoreSnapshot(
 	a.mu.Lock()
 	a.lastApplied = snapshot.LastIncludedIndex
 	a.applyErr = nil
+	a.results = make(map[model.LogIndex]ApplyResult)
 	a.mu.Unlock()
 
 	return nil

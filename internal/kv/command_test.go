@@ -56,8 +56,9 @@ func TestApplyPut(t *testing.T) {
 		Data:  data,
 	}
 
-	if err := Apply(store, entry); err != nil {
-		t.Fatal(err)
+	res := Apply(store, entry)
+	if res.Err != nil {
+		t.Fatalf("apply failed: %v", res.Err)
 	}
 
 	value, ok := store.Get("name")
@@ -91,8 +92,9 @@ func TestApplyDelete(t *testing.T) {
 		Data:  data,
 	}
 
-	if err := Apply(store, entry); err != nil {
-		t.Fatal(err)
+	res := Apply(store, entry)
+	if res.Err != nil {
+		t.Fatalf("apply failed: %v", res.Err)
 	}
 
 	if _, ok := store.Get("name"); ok {

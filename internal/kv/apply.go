@@ -8,14 +8,16 @@ import (
 	"github.com/sanchar127/raftiq/internal/raft"
 )
 
-func Apply(store *Store, entry raft.LogEntry) error {
+func Apply(store *Store, entry raft.LogEntry) ApplyResult {
 	command, err := DecodeCommand(entry.Data)
 	if err != nil {
-		return fmt.Errorf(
-			"decode raft command at index %d: %w",
-			entry.Index,
-			err,
-		)
+		return ApplyResult{
+			Err: fmt.Errorf(
+				"decode raft command at index %d: %w",
+				entry.Index,
+				err,
+			),
+		}
 	}
 
 	switch command.Type {
@@ -35,11 +37,13 @@ func Apply(store *Store, entry raft.LogEntry) error {
 			entry.Index,
 		)
 		if err != nil {
-			return fmt.Errorf(
-				"acquire lock %q: %w",
-				command.Key,
-				err,
-			)
+			return ApplyResult{
+				Err: fmt.Errorf(
+					"acquire lock %q: %w",
+					command.Key,
+					err,
+				),
+			}
 		}
 
 	case CommandLockExpire:
@@ -48,37 +52,44 @@ func Apply(store *Store, entry raft.LogEntry) error {
 			command.FencingToken,
 		)
 		if err != nil {
-			return fmt.Errorf(
-				"expire lock %q: %w",
-				command.Key,
-				err,
-			)
+			return ApplyResult{
+				Err: fmt.Errorf(
+					"expire lock %q: %w",
+					command.Key,
+					err,
+				),
+			}
 		}
 
 	case CommandFencedPut:
-		if err := store.FencedPut(
+		err := store.FencedPut(
 			command.Key,
 			command.Value,
 			command.FencingToken,
-		); err != nil {
+		)
+		if err != nil {
 			if errors.Is(err, lock.ErrStaleFencingToken) ||
 				errors.Is(err, lock.ErrLockNotFound) {
-				return nil
+				return ApplyResult{Err: err}
 			}
 
-			return fmt.Errorf(
-				"fenced put %q: %w",
-				command.Key,
-				err,
-			)
+			return ApplyResult{
+				Err: fmt.Errorf(
+					"fenced put %q: %w",
+					command.Key,
+					err,
+				),
+			}
 		}
 
 	default:
-		return fmt.Errorf(
-			"unknown command type %q",
-			command.Type,
-		)
+		return ApplyResult{
+			Err: fmt.Errorf(
+				"unknown command type %q",
+				command.Type,
+			),
+		}
 	}
 
-	return nil
+	return ApplyResult{}
 }
