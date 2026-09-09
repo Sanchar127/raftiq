@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -377,5 +378,240 @@ func TestDecodeRecordRejectsOversizedPayload(t *testing.T) {
 	_, _, err := decodeRecord(bytes.NewReader(record.Bytes()))
 	if err == nil {
 		t.Fatal("decodeRecord() error = nil, want oversized payload error")
+	}
+}
+
+func TestWALStorageReplaceSuffix(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("OpenWAL() error = %v", err)
+	}
+	defer storage.Close()
+
+	initial := []model.LogEntry{
+		{Index: 1, Term: 1, Data: []byte("one")},
+		{Index: 2, Term: 1, Data: []byte("two")},
+		{Index: 3, Term: 2, Data: []byte("old-three")},
+		{Index: 4, Term: 2, Data: []byte("old-four")},
+	}
+
+	if err := storage.AppendEntries(initial); err != nil {
+		t.Fatalf("AppendEntries() error = %v", err)
+	}
+
+	replacement := []model.LogEntry{
+		{Index: 3, Term: 3, Data: []byte("new-three")},
+		{Index: 4, Term: 3, Data: []byte("new-four")},
+		{Index: 5, Term: 3, Data: []byte("new-five")},
+	}
+
+	if err := storage.ReplaceSuffix(3, replacement); err != nil {
+		t.Fatalf("ReplaceSuffix() error = %v", err)
+	}
+
+	got, err := storage.LoadEntries()
+	if err != nil {
+		t.Fatalf("LoadEntries() error = %v", err)
+	}
+
+	want := replacement
+
+	want = append(
+		[]model.LogEntry{
+			{Index: 1, Term: 1, Data: []byte("one")},
+			{Index: 2, Term: 1, Data: []byte("two")},
+		},
+		want...,
+	)
+
+	assertEntriesEqual(t, got, want)
+}
+func assertEntriesEqual(
+	t *testing.T,
+	got []model.LogEntry,
+	want []model.LogEntry,
+) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf(
+			"got %d entries, want %d",
+			len(got),
+			len(want),
+		)
+	}
+
+	for i := range want {
+		if got[i].Index != want[i].Index {
+			t.Errorf(
+				"entry %d index = %d, want %d",
+				i,
+				got[i].Index,
+				want[i].Index,
+			)
+		}
+
+		if got[i].Term != want[i].Term {
+			t.Errorf(
+				"entry %d term = %d, want %d",
+				i,
+				got[i].Term,
+				want[i].Term,
+			)
+		}
+
+		if !bytes.Equal(got[i].Data, want[i].Data) {
+			t.Errorf(
+				"entry %d data = %q, want %q",
+				i,
+				got[i].Data,
+				want[i].Data,
+			)
+		}
+	}
+}
+func TestWALStorageReplaceSuffixSurvivesReopen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("OpenWAL() error = %v", err)
+	}
+
+	initial := []model.LogEntry{
+		{Index: 1, Term: 1, Data: []byte("one")},
+		{Index: 2, Term: 1, Data: []byte("two")},
+		{Index: 3, Term: 2, Data: []byte("old")},
+	}
+
+	if err := storage.AppendEntries(initial); err != nil {
+		t.Fatalf("AppendEntries() error = %v", err)
+	}
+
+	replacement := []model.LogEntry{
+		{Index: 3, Term: 3, Data: []byte("new")},
+		{Index: 4, Term: 3, Data: []byte("four")},
+	}
+
+	if err := storage.ReplaceSuffix(3, replacement); err != nil {
+		t.Fatalf("ReplaceSuffix() error = %v", err)
+	}
+
+	if err := storage.Sync(); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+
+	if err := storage.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("reopen WAL error = %v", err)
+	}
+	defer reopened.Close()
+
+	got, err := reopened.LoadEntries()
+	if err != nil {
+		t.Fatalf("LoadEntries() error = %v", err)
+	}
+
+	want := []model.LogEntry{
+		{Index: 1, Term: 1, Data: []byte("one")},
+		{Index: 2, Term: 1, Data: []byte("two")},
+		{Index: 3, Term: 3, Data: []byte("new")},
+		{Index: 4, Term: 3, Data: []byte("four")},
+	}
+
+	assertEntriesEqual(t, got, want)
+}
+func TestWALStorageReplaceSuffixTruncatesOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("OpenWAL() error = %v", err)
+	}
+	defer storage.Close()
+
+	entries := []model.LogEntry{
+		{Index: 1, Term: 1, Data: []byte("one")},
+		{Index: 2, Term: 1, Data: []byte("two")},
+		{Index: 3, Term: 1, Data: []byte("three")},
+	}
+
+	if err := storage.AppendEntries(entries); err != nil {
+		t.Fatalf("AppendEntries() error = %v", err)
+	}
+
+	if err := storage.ReplaceSuffix(3, nil); err != nil {
+		t.Fatalf("ReplaceSuffix() error = %v", err)
+	}
+
+	got, err := storage.LoadEntries()
+	if err != nil {
+		t.Fatalf("LoadEntries() error = %v", err)
+	}
+
+	want := entries[:2]
+
+	assertEntriesEqual(t, got, want)
+}
+func TestWALStorageRejectsNonContiguousAppend(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("OpenWAL() error = %v", err)
+	}
+	defer storage.Close()
+
+	initial := []model.LogEntry{
+		{Index: 1, Term: 1, Data: []byte("one")},
+		{Index: 2, Term: 1, Data: []byte("two")},
+	}
+
+	if err := storage.AppendEntries(initial); err != nil {
+		t.Fatalf("initial AppendEntries() error = %v", err)
+	}
+
+	err = storage.AppendEntries([]model.LogEntry{
+		{Index: 4, Term: 1, Data: []byte("four")},
+	})
+
+	if err == nil {
+		t.Fatal("AppendEntries() error = nil, want invalid append error")
+	}
+}
+
+func TestWALStorageRejectsOperationsAfterClose(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("OpenWAL() error = %v", err)
+	}
+
+	if err := storage.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	if err := storage.Sync(); !errors.Is(err, ErrClosedStorage) {
+		t.Fatalf("Sync() error = %v, want ErrClosedStorage", err)
+	}
+
+	if err := storage.SaveState(model.PersistentState{}); !errors.Is(err, ErrClosedStorage) {
+		t.Fatalf("SaveState() error = %v, want ErrClosedStorage", err)
+	}
+
+	if _, err := storage.LoadEntries(); !errors.Is(err, ErrClosedStorage) {
+		t.Fatalf("LoadEntries() error = %v, want ErrClosedStorage", err)
 	}
 }

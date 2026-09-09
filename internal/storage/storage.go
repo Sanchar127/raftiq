@@ -7,6 +7,10 @@ type Storage interface {
 	LoadState() (model.PersistentState, error)
 
 	AppendEntries(entries []model.LogEntry) error
+	ReplaceSuffix(
+		from model.LogIndex,
+		entries []model.LogEntry,
+	) error
 	LoadEntries() ([]model.LogEntry, error)
 
 	SaveSnapshot(snapshot model.Snapshot) error

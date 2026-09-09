@@ -1,9 +1,9 @@
 package storage
 
 import (
-	"sync"
-
+	"fmt"
 	"github.com/sanchar127/raftiq/internal/model"
+	"sync"
 )
 
 type MemoryStorage struct {
@@ -94,3 +94,44 @@ func (s *MemoryStorage) Close() error {
 }
 
 var _ Storage = (*MemoryStorage)(nil)
+
+func (s *MemoryStorage) ReplaceSuffix(
+	fromIndex model.LogIndex,
+	entries []model.LogEntry,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if fromIndex == 0 {
+		return fmt.Errorf("invalid replacement index: %d", fromIndex)
+	}
+
+	if len(entries) > 0 {
+		for i, entry := range entries {
+			expected := fromIndex + model.LogIndex(i)
+			if entry.Index != expected {
+				return fmt.Errorf(
+					"non-contiguous replacement entries: expected index %d, got %d",
+					expected,
+					entry.Index,
+				)
+			}
+		}
+	}
+
+	keep := 0
+	for keep < len(s.entries) && s.entries[keep].Index < fromIndex {
+		keep++
+	}
+
+	if keep < len(s.entries) {
+		s.entries = s.entries[:keep]
+	}
+
+	for _, entry := range entries {
+		entry.Data = append([]byte(nil), entry.Data...)
+		s.entries = append(s.entries, entry)
+	}
+
+	return nil
+}

@@ -5,8 +5,8 @@ import "encoding/json"
 type CommandType string
 
 const (
-	CommandPut    CommandType = "PUT"
-	CommandDelete CommandType = "DELETE"
+	CommandPut         CommandType = "PUT"
+	CommandDelete      CommandType = "DELETE"
 	CommandReadBarrier CommandType = "READ_BARRIER"
 )
 

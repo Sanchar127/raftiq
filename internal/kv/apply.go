@@ -19,7 +19,7 @@ func Apply(store *Store, entry raft.LogEntry) error {
 		store.Delete(command.Key)
 
 	case CommandReadBarrier:
-	
+
 	default:
 		return fmt.Errorf("unknown command type %q", command.Type)
 	}
