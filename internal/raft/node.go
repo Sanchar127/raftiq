@@ -3,6 +3,7 @@ package raft
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/sanchar127/raftiq/internal/storage"
 )
@@ -10,6 +11,11 @@ import (
 type RaftNode struct {
 	mu      sync.RWMutex
 	applyMu sync.Mutex
+
+	runMu   sync.Mutex
+	running bool
+	stopCh  chan struct{}
+	doneCh  chan struct{}
 
 	id      NodeID
 	state   State
@@ -24,6 +30,8 @@ type RaftNode struct {
 
 	heartbeatElapsed int
 	heartbeatTimeout int
+
+	tickInterval time.Duration
 }
 
 func NewRaftNode(id NodeID) *RaftNode {
@@ -838,6 +846,7 @@ func NewRaftNodeWithStorage(
 		log:              log,
 		electionTimeout:  10,
 		heartbeatTimeout: 1,
+		tickInterval:     100 * time.Millisecond, // Set default here
 	}, nil
 }
 
@@ -858,4 +867,62 @@ func (n *RaftNode) persistStateLocked() error {
 	}
 
 	return nil
+}
+
+func (n *RaftNode) Start() error {
+	n.runMu.Lock()
+	defer n.runMu.Unlock()
+
+	if n.running {
+		return fmt.Errorf("raft node %s is already running", n.id)
+	}
+
+	n.stopCh = make(chan struct{})
+	n.doneCh = make(chan struct{})
+	n.running = true
+
+	go n.run()
+
+	return nil
+}
+func (n *RaftNode) run() {
+	defer close(n.doneCh)
+
+	ticker := time.NewTicker(n.tickInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			n.runTick()
+
+		case <-n.stopCh:
+			return
+		}
+	}
+}
+
+func (n *RaftNode) runTick() {
+	electionDue := n.Tick()
+
+	if electionDue {
+		go n.runElection()
+	}
+}
+
+func (n *RaftNode) Stop() {
+	n.runMu.Lock()
+
+	if !n.running {
+		n.runMu.Unlock()
+		return
+	}
+
+	close(n.stopCh)
+	doneCh := n.doneCh
+	n.running = false
+
+	n.runMu.Unlock()
+
+	<-doneCh
 }

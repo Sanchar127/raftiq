@@ -6,6 +6,8 @@ import (
 	"github.com/sanchar127/raftiq/internal/storage"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewRaftNode(t *testing.T) {
@@ -1937,4 +1939,31 @@ func TestHandleAppendEntriesReplyStaleTermDoesNotChangeState(t *testing.T) {
 			state.Leader.MatchIndex["follower"],
 		)
 	}
+}
+
+func TestRaftNodeStartStop(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	err := node.Start()
+	require.NoError(t, err)
+
+	node.Stop()
+}
+
+func TestRaftNodeStartTwice(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	require.NoError(t, node.Start())
+	defer node.Stop()
+
+	err := node.Start()
+	require.Error(t, err)
+}
+
+func TestRaftNodeStopWithoutStart(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	require.NotPanics(t, func() {
+		node.Stop()
+	})
 }
