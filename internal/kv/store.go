@@ -10,9 +10,15 @@ import (
 )
 
 type Store struct {
-	mu    sync.RWMutex
-	data  map[string][]byte
-	locks *lock.State
+	mu     sync.RWMutex
+	data   map[string][]byte
+	locks  *lock.State
+	fenced map[string]FencedValue
+}
+
+type FencedValue struct {
+	Value        []byte
+	FencingToken uint64
 }
 
 type snapshotEnvelope struct {
@@ -24,8 +30,9 @@ type snapshotEnvelope struct {
 
 func NewStore() *Store {
 	return &Store{
-		data:  make(map[string][]byte),
-		locks: lock.NewState(),
+		data:   make(map[string][]byte),
+		locks:  lock.NewState(),
+		fenced: make(map[string]FencedValue),
 	}
 }
 
@@ -268,4 +275,50 @@ func (s *Store) ListLocks() []lock.Lock {
 	}
 
 	return result
+}
+
+func (s *Store) FencedPut(
+	key string,
+	value []byte,
+	fencingToken uint64,
+) error {
+	if key == "" {
+		return lock.ErrInvalidKey
+	}
+
+	if fencingToken == 0 {
+		return lock.ErrStaleFencingToken
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	currentLock, ok := s.locks.Get(key)
+	if !ok {
+		return lock.ErrLockNotFound
+	}
+
+	if currentLock.FencingToken != fencingToken {
+		return lock.ErrStaleFencingToken
+	}
+
+	s.fenced[key] = FencedValue{
+		Value:        append([]byte(nil), value...),
+		FencingToken: fencingToken,
+	}
+
+	return nil
+}
+
+func (s *Store) GetFenced(key string) (FencedValue, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	current, ok := s.fenced[key]
+	if !ok {
+		return FencedValue{}, false
+	}
+
+	current.Value = append([]byte(nil), current.Value...)
+	return current, true
 }
