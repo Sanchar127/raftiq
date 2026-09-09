@@ -1119,6 +1119,11 @@ func (n *RaftNode) InstallSnapshot(
 	if args.Term > n.state.Persistent.CurrentTerm {
 		n.state.Persistent.CurrentTerm = args.Term
 		n.state.Persistent.VotedFor = ""
+
+		if err := n.persistStateLocked(); err != nil {
+			n.mu.Unlock()
+			return reply
+		}
 	}
 
 	// 3. This node is now following the snapshot sender.
