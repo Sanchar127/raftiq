@@ -209,3 +209,43 @@ func (s *Store) ClaimJob(
 
 	return cloneJob(job), nil
 }
+
+// ListAssignedJobs returns jobs currently assigned to the specified worker.
+//
+// Only SCHEDULED jobs are returned because RUNNING/SUCCEEDED/FAILED state
+// transitions will be introduced by the worker lifecycle implementation.
+func (s *Store) ListAssignedJobs(workerID string) []model.Job {
+	if workerID == "" {
+		return nil
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	jobs := make([]model.Job, 0)
+
+	for _, job := range s.jobs {
+		if job.State != model.JobScheduled {
+			continue
+		}
+
+		if job.AssignedWorkerID != workerID {
+			continue
+		}
+
+		copied := job
+		copied.Payload = append([]byte(nil), job.Payload...)
+
+		jobs = append(jobs, copied)
+	}
+
+	sort.Slice(jobs, func(i, j int) bool {
+		if jobs[i].ScheduledAt != jobs[j].ScheduledAt {
+			return jobs[i].ScheduledAt < jobs[j].ScheduledAt
+		}
+
+		return jobs[i].ID < jobs[j].ID
+	})
+
+	return jobs
+}

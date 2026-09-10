@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sanchar127/raftiq/internal/model"
 )
@@ -32,17 +33,33 @@ func (f HandlerFunc) Execute(
 	return f(ctx, job)
 }
 
-// Worker represents a worker capable of executing claimed jobs.
+// JobSource provides jobs available for local worker execution.
 //
-// Worker currently contains only execution concerns. Ownership validation,
-// fencing validation, retries, and durable state transitions are handled by
-// the surrounding distributed-scheduling layer.
+// The source is intentionally read-only from the worker's perspective.
+// Durable job-state mutations belong to the Raft state machine.
+type JobSource interface {
+	ListPendingJobs() []model.Job
+	GetJob(id model.JobID) (model.Job, bool)
+	ListAssignedJobs(workerID string) []model.Job
+}
+
+// Worker represents a worker capable of executing claimed jobs.
 type Worker struct {
-	id      string
-	handler JobHandler
+	id       string
+	handler  JobHandler
+	source   JobSource
+	interval time.Duration
+}
+
+// Config controls worker execution-loop behavior.
+type Config struct {
+	Interval time.Duration
 }
 
 // New creates a worker with a stable worker ID and execution handler.
+//
+// The worker source and execution interval are configured separately so the
+// basic Execute method remains useful without a scheduler/store dependency.
 func New(id string, handler JobHandler) (*Worker, error) {
 	if id == "" {
 		return nil, fmt.Errorf("%w: missing worker ID", ErrInvalidWorker)
@@ -64,10 +81,6 @@ func (w *Worker) ID() string {
 }
 
 // Execute runs the configured handler for a job.
-//
-// At this stage, Execute only performs local execution. Distributed ownership
-// and fencing checks will be added before execution is exposed through the
-// scheduling loop.
 func (w *Worker) Execute(
 	ctx context.Context,
 	job model.Job,
@@ -86,6 +99,84 @@ func (w *Worker) Execute(
 
 	if err := w.handler.Execute(ctx, job); err != nil {
 		return fmt.Errorf("execute job %q: %w", job.ID, err)
+	}
+
+	return nil
+}
+
+// ConfigureLoop attaches the job source and execution-loop configuration.
+//
+// This keeps construction backward-compatible with the simple Worker API
+// while allowing the execution loop to be introduced independently.
+func (w *Worker) ConfigureLoop(
+	source JobSource,
+	config Config,
+) error {
+	if source == nil {
+		return fmt.Errorf("%w: missing job source", ErrInvalidWorker)
+	}
+
+	if config.Interval <= 0 {
+		return fmt.Errorf(
+			"%w: worker interval must be positive",
+			ErrInvalidWorker,
+		)
+	}
+
+	w.source = source
+	w.interval = config.Interval
+
+	return nil
+}
+
+// Run starts the worker execution loop.
+//
+// The loop only executes jobs that are already assigned to this worker.
+// Durable state transitions, fencing validation, retries, and reclaim
+// semantics are intentionally handled by later scheduling layers.
+func (w *Worker) Run(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: nil execution context", ErrInvalidWorker)
+	}
+
+	if w.source == nil {
+		return fmt.Errorf("%w: job source is not configured", ErrInvalidWorker)
+	}
+
+	if w.interval <= 0 {
+		return fmt.Errorf("%w: invalid worker interval", ErrInvalidWorker)
+	}
+
+	ticker := time.NewTicker(w.interval)
+	defer ticker.Stop()
+
+	for {
+		if err := w.executeAssignedJobs(ctx); err != nil {
+			if errors.Is(err, context.Canceled) ||
+				errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+
+		case <-ticker.C:
+		}
+	}
+}
+
+func (w *Worker) executeAssignedJobs(ctx context.Context) error {
+	jobs := w.source.ListAssignedJobs(w.id)
+
+	for _, job := range jobs {
+		if err := w.Execute(ctx, job); err != nil {
+			if errors.Is(err, context.Canceled) ||
+				errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+		}
 	}
 
 	return nil

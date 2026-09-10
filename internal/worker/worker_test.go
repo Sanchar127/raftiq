@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/sanchar127/raftiq/internal/model"
 )
@@ -229,5 +230,148 @@ func TestWorkerExecuteRejectsCancelledContext(t *testing.T) {
 
 	if called {
 		t.Fatal("handler must not run with cancelled context")
+	}
+}
+
+type fakeJobSource struct {
+	jobs []model.Job
+}
+
+func (s *fakeJobSource) GetJob(id model.JobID) (model.Job, bool) {
+	for _, job := range s.jobs {
+		if job.ID == id {
+			return job, true
+		}
+	}
+	return model.Job{}, false
+}
+
+func (s *fakeJobSource) ListPendingJobs() []model.Job {
+	pending := make([]model.Job, 0)
+	for _, job := range s.jobs {
+		if job.AssignedWorkerID == "" {
+			pending = append(pending, job)
+		}
+	}
+	return pending
+}
+
+func (s *fakeJobSource) ListAssignedJobs(
+	workerID string,
+) []model.Job {
+	jobs := make([]model.Job, 0)
+
+	for _, job := range s.jobs {
+		if job.AssignedWorkerID == workerID {
+			jobs = append(jobs, job)
+		}
+	}
+
+	return jobs
+}
+
+func TestWorkerRunExecutesAssignedJobs(t *testing.T) {
+	t.Parallel()
+
+	executed := make(chan model.JobID, 1)
+
+	handler := HandlerFunc(func(
+		ctx context.Context,
+		job model.Job,
+	) error {
+		executed <- job.ID
+		return nil
+	})
+
+	worker, err := New("worker-1", handler)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	source := &fakeJobSource{
+		jobs: []model.Job{
+			{
+				ID:               "job-1",
+				State:            model.JobScheduled,
+				AssignedWorkerID: "worker-1",
+			},
+			{
+				ID:               "job-2",
+				State:            model.JobScheduled,
+				AssignedWorkerID: "worker-2",
+			},
+		},
+	}
+
+	if err := worker.ConfigureLoop(
+		source,
+		Config{Interval: 10 * time.Millisecond},
+	); err != nil {
+		t.Fatalf("ConfigureLoop() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		_ = worker.Run(ctx)
+	}()
+
+	select {
+	case jobID := <-executed:
+		if jobID != "job-1" {
+			t.Fatalf("expected job-1, got %q", jobID)
+		}
+
+	case <-time.After(time.Second):
+		t.Fatal("worker did not execute assigned job")
+	}
+}
+
+func TestWorkerRunStopsOnCancellation(t *testing.T) {
+	t.Parallel()
+
+	handler := HandlerFunc(func(
+		context.Context,
+		model.Job,
+	) error {
+		return nil
+	})
+
+	worker, err := New("worker-1", handler)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	source := &fakeJobSource{}
+
+	if err := worker.ConfigureLoop(
+		source,
+		Config{Interval: 10 * time.Millisecond},
+	); err != nil {
+		t.Fatalf("ConfigureLoop() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- worker.Run(ctx)
+	}()
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf(
+				"expected context.Canceled, got %v",
+				err,
+			)
+		}
+
+	case <-time.After(time.Second):
+		t.Fatal("worker did not stop after cancellation")
 	}
 }
