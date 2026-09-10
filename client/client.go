@@ -2,17 +2,18 @@ package client
 
 import (
 	"context"
-
-	"github.com/sanchar127/raftiq/internal/server"
+	"errors"
 )
 
+var ErrClientClosed = errors.New("client is closed")
+
 type Client struct {
-	server *server.Server
+	kv KV
 }
 
-func New(server *server.Server) *Client {
+func New(kv KV) *Client {
 	return &Client{
-		server: server,
+		kv: kv,
 	}
 }
 
@@ -20,7 +21,11 @@ func (c *Client) Get(
 	ctx context.Context,
 	key string,
 ) ([]byte, bool, error) {
-	return c.server.Get(ctx, key)
+	if c == nil || c.kv == nil {
+		return nil, false, ErrClientClosed
+	}
+
+	return c.kv.Get(ctx, key)
 }
 
 func (c *Client) Put(
@@ -28,12 +33,20 @@ func (c *Client) Put(
 	key string,
 	value []byte,
 ) error {
-	return c.server.Put(ctx, key, value)
+	if c == nil || c.kv == nil {
+		return ErrClientClosed
+	}
+
+	return c.kv.Put(ctx, key, value)
 }
 
 func (c *Client) Delete(
 	ctx context.Context,
 	key string,
 ) error {
-	return c.server.Delete(ctx, key)
+	if c == nil || c.kv == nil {
+		return ErrClientClosed
+	}
+
+	return c.kv.Delete(ctx, key)
 }
