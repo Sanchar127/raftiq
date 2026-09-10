@@ -95,3 +95,67 @@ func TestNilServerMethods(t *testing.T) {
 	require.ErrorIs(t, server.Serve(), ErrServerClosed)
 	require.NoError(t, server.Shutdown(context.Background()))
 }
+
+func TestServerRegisterRaftService(t *testing.T) {
+	t.Parallel()
+
+	server, err := NewServer("127.0.0.1:0")
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		require.NoError(t, server.Shutdown(context.Background()))
+	})
+
+	service, err := NewRaftService(&fakeRaftNode{})
+	require.NoError(t, err)
+
+	require.NoError(t, server.RegisterRaftService(service))
+}
+
+func TestServerRegisterKVService(t *testing.T) {
+	t.Parallel()
+
+	server, err := NewServer("127.0.0.1:0")
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		require.NoError(t, server.Shutdown(context.Background()))
+	})
+
+	service, err := NewKVService(&fakeKVStore{})
+	require.NoError(t, err)
+
+	require.NoError(t, server.RegisterKVService(service))
+}
+
+func TestServerRegistrationRejectsNilServices(t *testing.T) {
+	t.Parallel()
+
+	server, err := NewServer("127.0.0.1:0")
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		require.NoError(t, server.Shutdown(context.Background()))
+	})
+
+	require.ErrorContains(
+		t,
+		server.RegisterRaftService(nil),
+		"raft service is required",
+	)
+
+	require.ErrorContains(
+		t,
+		server.RegisterKVService(nil),
+		"kv service is required",
+	)
+}
+
+func TestNilServerRegistration(t *testing.T) {
+	t.Parallel()
+
+	var server *Server
+
+	require.ErrorIs(t, server.RegisterRaftService(nil), ErrServerClosed)
+	require.ErrorIs(t, server.RegisterKVService(nil), ErrServerClosed)
+}

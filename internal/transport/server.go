@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 
+	raftiqv1 "github.com/sanchar127/raftiq/api/proto"
 	"google.golang.org/grpc"
 )
 
@@ -73,4 +74,30 @@ func (s *Server) Address() string {
 	}
 
 	return s.listener.Addr().String()
+}
+
+func (s *Server) RegisterRaftService(service *RaftService) error {
+	if s == nil || s.grpc == nil {
+		return ErrServerClosed
+	}
+
+	if service == nil {
+		return errors.New("raft service is required")
+	}
+
+	raftiqv1.RegisterRaftServiceServer(s.grpc, service)
+	return nil
+}
+
+func (s *Server) RegisterKVService(service *KVService) error {
+	if s == nil || s.grpc == nil {
+		return ErrServerClosed
+	}
+
+	if service == nil {
+		return errors.New("kv service is required")
+	}
+
+	raftiqv1.RegisterKVServiceServer(s.grpc, service)
+	return nil
 }
