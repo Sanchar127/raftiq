@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	raftiqv1 "github.com/sanchar127/raftiq/api/proto"
+	"github.com/sanchar127/raftiq/internal/model"
 	"github.com/sanchar127/raftiq/internal/raft"
 	"github.com/sanchar127/raftiq/internal/storage"
 	"google.golang.org/grpc"
@@ -1759,4 +1761,836 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 		recoveredLastIndex,
 		leaderNode.ID(),
 	)
+}
+func TestGRPCTransportFollowerWALRecovery(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+
+	const (
+		node1 raft.NodeID = "node-1"
+		node2 raft.NodeID = "node-2"
+		node3 raft.NodeID = "node-3"
+	)
+
+	ids := []raft.NodeID{node1, node2, node3}
+
+	nodes := make([]*raft.RaftNode, len(ids))
+	stores := make([]*storage.WALStorage, len(ids))
+	transports := make([]*GRPCTransport, len(ids))
+	servers := make([]*grpc.Server, len(ids))
+	addresses := make([]string, len(ids))
+
+	for i, id := range ids {
+		node, store := newPersistentTestNode(t, id, tempDir)
+
+		nodes[i] = node
+		stores[i] = store
+
+		transport := NewGRPCTransport()
+		transports[i] = transport
+
+		server := grpc.NewServer()
+		servers[i] = server
+
+		registerRaftService(server, node)
+
+		listener, err := net.Listen(
+			"tcp",
+			"127.0.0.1:0",
+		)
+		if err != nil {
+			t.Fatalf(
+				"listen for %s: %v",
+				id,
+				err,
+			)
+		}
+
+		addresses[i] = listener.Addr().String()
+
+		go func() {
+			if err := server.Serve(listener); err != nil &&
+				!errors.Is(err, grpc.ErrServerStopped) {
+				t.Errorf("gRPC server failed: %v", err)
+			}
+		}()
+	}
+
+	t.Cleanup(func() {
+		for _, server := range servers {
+			server.Stop()
+		}
+
+		for _, transport := range transports {
+			_ = transport.Close()
+		}
+
+		for _, store := range stores {
+			_ = store.Close()
+		}
+	})
+
+	// Connect every node to every other node.
+	for i, transport := range transports {
+		for j, peerID := range ids {
+			if i == j {
+				continue
+			}
+
+			if err := transport.AddPeer(
+				peerID,
+				addresses[j],
+			); err != nil {
+				t.Fatalf(
+					"add peer %s -> %s: %v",
+					ids[i],
+					peerID,
+					err,
+				)
+			}
+		}
+
+		if err := nodes[i].SetTransport(
+			transport,
+			peerIDsExcept(ids, ids[i]),
+		); err != nil {
+			t.Fatalf(
+				"set transport for %s: %v",
+				ids[i],
+				err,
+			)
+		}
+
+		setDeterministicElectionTimeout(
+			nodes[i],
+			i,
+		)
+	}
+
+	for _, node := range nodes {
+		node.Start()
+	}
+
+	defer func() {
+		for _, node := range nodes {
+			node.Stop()
+		}
+	}()
+
+	leaderIndex := waitForLeader(t, nodes)
+
+	leader := nodes[leaderIndex]
+
+	index1, err := leader.Propose([]byte("wal-entry-a"))
+	if err != nil {
+		t.Fatalf("propose entry-a: %v", err)
+	}
+
+	index2, err := leader.Propose([]byte("wal-entry-b"))
+	if err != nil {
+		t.Fatalf("propose entry-b: %v", err)
+	}
+
+	if index1 != 1 || index2 != 2 {
+		t.Fatalf(
+			"unexpected indexes: got %d, %d",
+			index1,
+			index2,
+		)
+	}
+
+	// Choose a follower and wait until it has actually replicated
+	// both entries before shutting it down.
+	followerIndex := (leaderIndex + 1) % len(nodes)
+	follower := nodes[followerIndex]
+
+	waitForCondition(t, 5*time.Second, func() bool {
+		return follower.Log().LastIndex() >= 2
+	})
+
+	// Stop only the follower.
+	follower.Stop()
+	servers[followerIndex].Stop()
+
+	if err := stores[followerIndex].Close(); err != nil {
+		t.Fatalf(
+			"close follower WAL: %v",
+			err,
+		)
+	}
+
+	// Reopen the SAME WAL.
+	recoveredStore, err := storage.OpenWAL(
+		filepath.Join(
+			tempDir,
+			fmt.Sprintf("%s.wal", ids[followerIndex]),
+		),
+	)
+	if err != nil {
+		t.Fatalf(
+			"reopen follower WAL: %v",
+			err,
+		)
+	}
+	defer recoveredStore.Close()
+
+	recoveredNode, err := raft.NewRaftNodeWithStorage(
+		ids[followerIndex],
+		recoveredStore,
+	)
+	if err != nil {
+		t.Fatalf(
+			"create recovered follower: %v",
+			err,
+		)
+	}
+
+	recoveredEntries, err := recoveredStore.LoadEntries()
+	if err != nil {
+		t.Fatalf(
+			"load recovered entries: %v",
+			err,
+		)
+	}
+
+	if len(recoveredEntries) < 2 {
+		t.Fatalf(
+			"follower WAL lost replicated entries: got %d entries",
+			len(recoveredEntries),
+		)
+	}
+
+	if string(recoveredEntries[0].Data) != "wal-entry-a" {
+		t.Fatalf(
+			"entry 1 = %q, want wal-entry-a",
+			recoveredEntries[0].Data,
+		)
+	}
+
+	if string(recoveredEntries[1].Data) != "wal-entry-b" {
+		t.Fatalf(
+			"entry 2 = %q, want wal-entry-b",
+			recoveredEntries[1].Data,
+		)
+	}
+
+	// The important assertion:
+	// the entries came back from the follower's own WAL.
+	if recoveredNode.Log().LastIndex() != 2 {
+		t.Fatalf(
+			"recovered follower last index = %d, want 2",
+			recoveredNode.Log().LastIndex(),
+		)
+	}
+
+	t.Logf(
+		"follower %s recovered %d entries from WAL",
+		ids[followerIndex],
+		len(recoveredEntries),
+	)
+}
+
+func TestGRPCTransportDivergentFollowerLogRepair(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+
+	const (
+		node1 raft.NodeID = "node-1"
+		node2 raft.NodeID = "node-2"
+		node3 raft.NodeID = "node-3"
+	)
+
+	ids := []raft.NodeID{node1, node2, node3}
+
+	nodes := make([]*raft.RaftNode, len(ids))
+	stores := make([]*storage.WALStorage, len(ids))
+	transports := make([]*GRPCTransport, len(ids))
+	servers := make([]*grpc.Server, len(ids))
+	addresses := make([]string, len(ids))
+
+	// Start the initial three-node cluster.
+	for i, id := range ids {
+		node, store := newPersistentTestNode(t, id, tempDir)
+
+		nodes[i] = node
+		stores[i] = store
+
+		transport := NewGRPCTransport()
+		transports[i] = transport
+
+		server := grpc.NewServer()
+		servers[i] = server
+
+		registerRaftService(server, node)
+
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen for %s: %v", id, err)
+		}
+
+		addresses[i] = listener.Addr().String()
+
+		go func() {
+			if err := server.Serve(listener); err != nil &&
+				!errors.Is(err, grpc.ErrServerStopped) {
+				t.Errorf("serve %s: %v", id, err)
+			}
+		}()
+	}
+
+	t.Cleanup(func() {
+		for _, server := range servers {
+			if server != nil {
+				server.Stop()
+			}
+		}
+
+		for _, transport := range transports {
+			if transport != nil {
+				_ = transport.Close()
+			}
+		}
+
+		for _, store := range stores {
+			if store != nil {
+				_ = store.Close()
+			}
+		}
+	})
+
+	// Connect every node to every other node.
+	for i, transport := range transports {
+		for j, peerID := range ids {
+			if i == j {
+				continue
+			}
+
+			transport.AddPeer(peerID, addresses[j])
+		}
+
+		nodes[i].SetTransport(
+			transport,
+			peerIDsExcept(ids, ids[i]),
+		)
+
+		setDeterministicElectionTimeout(nodes[i], i)
+	}
+
+	for _, node := range nodes {
+		node.Start()
+	}
+
+	defer func() {
+		for _, node := range nodes {
+			node.Stop()
+		}
+	}()
+
+	// Wait for a leader.
+	leaderIndex := waitForLeader(t, nodes)
+	leader := nodes[leaderIndex]
+
+	// Establish the canonical log:
+	//
+	//   A B C
+	//
+	for _, data := range []string{"A", "B", "C"} {
+		if _, err := leader.Propose([]byte(data)); err != nil {
+			t.Fatalf("propose %q: %v", data, err)
+		}
+	}
+
+	// Wait until all three nodes contain the canonical prefix.
+	waitForCondition(t, 10*time.Second, func() bool {
+		for _, node := range nodes {
+			if node.Log().LastIndex() < 3 {
+				return false
+			}
+
+			expected := []string{"A", "B", "C"}
+
+			for i, want := range expected {
+				entry, ok := node.Log().Get(model.LogIndex(i + 1))
+				if !ok || string(entry.Data) != want {
+					return false
+				}
+			}
+		}
+
+		return true
+	})
+
+	// Stop one follower and remove its transport/server.
+	followerIndex := (leaderIndex + 1) % len(nodes)
+	followerID := ids[followerIndex]
+
+	nodes[followerIndex].Stop()
+	servers[followerIndex].Stop()
+	_ = transports[followerIndex].Close()
+	_ = stores[followerIndex].Close()
+
+	// The leader continues with the canonical log:
+	//
+	//   A B C D E
+	//
+	for _, data := range []string{"D", "E"} {
+		if _, err := leader.Propose([]byte(data)); err != nil {
+			t.Fatalf("propose %q after follower failure: %v", data, err)
+		}
+	}
+
+	// Reopen the stopped follower's WAL.
+	recoveredPath := filepath.Join(tempDir, string(followerID)+".wal")
+
+	recoveredStore, err := storage.OpenWAL(recoveredPath)
+	if err != nil {
+		t.Fatalf("reopen follower WAL: %v", err)
+	}
+
+	// Intentionally corrupt the follower's suffix:
+	//
+	//   canonical:  A B C D E
+	//   divergent:  A B C X Y
+	//
+	// This simulates a follower that has conflicting entries from another
+	// leader/term.
+	divergentEntries := []model.LogEntry{
+		{
+			Index: 4,
+			Term:  99,
+			Data:  []byte("X"),
+		},
+		{
+			Index: 5,
+			Term:  99,
+			Data:  []byte("Y"),
+		},
+	}
+
+	if err := recoveredStore.ReplaceSuffix(4, divergentEntries); err != nil {
+		_ = recoveredStore.Close()
+		t.Fatalf("create divergent suffix: %v", err)
+	}
+
+	if err := recoveredStore.Sync(); err != nil {
+		_ = recoveredStore.Close()
+		t.Fatalf("sync divergent suffix: %v", err)
+	}
+
+	if err := recoveredStore.Close(); err != nil {
+		t.Fatalf("close divergent store: %v", err)
+	}
+
+	// Reopen the intentionally divergent WAL.
+	recoveredStore, err = storage.OpenWAL(recoveredPath)
+	if err != nil {
+		t.Fatalf("reopen divergent follower WAL: %v", err)
+	}
+
+	recoveredNode, err := raft.NewRaftNodeWithStorage(
+		followerID,
+		recoveredStore,
+	)
+	if err != nil {
+		_ = recoveredStore.Close()
+		t.Fatalf("create recovered follower: %v", err)
+	}
+
+	// Start a new gRPC server for the recovered follower.
+	recoveredServer := grpc.NewServer()
+	registerRaftService(recoveredServer, recoveredNode)
+
+	recoveredListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		_ = recoveredStore.Close()
+		t.Fatalf("listen for recovered follower: %v", err)
+	}
+
+	recoveredAddress := recoveredListener.Addr().String()
+
+	go func() {
+		if err := recoveredServer.Serve(recoveredListener); err != nil &&
+			!errors.Is(err, grpc.ErrServerStopped) {
+			t.Errorf("serve recovered follower: %v", err)
+		}
+	}()
+
+	t.Cleanup(func() {
+		recoveredServer.Stop()
+		_ = recoveredListener.Close()
+		_ = recoveredStore.Close()
+	})
+
+	// Create a fresh transport for the recovered follower.
+	recoveredTransport := NewGRPCTransport()
+
+	for i, peerID := range ids {
+		if peerID == followerID {
+			continue
+		}
+
+		recoveredTransport.AddPeer(peerID, addresses[i])
+	}
+
+	// Replace the old follower address in the surviving nodes.
+	for i, transport := range transports {
+		if i == followerIndex {
+			continue
+		}
+
+		transport.RemovePeer(followerID)
+		transport.AddPeer(followerID, recoveredAddress)
+	}
+
+	recoveredNode.SetTransport(
+		recoveredTransport,
+		peerIDsExcept(ids, followerID),
+	)
+
+	setDeterministicElectionTimeout(
+		recoveredNode,
+		followerIndex,
+	)
+
+	recoveredNode.Start()
+
+	defer recoveredNode.Stop()
+
+	// The important part:
+	//
+	// DO NOT wait only for LastIndex == 5.
+	//
+	// The divergent log A B C X Y already has LastIndex == 5.
+	// We must wait until the actual contents have been repaired:
+	//
+	//   A B C X Y
+	//        ↓
+	//   A B C D E
+	//
+	expected := []string{"A", "B", "C", "D", "E"}
+
+	waitForCondition(t, 10*time.Second, func() bool {
+		if recoveredNode.State().Role != raft.Follower {
+			return false
+		}
+
+		for i, want := range expected {
+			entry, ok := recoveredNode.Log().Get(model.LogIndex(i + 1))
+			if !ok || string(entry.Data) != want {
+				return false
+			}
+		}
+
+		return true
+	})
+
+	// Final verification.
+	for i, want := range expected {
+		entry, ok := recoveredNode.Log().Get(model.LogIndex(i + 1))
+		if !ok {
+			t.Fatalf("missing entry %d", i+1)
+		}
+
+		if string(entry.Data) != want {
+			t.Fatalf(
+				"entry %d = %q, want %q",
+				i+1,
+				string(entry.Data),
+				want,
+			)
+		}
+	}
+
+	// Verify that the recovered follower has exactly the canonical log length.
+	if got := recoveredNode.Log().LastIndex(); got != 5 {
+		t.Fatalf("recovered follower last index = %d, want 5", got)
+	}
+}
+
+func TestGRPCTransportFullClusterRestartFromWAL(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+
+	const (
+		node1 raft.NodeID = "node-1"
+		node2 raft.NodeID = "node-2"
+		node3 raft.NodeID = "node-3"
+	)
+
+	ids := []raft.NodeID{node1, node2, node3}
+
+	nodes := make([]*raft.RaftNode, len(ids))
+	stores := make([]*storage.WALStorage, len(ids))
+	transports := make([]*GRPCTransport, len(ids))
+	servers := make([]*grpc.Server, len(ids))
+	addresses := make([]string, len(ids))
+
+	startCluster := func() {
+		for i, id := range ids {
+			node, store := newPersistentTestNode(
+				t,
+				id,
+				tempDir,
+			)
+
+			nodes[i] = node
+			stores[i] = store
+
+			transport := NewGRPCTransport()
+			transports[i] = transport
+
+			server := grpc.NewServer()
+			servers[i] = server
+
+			registerRaftService(server, node)
+
+			listener, err := net.Listen(
+				"tcp",
+				"127.0.0.1:0",
+			)
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+
+			addresses[i] = listener.Addr().String()
+
+			go func() {
+				if err := server.Serve(listener); err != nil &&
+					!errors.Is(err, grpc.ErrServerStopped) {
+					t.Errorf("server failed: %v", err)
+				}
+			}()
+		}
+
+		for i, transport := range transports {
+			for j, peerID := range ids {
+				if i == j {
+					continue
+				}
+
+				if err := transport.AddPeer(
+					peerID,
+					addresses[j],
+				); err != nil {
+					t.Fatalf(
+						"add peer %s -> %s: %v",
+						ids[i],
+						peerID,
+						err,
+					)
+				}
+			}
+
+			if err := nodes[i].SetTransport(
+				transport,
+				peerIDsExcept(ids, ids[i]),
+			); err != nil {
+				t.Fatalf(
+					"set transport %s: %v",
+					ids[i],
+					err,
+				)
+			}
+
+			setDeterministicElectionTimeout(
+				nodes[i],
+				i,
+			)
+		}
+
+		for _, node := range nodes {
+			node.Start()
+		}
+	}
+
+	stopCluster := func() {
+		for _, node := range nodes {
+			node.Stop()
+		}
+
+		for _, server := range servers {
+			server.Stop()
+		}
+
+		for _, transport := range transports {
+			_ = transport.Close()
+		}
+
+		for _, store := range stores {
+			_ = store.Close()
+		}
+	}
+
+	startCluster()
+
+	leaderIndex := waitForLeader(t, nodes)
+	leader := nodes[leaderIndex]
+
+	entries := []string{
+		"restart-a",
+		"restart-b",
+		"restart-c",
+	}
+
+	for _, data := range entries {
+		if _, err := leader.Propose([]byte(data)); err != nil {
+			t.Fatalf(
+				"propose %q: %v",
+				data,
+				err,
+			)
+		}
+	}
+
+	// Make sure all nodes have the complete log before
+	// shutting down the entire cluster.
+	waitForCondition(t, 10*time.Second, func() bool {
+		for _, node := range nodes {
+			if node.Log().LastIndex() != 3 {
+				return false
+			}
+		}
+
+		return true
+	})
+
+	t.Log("stopping complete cluster")
+	stopCluster()
+
+	// Recreate every node from its existing WAL.
+	startCluster()
+
+	defer stopCluster()
+
+	// A new election should happen using recovered persistent state.
+	newLeaderIndex := waitForLeader(t, nodes)
+	newLeader := nodes[newLeaderIndex]
+
+	if newLeader.Log().LastIndex() != 3 {
+		t.Fatalf(
+			"restarted leader last index = %d, want 3",
+			newLeader.Log().LastIndex(),
+		)
+	}
+
+	for i, want := range entries {
+		entry, ok := newLeader.Log().Get(
+			model.LogIndex(i + 1),
+		)
+		if !ok {
+			t.Fatalf(
+				"restarted leader missing entry %d",
+				i+1,
+			)
+		}
+
+		if string(entry.Data) != want {
+			t.Fatalf(
+				"restarted leader entry %d = %q, want %q",
+				i+1,
+				entry.Data,
+				want,
+			)
+		}
+	}
+
+	// Every node should recover the same log.
+	for i, node := range nodes {
+		if node.Log().LastIndex() != 3 {
+			t.Fatalf(
+				"node %s last index = %d, want 3",
+				ids[i],
+				node.Log().LastIndex(),
+			)
+		}
+	}
+
+	t.Logf(
+		"cluster restarted successfully with leader %s and recovered log",
+		newLeader.ID(),
+	)
+}
+func registerRaftService(server *grpc.Server, node *raft.RaftNode) {
+	service, err := NewRaftService(node)
+	if err != nil {
+		panic(fmt.Sprintf("create raft service: %v", err))
+	}
+
+	raftiqv1.RegisterRaftServiceServer(server, service)
+}
+
+func peerIDsExcept(
+	ids []raft.NodeID,
+	excluded raft.NodeID,
+) []raft.NodeID {
+	peers := make([]raft.NodeID, 0, len(ids)-1)
+
+	for _, id := range ids {
+		if id == excluded {
+			continue
+		}
+
+		peers = append(peers, id)
+	}
+
+	return peers
+}
+
+func setDeterministicElectionTimeout(
+	node *raft.RaftNode,
+	index int,
+) {
+	node.SetElectionTimeout(10 + index*5)
+}
+
+func waitForLeader(
+	t *testing.T,
+	nodes []*raft.RaftNode,
+) int {
+	t.Helper()
+
+	leaderIndex := -1
+
+	waitForCondition(t, 10*time.Second, func() bool {
+		leaderIndex = -1
+
+		for i, node := range nodes {
+			if node.State().Role != raft.Leader {
+				continue
+			}
+
+			if leaderIndex != -1 {
+				return false
+			}
+
+			leaderIndex = i
+		}
+
+		return leaderIndex >= 0
+	})
+
+	return leaderIndex
+}
+
+func waitForCondition(
+	t *testing.T,
+	timeout time.Duration,
+	condition func() bool,
+) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("condition not satisfied within %s", timeout)
 }
