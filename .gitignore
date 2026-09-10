@@ -87,4 +87,5 @@ benchmarks/results/
 # =========================
 *.gen.go
 *.pb.go
+!api/proto/*.pb.go
 *.pb.gw.go
