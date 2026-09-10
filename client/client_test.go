@@ -8,6 +8,7 @@ import (
 	"github.com/sanchar127/raftiq/internal/kv"
 	"github.com/sanchar127/raftiq/internal/raft"
 	"github.com/sanchar127/raftiq/internal/server"
+	"github.com/stretchr/testify/require"
 )
 
 func TestClientKVOperations(t *testing.T) {
@@ -77,4 +78,50 @@ func waitForLeader(t *testing.T, node *raft.RaftNode) {
 	}
 
 	t.Fatalf("node %s did not become leader", node.ID())
+}
+func TestClientClose(t *testing.T) {
+	t.Parallel()
+
+	node := raft.NewRaftNode("A")
+	store := kv.NewStore()
+	srv := server.NewServer(node, store)
+
+	cl := New(srv)
+
+	require.NoError(t, cl.Close())
+	require.NoError(t, cl.Close())
+
+	_, _, err := cl.Get(context.Background(), "name")
+	require.ErrorIs(t, err, ErrClientClosed)
+
+	require.ErrorIs(t, cl.Put(
+		context.Background(),
+		"name",
+		[]byte("value"),
+	), ErrClientClosed)
+
+	require.ErrorIs(t, cl.Delete(
+		context.Background(),
+		"name",
+	), ErrClientClosed)
+}
+
+func TestNilClientReturnsClosedError(t *testing.T) {
+	t.Parallel()
+
+	var cl *Client
+
+	_, _, err := cl.Get(context.Background(), "name")
+	require.ErrorIs(t, err, ErrClientClosed)
+
+	require.ErrorIs(t, cl.Put(
+		context.Background(),
+		"name",
+		[]byte("value"),
+	), ErrClientClosed)
+
+	require.ErrorIs(t, cl.Delete(
+		context.Background(),
+		"name",
+	), ErrClientClosed)
 }
