@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sanchar127/raftiq/internal/lock"
+	"github.com/sanchar127/raftiq/internal/model"
 )
 
 func TestStoreSnapshotRestore(t *testing.T) {
@@ -305,6 +306,92 @@ func TestStoreSnapshotRestorePreservesFencingAfterExpiration(t *testing.T) {
 		t.Fatalf(
 			"expected resource token 2, got %d",
 			value.FencingToken,
+		)
+	}
+}
+func TestStoreSnapshotRestoreJobs(t *testing.T) {
+	store := NewStore()
+
+	job := model.Job{
+		ID:               "job-1",
+		Payload:          []byte("send-email"),
+		State:            model.JobRunning,
+		ScheduledAt:      1000,
+		AssignedWorkerID: "worker-A",
+		FencingToken:     7,
+		Attempt:          2,
+		CreatedIndex:     42,
+	}
+
+	if err := store.CreateJob(job); err != nil {
+		t.Fatalf("CreateJob() returned error: %v", err)
+	}
+
+	snapshot, err := store.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot() returned error: %v", err)
+	}
+
+	restored := NewStore()
+
+	if err := restored.Restore(snapshot); err != nil {
+		t.Fatalf("Restore() returned error: %v", err)
+	}
+
+	got, ok := restored.GetJob(job.ID)
+	if !ok {
+		t.Fatal("expected job to survive snapshot restore")
+	}
+
+	if got.ID != job.ID {
+		t.Fatalf(
+			"expected job ID %q, got %q",
+			job.ID,
+			got.ID,
+		)
+	}
+
+	if string(got.Payload) != string(job.Payload) {
+		t.Fatalf(
+			"expected payload %q, got %q",
+			string(job.Payload),
+			string(got.Payload),
+		)
+	}
+
+	if got.State != model.JobRunning {
+		t.Fatalf(
+			"expected state %q, got %q",
+			model.JobRunning,
+			got.State,
+		)
+	}
+
+	if got.AssignedWorkerID != "worker-A" {
+		t.Fatalf(
+			"expected worker-A, got %q",
+			got.AssignedWorkerID,
+		)
+	}
+
+	if got.FencingToken != 7 {
+		t.Fatalf(
+			"expected fencing token 7, got %d",
+			got.FencingToken,
+		)
+	}
+
+	if got.Attempt != 2 {
+		t.Fatalf(
+			"expected attempt 2, got %d",
+			got.Attempt,
+		)
+	}
+
+	if got.CreatedIndex != 42 {
+		t.Fatalf(
+			"expected created index 42, got %d",
+			got.CreatedIndex,
 		)
 	}
 }

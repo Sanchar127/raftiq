@@ -14,6 +14,7 @@ type Store struct {
 	data   map[string][]byte
 	locks  *lock.State
 	fenced map[string]FencedValue
+	jobs   map[model.JobID]model.Job
 }
 
 type FencedValue struct {
@@ -33,6 +34,7 @@ func NewStore() *Store {
 		data:   make(map[string][]byte),
 		locks:  lock.NewState(),
 		fenced: make(map[string]FencedValue),
+		jobs:   make(map[model.JobID]model.Job),
 	}
 }
 
@@ -103,11 +105,12 @@ func (s *Store) GetLock(key string) (lock.Lock, bool) {
 }
 
 type snapshotState struct {
-	Version   uint64                 `json:"version"`
-	Data      map[string][]byte      `json:"data"`
-	Locks     map[string]lock.Lock   `json:"locks"`
-	NextToken uint64                 `json:"next_token"`
-	Fenced    map[string]FencedValue `json:"fenced"`
+	Version   uint64                    `json:"version"`
+	Data      map[string][]byte         `json:"data"`
+	Locks     map[string]lock.Lock      `json:"locks"`
+	NextToken uint64                    `json:"next_token"`
+	Fenced    map[string]FencedValue    `json:"fenced"`
+	Jobs      map[model.JobID]model.Job `json:"jobs"`
 }
 
 const snapshotVersion uint64 = 1
@@ -137,12 +140,18 @@ func (s *Store) Snapshot() ([]byte, error) {
 		}
 	}
 
+	jobs := make(map[model.JobID]model.Job, len(s.jobs))
+
+	for id, job := range s.jobs {
+		jobs[id] = cloneJob(job)
+	}
 	snapshot := snapshotState{
 		Version:   snapshotVersion,
 		Data:      data,
 		Locks:     locks,
 		NextToken: s.locks.NextToken,
 		Fenced:    fenced,
+		Jobs:      jobs,
 	}
 
 	result, err := json.Marshal(snapshot)
@@ -196,9 +205,18 @@ func (s *Store) Restore(data []byte) error {
 			snapshot.Fenced = make(map[string]FencedValue)
 		}
 
+		if snapshot.Jobs == nil {
+			snapshot.Jobs = make(map[model.JobID]model.Job)
+		}
+
 		restoredData := cloneData(snapshot.Data)
 		restoredLocks := cloneLocks(snapshot.Locks)
 		restoredFenced := cloneFenced(snapshot.Fenced)
+		restoredJobs := make(map[model.JobID]model.Job, len(snapshot.Jobs))
+
+		for id, job := range snapshot.Jobs {
+			restoredJobs[id] = cloneJob(job)
+		}
 
 		s.mu.Lock()
 		s.data = restoredData
@@ -207,6 +225,8 @@ func (s *Store) Restore(data []byte) error {
 			NextToken: snapshot.NextToken,
 		}
 		s.fenced = restoredFenced
+
+		s.jobs = restoredJobs
 		s.mu.Unlock()
 
 		return nil
@@ -231,6 +251,7 @@ func (s *Store) Restore(data []byte) error {
 	// Legacy snapshots contain no lock state.
 	s.locks = lock.NewState()
 	s.fenced = make(map[string]FencedValue)
+	s.jobs = make(map[model.JobID]model.Job)
 
 	s.mu.Unlock()
 
@@ -353,4 +374,9 @@ func cloneFenced(
 	}
 
 	return result
+}
+
+func cloneJob(job model.Job) model.Job {
+	job.Payload = append([]byte(nil), job.Payload...)
+	return job
 }
