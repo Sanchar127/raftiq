@@ -84,7 +84,7 @@ func Apply(store *Store, entry raft.LogEntry) ApplyResult {
 		}
 
 	case CommandClaimJob:
-		_, err := store.ClaimJob(
+		job, err := store.ClaimJob(
 			model.JobID(command.JobID),
 			command.OwnerID,
 			command.ExpiresAt,
@@ -98,6 +98,10 @@ func Apply(store *Store, entry raft.LogEntry) ApplyResult {
 					err,
 				),
 			}
+		}
+
+		return ApplyResult{
+			Job: &job,
 		}
 
 	default:

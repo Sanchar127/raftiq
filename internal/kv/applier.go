@@ -13,6 +13,7 @@ import (
 )
 
 type ApplyResult struct {
+	Job *model.Job
 	Err error
 }
 
@@ -62,9 +63,7 @@ func (a *Applier) Run(
 				a.results[entry.Index] = result
 			}
 
-			if result.Err != nil &&
-				!errors.Is(result.Err, lock.ErrStaleFencingToken) &&
-				!errors.Is(result.Err, lock.ErrLockNotFound) {
+			if result.Err != nil && !isExpectedApplyError(result.Err) {
 				a.applyErr = fmt.Errorf(
 					"apply entry %d: %w",
 					entry.Index,
@@ -77,6 +76,7 @@ func (a *Applier) Run(
 
 				return err
 			}
+
 			a.mu.Unlock()
 		}
 	}
@@ -172,5 +172,20 @@ func commandNeedsResult(entry raft.LogEntry) bool {
 		return false
 	}
 
-	return command.Type == CommandFencedPut
+	switch command.Type {
+	case CommandFencedPut, CommandClaimJob:
+		return true
+
+	default:
+		return false
+	}
+}
+
+func isExpectedApplyError(err error) bool {
+	return errors.Is(err, lock.ErrStaleFencingToken) ||
+		errors.Is(err, lock.ErrLockNotFound) ||
+		errors.Is(err, ErrJobNotFound) ||
+		errors.Is(err, ErrInvalidJob) ||
+		errors.Is(err, ErrJobNotClaimable) ||
+		errors.Is(err, ErrJobAlreadyClaimed)
 }
