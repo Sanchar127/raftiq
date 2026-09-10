@@ -14,20 +14,22 @@ var (
 
 type LocalTransport struct {
 	mu     sync.RWMutex
-	nodes  map[NodeID]*RaftNode
+	peers  map[NodeID]Peer
 	closed bool
 }
 
 func NewLocalTransport() *LocalTransport {
 	return &LocalTransport{
-		nodes: make(map[NodeID]*RaftNode),
+		peers: make(map[NodeID]Peer),
 	}
 }
 
-func (t *LocalTransport) AddNode(node *RaftNode) error {
-	if node == nil {
-		return errors.New("raft node is required")
+func (t *LocalTransport) AddPeer(peer Peer) error {
+	if peer == nil {
+		return errors.New("raft peer is required")
 	}
+
+	peerID := peer.ID()
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -36,22 +38,28 @@ func (t *LocalTransport) AddNode(node *RaftNode) error {
 		return ErrTransportClosed
 	}
 
-	nodeID := node.ID()
-
-	if _, exists := t.nodes[nodeID]; exists {
-		return fmt.Errorf("raft node %s already registered", nodeID)
+	if _, exists := t.peers[peerID]; exists {
+		return fmt.Errorf("raft peer %s already registered", peerID)
 	}
 
-	t.nodes[nodeID] = node
+	t.peers[peerID] = peer
 
 	return nil
+}
+
+func (t *LocalTransport) AddNode(node *RaftNode) error {
+	if node == nil {
+		return errors.New("raft node is required")
+	}
+
+	return t.AddPeer(node)
 }
 
 func (t *LocalTransport) RemoveNode(id NodeID) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	delete(t.nodes, id)
+	delete(t.peers, id)
 }
 
 func (t *LocalTransport) Close() {
@@ -59,12 +67,10 @@ func (t *LocalTransport) Close() {
 	defer t.mu.Unlock()
 
 	t.closed = true
-	t.nodes = make(map[NodeID]*RaftNode)
+	t.peers = make(map[NodeID]Peer)
 }
 
-func (t *LocalTransport) node(
-	target NodeID,
-) (*RaftNode, error) {
+func (t *LocalTransport) peer(target NodeID) (Peer, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -72,7 +78,7 @@ func (t *LocalTransport) node(
 		return nil, ErrTransportClosed
 	}
 
-	node, ok := t.nodes[target]
+	peer, ok := t.peers[target]
 	if !ok {
 		return nil, fmt.Errorf(
 			"%w: %s",
@@ -81,7 +87,7 @@ func (t *LocalTransport) node(
 		)
 	}
 
-	return node, nil
+	return peer, nil
 }
 
 func (t *LocalTransport) RequestVote(
@@ -93,7 +99,7 @@ func (t *LocalTransport) RequestVote(
 		return RequestVoteReply{}, err
 	}
 
-	node, err := t.node(target)
+	peer, err := t.peer(target)
 	if err != nil {
 		return RequestVoteReply{}, err
 	}
@@ -101,7 +107,7 @@ func (t *LocalTransport) RequestVote(
 	replyCh := make(chan RequestVoteReply, 1)
 
 	go func() {
-		replyCh <- node.RequestVote(args)
+		replyCh <- peer.RequestVote(args)
 	}()
 
 	select {
@@ -121,7 +127,7 @@ func (t *LocalTransport) AppendEntries(
 		return AppendEntriesReply{}, err
 	}
 
-	node, err := t.node(target)
+	peer, err := t.peer(target)
 	if err != nil {
 		return AppendEntriesReply{}, err
 	}
@@ -129,7 +135,7 @@ func (t *LocalTransport) AppendEntries(
 	replyCh := make(chan AppendEntriesReply, 1)
 
 	go func() {
-		replyCh <- node.AppendEntries(args)
+		replyCh <- peer.AppendEntries(args)
 	}()
 
 	select {
@@ -149,7 +155,7 @@ func (t *LocalTransport) InstallSnapshot(
 		return InstallSnapshotReply{}, err
 	}
 
-	node, err := t.node(target)
+	peer, err := t.peer(target)
 	if err != nil {
 		return InstallSnapshotReply{}, err
 	}
@@ -157,7 +163,7 @@ func (t *LocalTransport) InstallSnapshot(
 	replyCh := make(chan InstallSnapshotReply, 1)
 
 	go func() {
-		replyCh <- node.InstallSnapshot(args)
+		replyCh <- peer.InstallSnapshot(args)
 	}()
 
 	select {

@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -19,10 +20,13 @@ type RaftNode struct {
 	stopCh  chan struct{}
 	doneCh  chan struct{}
 
-	id      NodeID
-	state   State
-	log     *Log
-	peers   []Peer
+	id    NodeID
+	state State
+	log   *Log
+
+	transport Transport
+	peerIDs   []NodeID
+
 	applyCh chan LogEntry
 
 	storage storage.Storage
@@ -48,11 +52,55 @@ func NewRaftNode(id NodeID) *RaftNode {
 	return node
 }
 
+// SetPeers is retained as a compatibility helper for existing tests.
+//
+// New production code should use SetTransport so the Raft core depends
+// only on the Transport abstraction rather than an in-process Peer.
 func (n *RaftNode) SetPeers(peers []Peer) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	transport := NewLocalTransport()
+	peerIDs := make([]NodeID, 0, len(peers))
 
-	n.peers = append([]Peer(nil), peers...)
+	for _, peer := range peers {
+		if peer == nil {
+			continue
+		}
+
+		if err := transport.AddPeer(peer); err != nil {
+			continue
+		}
+
+		peerIDs = append(peerIDs, peer.ID())
+	}
+
+	n.mu.Lock()
+	n.transport = transport
+	n.peerIDs = peerIDs
+	n.mu.Unlock()
+}
+
+func (n *RaftNode) SetTransport(
+	transport Transport,
+	peerIDs []NodeID,
+) error {
+	if transport == nil {
+		return errors.New("raft transport is required")
+	}
+
+	ids := append([]NodeID(nil), peerIDs...)
+
+	n.mu.Lock()
+	n.transport = transport
+	n.peerIDs = ids
+	n.mu.Unlock()
+
+	return nil
+}
+
+func (n *RaftNode) transportSnapshot() (Transport, []NodeID) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	return n.transport, append([]NodeID(nil), n.peerIDs...)
 }
 
 func (n *RaftNode) ID() NodeID {
@@ -99,9 +147,7 @@ func (n *RaftNode) becomeLeaderLocked() {
 
 	nextIndex := n.log.LastIndex() + 1
 
-	for _, peer := range n.peers {
-		peerID := peer.ID()
-
+	for _, peerID := range n.peerIDs {
 		n.state.Leader.NextIndex[peerID] = nextIndex
 		n.state.Leader.MatchIndex[peerID] = 0
 	}
@@ -142,7 +188,8 @@ func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 	// newly appended entry can be committed immediately.
 	advanced := n.advanceCommitIndexLocked()
 
-	peers := append([]Peer(nil), n.peers...)
+	transport := n.transport
+	peerIDs := append([]NodeID(nil), n.peerIDs...)
 
 	n.mu.Unlock()
 
@@ -152,12 +199,17 @@ func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 		n.applyCommitted()
 	}
 
-	for _, peer := range peers {
-		n.replicateTo(peer)
+	if transport == nil {
+		return index, nil
+	}
+
+	for _, peerID := range peerIDs {
+		n.replicateTo(peerID)
 	}
 
 	return index, nil
 }
+
 func (n *RaftNode) RequestVote(args RequestVoteArgs) RequestVoteReply {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -222,7 +274,11 @@ func (n *RaftNode) isCandidateLogUpToDate(
 	return lastLogIndex >= localLastIndex
 }
 
-func (n *RaftNode) recordVote(peerID NodeID, term Term, granted bool) bool {
+func (n *RaftNode) recordVote(
+	peerID NodeID,
+	term Term,
+	granted bool,
+) bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
@@ -266,7 +322,7 @@ func (n *RaftNode) tryBecomeLeader() bool {
 		return false
 	}
 
-	clusterSize := len(n.peers) + 1
+	clusterSize := len(n.peerIDs) + 1
 	requiredVotes := clusterSize/2 + 1
 
 	if len(n.state.Election.VotesReceived) < requiredVotes {
@@ -285,9 +341,7 @@ type Peer interface {
 
 	AppendEntries(args AppendEntriesArgs) AppendEntriesReply
 
-	InstallSnapshot(
-		args InstallSnapshotArgs,
-	) InstallSnapshotReply
+	InstallSnapshot(args InstallSnapshotArgs) InstallSnapshotReply
 }
 
 func (n *RaftNode) startElection() (Term, error) {
@@ -316,23 +370,41 @@ func (n *RaftNode) requestVotes() {
 	term := n.state.Persistent.CurrentTerm
 	lastLogIndex := n.log.LastIndex()
 	lastLogTerm := n.log.LastTerm()
-	peers := append([]Peer(nil), n.peers...)
+	transport := n.transport
+	peerIDs := append([]NodeID(nil), n.peerIDs...)
+	candidateID := n.id
+
 	n.mu.RUnlock()
+
+	if transport == nil {
+		return
+	}
 
 	args := RequestVoteArgs{
 		Term:         term,
-		CandidateID:  n.id,
+		CandidateID:  candidateID,
 		LastLogIndex: lastLogIndex,
 		LastLogTerm:  lastLogTerm,
 	}
 
-	for _, peer := range peers {
-		reply := peer.RequestVote(args)
+	for _, peerID := range peerIDs {
+		reply, err := transport.RequestVote(
+			context.Background(),
+			peerID,
+			args,
+		)
+		if err != nil {
+			continue
+		}
+
 		n.handleVoteReply(term, reply)
 	}
 }
 
-func (n *RaftNode) handleVoteReply(electionTerm Term, reply RequestVoteReply) {
+func (n *RaftNode) handleVoteReply(
+	electionTerm Term,
+	reply RequestVoteReply,
+) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
@@ -416,7 +488,9 @@ func (n *RaftNode) resetElectionTimer() {
 	n.electionElapsed = 0
 }
 
-func (n *RaftNode) AppendEntries(args AppendEntriesArgs) AppendEntriesReply {
+func (n *RaftNode) AppendEntries(
+	args AppendEntriesArgs,
+) AppendEntriesReply {
 	n.mu.Lock()
 
 	reply := AppendEntriesReply{
@@ -493,7 +567,8 @@ func (n *RaftNode) AppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 			n.state.Volatile.CommitIndex = lastIndex
 		}
 
-		commitAdvanced = n.state.Volatile.CommitIndex > oldCommitIndex
+		commitAdvanced =
+			n.state.Volatile.CommitIndex > oldCommitIndex
 	}
 
 	reply.Term = n.state.Persistent.CurrentTerm
@@ -520,7 +595,8 @@ func (n *RaftNode) applyCommitted() {
 	for {
 		n.mu.Lock()
 
-		if n.state.Volatile.LastApplied >= n.state.Volatile.CommitIndex {
+		if n.state.Volatile.LastApplied >=
+			n.state.Volatile.CommitIndex {
 			n.mu.Unlock()
 			return
 		}
@@ -547,7 +623,9 @@ func (n *RaftNode) applyCommitted() {
 	}
 }
 
-func (n *RaftNode) buildAppendEntries(peerID NodeID) (AppendEntriesArgs, bool) {
+func (n *RaftNode) buildAppendEntries(
+	peerID NodeID,
+) (AppendEntriesArgs, bool) {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 
@@ -568,6 +646,7 @@ func (n *RaftNode) buildAppendEntries(peerID NodeID) (AppendEntriesArgs, bool) {
 
 	if nextIndex > 1 {
 		prevIndex := nextIndex - 1
+
 		prevEntry, ok := n.log.Get(prevIndex)
 		if !ok {
 			return AppendEntriesArgs{}, false
@@ -583,26 +662,46 @@ func (n *RaftNode) buildAppendEntries(peerID NodeID) (AppendEntriesArgs, bool) {
 			return AppendEntriesArgs{}, false
 		}
 
+		entry.Data = append([]byte(nil), entry.Data...)
 		args.Entries = append(args.Entries, entry)
 	}
 
 	return args, true
 }
 
-func (n *RaftNode) replicateTo(peer Peer) {
+func (n *RaftNode) replicateTo(peerID NodeID) {
 	for {
-		if n.sendInstallSnapshot(peer) {
+		n.mu.RLock()
+		transport := n.transport
+		n.mu.RUnlock()
+
+		if transport == nil {
+			return
+		}
+
+		if n.sendInstallSnapshot(peerID) {
 			continue
 		}
 
-		args, ok := n.buildAppendEntries(peer.ID())
+		args, ok := n.buildAppendEntries(peerID)
 		if !ok {
 			return
 		}
 
-		reply := peer.AppendEntries(args)
+		reply, err := transport.AppendEntries(
+			context.Background(),
+			peerID,
+			args,
+		)
+		if err != nil {
+			return
+		}
 
-		n.handleAppendEntriesReply(peer.ID(), args, reply)
+		n.handleAppendEntriesReply(
+			peerID,
+			args,
+			reply,
+		)
 
 		if reply.Success {
 			return
@@ -635,6 +734,7 @@ func (n *RaftNode) handleAppendEntriesReply(
 			n.mu.Unlock()
 			return
 		}
+
 		n.mu.Unlock()
 		return
 	}
@@ -663,7 +763,8 @@ func (n *RaftNode) handleAppendEntriesReply(
 		return
 	}
 
-	lastReplicated := args.Entries[len(args.Entries)-1].Index
+	lastReplicated :=
+		args.Entries[len(args.Entries)-1].Index
 
 	if lastReplicated > n.state.Leader.MatchIndex[peerID] {
 		n.state.Leader.MatchIndex[peerID] = lastReplicated
@@ -686,18 +787,19 @@ func (n *RaftNode) advanceCommitIndexLocked() bool {
 
 	oldCommitIndex := n.state.Volatile.CommitIndex
 
-	clusterSize := len(n.peers) + 1
+	clusterSize := len(n.peerIDs) + 1
 	majority := clusterSize/2 + 1
 
 	for index := n.state.Volatile.CommitIndex + 1; index <= n.log.LastIndex(); index++ {
+
 		if n.logTerm(index) != n.state.Persistent.CurrentTerm {
 			continue
 		}
 
 		replicated := 1
 
-		for _, peer := range n.peers {
-			if n.state.Leader.MatchIndex[peer.ID()] >= index {
+		for _, peerID := range n.peerIDs {
+			if n.state.Leader.MatchIndex[peerID] >= index {
 				replicated++
 			}
 		}
@@ -757,17 +859,25 @@ func (n *RaftNode) sendHeartbeats() {
 		return
 	}
 
-	peers := append([]Peer(nil), n.peers...)
+	peerIDs := append([]NodeID(nil), n.peerIDs...)
 
 	n.mu.RUnlock()
 
-	for _, peer := range peers {
-		go n.replicateTo(peer)
+	for _, peerID := range peerIDs {
+		go n.replicateTo(peerID)
 	}
 }
 
-func (n *RaftNode) sendHeartbeat(peer Peer) {
-	args, ok := n.buildAppendEntries(peer.ID())
+func (n *RaftNode) sendHeartbeat(peerID NodeID) {
+	n.mu.RLock()
+	transport := n.transport
+	n.mu.RUnlock()
+
+	if transport == nil {
+		return
+	}
+
+	args, ok := n.buildAppendEntries(peerID)
 	if !ok {
 		return
 	}
@@ -776,9 +886,20 @@ func (n *RaftNode) sendHeartbeat(peer Peer) {
 		return
 	}
 
-	reply := peer.AppendEntries(args)
+	reply, err := transport.AppendEntries(
+		context.Background(),
+		peerID,
+		args,
+	)
+	if err != nil {
+		return
+	}
 
-	n.handleAppendEntriesReply(peer.ID(), args, reply)
+	n.handleAppendEntriesReply(
+		peerID,
+		args,
+		reply,
+	)
 }
 
 func (n *RaftNode) heartbeat() {
@@ -789,12 +910,12 @@ func (n *RaftNode) heartbeat() {
 		return
 	}
 
-	peers := append([]Peer(nil), n.peers...)
+	peerIDs := append([]NodeID(nil), n.peerIDs...)
 
 	n.mu.RUnlock()
 
-	for _, peer := range peers {
-		n.sendHeartbeat(peer)
+	for _, peerID := range peerIDs {
+		n.sendHeartbeat(peerID)
 	}
 }
 
@@ -808,17 +929,26 @@ func NewRaftNodeWithStorage(
 
 	persistentState, err := store.LoadState()
 	if err != nil {
-		return nil, fmt.Errorf("load persistent state: %w", err)
+		return nil, fmt.Errorf(
+			"load persistent state: %w",
+			err,
+		)
 	}
 
 	entries, err := store.LoadEntries()
 	if err != nil {
-		return nil, fmt.Errorf("load log entries: %w", err)
+		return nil, fmt.Errorf(
+			"load log entries: %w",
+			err,
+		)
 	}
 
 	snapshot, err := store.LoadSnapshot()
 	if err != nil {
-		return nil, fmt.Errorf("load snapshot: %w", err)
+		return nil, fmt.Errorf(
+			"load snapshot: %w",
+			err,
+		)
 	}
 
 	log := NewLog()
@@ -849,10 +979,11 @@ func NewRaftNodeWithStorage(
 	}
 
 	return &RaftNode{
-		id:      id,
-		storage: store,
-		peers:   make([]Peer, 0),
-		applyCh: make(chan LogEntry, 100),
+		id:        id,
+		storage:   store,
+		transport: NewLocalTransport(),
+		peerIDs:   make([]NodeID, 0),
+		applyCh:   make(chan LogEntry, 100),
 
 		state: State{
 			Persistent: persistentState,
@@ -891,11 +1022,17 @@ func (n *RaftNode) Storage() storage.Storage {
 
 func (n *RaftNode) persistStateLocked() error {
 	if err := n.storage.SaveState(n.state.Persistent); err != nil {
-		return fmt.Errorf("save persistent state: %w", err)
+		return fmt.Errorf(
+			"save persistent state: %w",
+			err,
+		)
 	}
 
 	if err := n.storage.Sync(); err != nil {
-		return fmt.Errorf("sync persistent state: %w", err)
+		return fmt.Errorf(
+			"sync persistent state: %w",
+			err,
+		)
 	}
 
 	return nil
@@ -906,7 +1043,10 @@ func (n *RaftNode) Start() error {
 	defer n.runMu.Unlock()
 
 	if n.running {
-		return fmt.Errorf("raft node %s is already running", n.id)
+		return fmt.Errorf(
+			"raft node %s is already running",
+			n.id,
+		)
 	}
 
 	n.stopCh = make(chan struct{})
@@ -917,6 +1057,7 @@ func (n *RaftNode) Start() error {
 
 	return nil
 }
+
 func (n *RaftNode) run() {
 	defer close(n.doneCh)
 
@@ -985,7 +1126,11 @@ func (n *RaftNode) Stop() {
 
 	<-doneCh
 }
-func (n *RaftNode) tick() (electionDue, heartbeatDue bool) {
+
+func (n *RaftNode) tick() (
+	electionDue,
+	heartbeatDue bool,
+) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
@@ -1008,7 +1153,11 @@ func (n *RaftNode) tick() (electionDue, heartbeatDue bool) {
 
 	return electionDue, heartbeatDue
 }
-func (n *RaftNode) WaitApplied(ctx context.Context, index LogIndex) error {
+
+func (n *RaftNode) WaitApplied(
+	ctx context.Context,
+	index LogIndex,
+) error {
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -1071,15 +1220,24 @@ func (n *RaftNode) CreateSnapshot(
 	}
 
 	if err := n.storage.SaveSnapshot(snapshot); err != nil {
-		return fmt.Errorf("save snapshot: %w", err)
+		return fmt.Errorf(
+			"save snapshot: %w",
+			err,
+		)
 	}
 
 	if err := n.storage.Sync(); err != nil {
-		return fmt.Errorf("sync snapshot: %w", err)
+		return fmt.Errorf(
+			"sync snapshot: %w",
+			err,
+		)
 	}
 
 	if err := n.log.Compact(snapshot); err != nil {
-		return fmt.Errorf("compact log after snapshot: %w", err)
+		return fmt.Errorf(
+			"compact log after snapshot: %w",
+			err,
+		)
 	}
 
 	return nil
@@ -1191,12 +1349,16 @@ func (n *RaftNode) InstallSnapshot(
 	}
 
 	// 8. The snapshot represents committed/applied state.
-	if n.state.Volatile.CommitIndex < snapshot.LastIncludedIndex {
-		n.state.Volatile.CommitIndex = snapshot.LastIncludedIndex
+	if n.state.Volatile.CommitIndex <
+		snapshot.LastIncludedIndex {
+		n.state.Volatile.CommitIndex =
+			snapshot.LastIncludedIndex
 	}
 
-	if n.state.Volatile.LastApplied < snapshot.LastIncludedIndex {
-		n.state.Volatile.LastApplied = snapshot.LastIncludedIndex
+	if n.state.Volatile.LastApplied <
+		snapshot.LastIncludedIndex {
+		n.state.Volatile.LastApplied =
+			snapshot.LastIncludedIndex
 	}
 
 	reply.Term = n.state.Persistent.CurrentTerm
@@ -1279,8 +1441,10 @@ func (n *RaftNode) handleInstallSnapshotReply(
 		return
 	}
 
-	if args.LastIncludedIndex > n.state.Leader.MatchIndex[peerID] {
-		n.state.Leader.MatchIndex[peerID] = args.LastIncludedIndex
+	if args.LastIncludedIndex >
+		n.state.Leader.MatchIndex[peerID] {
+		n.state.Leader.MatchIndex[peerID] =
+			args.LastIncludedIndex
 	}
 
 	nextIndex := args.LastIncludedIndex + 1
@@ -1298,16 +1462,33 @@ func (n *RaftNode) handleInstallSnapshotReply(
 	}
 }
 
-func (n *RaftNode) sendInstallSnapshot(peer Peer) bool {
-	args, ok := n.buildInstallSnapshot(peer.ID())
+func (n *RaftNode) sendInstallSnapshot(
+	peerID NodeID,
+) bool {
+	n.mu.RLock()
+	transport := n.transport
+	n.mu.RUnlock()
+
+	if transport == nil {
+		return false
+	}
+
+	args, ok := n.buildInstallSnapshot(peerID)
 	if !ok {
 		return false
 	}
 
-	reply := peer.InstallSnapshot(args)
+	reply, err := transport.InstallSnapshot(
+		context.Background(),
+		peerID,
+		args,
+	)
+	if err != nil {
+		return false
+	}
 
 	n.handleInstallSnapshotReply(
-		peer.ID(),
+		peerID,
 		args,
 		reply,
 	)
