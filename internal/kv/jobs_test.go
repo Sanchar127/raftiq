@@ -426,3 +426,148 @@ func TestStoreValidateJobOwnership(t *testing.T) {
 		})
 	}
 }
+func TestStoreTransitionJobStateRejectsStaleExecution(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+
+	jobID := model.JobID("job-1")
+	workerID := "worker-1"
+
+	if err := store.CreateJob(model.Job{
+		ID:    jobID,
+		State: model.JobPending,
+	}); err != nil {
+		t.Fatalf("CreateJob() error = %v", err)
+	}
+
+	// First execution attempt.
+	firstJob, err := store.ClaimJob(
+		jobID,
+		workerID,
+		2_000,
+		1,
+	)
+	if err != nil {
+		t.Fatalf("first ClaimJob() error = %v", err)
+	}
+
+	firstExecutionID := firstJob.ExecutionID
+	firstFencingToken := firstJob.FencingToken
+
+	if firstExecutionID == "" {
+		t.Fatal("expected first execution ID to be assigned")
+	}
+
+	if firstJob.Attempt != 1 {
+		t.Fatalf(
+			"first attempt = %d, want 1",
+			firstJob.Attempt,
+		)
+	}
+
+	// Start the first execution.
+	if _, err := store.TransitionJobState(
+		jobID,
+		workerID,
+		firstExecutionID,
+		firstFencingToken,
+		model.JobScheduled,
+		model.JobRunning,
+		1_500,
+	); err != nil {
+		t.Fatalf(
+			"first TransitionJobState() error = %v",
+			err,
+		)
+	}
+
+	// The first lease expires and the scheduler reclaims the job.
+	if _, err := store.ReclaimExpiredJob(
+		jobID,
+		firstFencingToken,
+		2_000,
+	); err != nil {
+		t.Fatalf("ReclaimExpiredJob() error = %v", err)
+	}
+
+	// A new execution attempt claims the same job.
+	secondJob, err := store.ClaimJob(
+		jobID,
+		workerID,
+		4_000,
+		3,
+	)
+	if err != nil {
+		t.Fatalf("second ClaimJob() error = %v", err)
+	}
+
+	secondExecutionID := secondJob.ExecutionID
+	secondFencingToken := secondJob.FencingToken
+
+	if secondJob.Attempt != 2 {
+		t.Fatalf(
+			"second attempt = %d, want 2",
+			secondJob.Attempt,
+		)
+	}
+
+	if secondExecutionID == firstExecutionID {
+		t.Fatalf(
+			"execution ID was reused: %q",
+			secondExecutionID,
+		)
+	}
+
+	if secondFencingToken == firstFencingToken {
+		t.Fatalf(
+			"fencing token was reused: %d",
+			secondFencingToken,
+		)
+	}
+
+	// Deliberately use the OLD execution ID with the CURRENT ownership
+	// information. Fencing alone would accept this, but execution identity
+	// must reject it.
+	_, err = store.TransitionJobState(
+		jobID,
+		workerID,
+		firstExecutionID,
+		secondFencingToken,
+		model.JobScheduled,
+		model.JobRunning,
+		3_500,
+	)
+
+	if !errors.Is(err, ErrJobOwnershipLost) {
+		t.Fatalf(
+			"stale execution transition error = %v, want ErrJobOwnershipLost",
+			err,
+		)
+	}
+
+	// The current execution must still be able to transition normally.
+	got, err := store.TransitionJobState(
+		jobID,
+		workerID,
+		secondExecutionID,
+		secondFencingToken,
+		model.JobScheduled,
+		model.JobRunning,
+		3_500,
+	)
+	if err != nil {
+		t.Fatalf(
+			"current execution TransitionJobState() error = %v",
+			err,
+		)
+	}
+
+	if got.State != model.JobRunning {
+		t.Fatalf(
+			"job state = %q, want %q",
+			got.State,
+			model.JobRunning,
+		)
+	}
+}
