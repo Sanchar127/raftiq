@@ -17,6 +17,7 @@ var (
 	ErrJobOwnershipLost  = errors.New("job ownership lost")
 )
 
+// CreateJob inserts a new job into the state machine.
 func (s *Store) CreateJob(job model.Job) error {
 	if job.ID == "" {
 		return fmt.Errorf("%w: missing job ID", ErrInvalidJob)
@@ -34,15 +35,13 @@ func (s *Store) CreateJob(job model.Job) error {
 	}
 
 	job.Payload = append([]byte(nil), job.Payload...)
-
 	s.jobs[job.ID] = job
 
 	return nil
 }
 
-func (s *Store) GetJob(
-	id model.JobID,
-) (model.Job, bool) {
+// GetJob returns a defensive copy of a job.
+func (s *Store) GetJob(id model.JobID) (model.Job, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -51,16 +50,12 @@ func (s *Store) GetJob(
 		return model.Job{}, false
 	}
 
-	job.Payload = append([]byte(nil), job.Payload...)
-
-	return job, true
+	return cloneJob(job), true
 }
 
 // ListPendingJobs returns a deterministic snapshot of all pending jobs.
 //
-// Jobs are ordered by ScheduledAt and then JobID. The returned jobs are
-// independent copies and can therefore be safely inspected by callers
-// without holding the store lock.
+// Jobs are ordered by ScheduledAt and then JobID.
 func (s *Store) ListPendingJobs() []model.Job {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -86,6 +81,55 @@ func (s *Store) ListPendingJobs() []model.Job {
 	return jobs
 }
 
+// ListExpiredJobs returns claimed jobs whose replicated lock has expired.
+//
+// Both SCHEDULED and RUNNING jobs are returned. This is important for worker
+// crash recovery: a worker may crash either before JOB_START is committed or
+// after the job has entered RUNNING.
+func (s *Store) ListExpiredJobs(now int64) []model.Job {
+	if now <= 0 {
+		return nil
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	jobs := make([]model.Job, 0)
+
+	for _, job := range s.jobs {
+		if job.State != model.JobScheduled &&
+			job.State != model.JobRunning {
+			continue
+		}
+
+		currentLock, ok := s.locks.Get(string(job.ID))
+		if !ok {
+			continue
+		}
+
+		if currentLock.FencingToken != job.FencingToken {
+			continue
+		}
+
+		if currentLock.ExpiresAt > now {
+			continue
+		}
+
+		jobs = append(jobs, cloneJob(job))
+	}
+
+	sort.Slice(jobs, func(i, j int) bool {
+		if jobs[i].ScheduledAt != jobs[j].ScheduledAt {
+			return jobs[i].ScheduledAt < jobs[j].ScheduledAt
+		}
+
+		return jobs[i].ID < jobs[j].ID
+	})
+
+	return jobs
+}
+
+// UpdateJob replaces an existing job.
 func (s *Store) UpdateJob(job model.Job) error {
 	if job.ID == "" {
 		return fmt.Errorf("%w: missing job ID", ErrInvalidJob)
@@ -99,12 +143,12 @@ func (s *Store) UpdateJob(job model.Job) error {
 	}
 
 	job.Payload = append([]byte(nil), job.Payload...)
-
 	s.jobs[job.ID] = job
 
 	return nil
 }
 
+// DeleteJob removes a job.
 func (s *Store) DeleteJob(id model.JobID) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -140,6 +184,13 @@ func (s *Store) ClaimJob(
 		)
 	}
 
+	if expiresAt <= 0 {
+		return model.Job{}, fmt.Errorf(
+			"%w: invalid expiration time",
+			ErrInvalidJob,
+		)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -150,11 +201,10 @@ func (s *Store) ClaimJob(
 
 	switch job.State {
 	case model.JobPending:
-		// Valid transition. Continue below.
+		// Valid transition.
 
 	case model.JobScheduled:
 		if job.AssignedWorkerID == workerID {
-			// Idempotent replay of the same claim.
 			return cloneJob(job), nil
 		}
 
@@ -183,8 +233,6 @@ func (s *Store) ClaimJob(
 
 	if !acquired {
 		if currentLock.OwnerID == workerID {
-			// The lock already belongs to this worker. Treat this as
-			// an idempotent replay rather than allocating another token.
 			job.State = model.JobScheduled
 			job.AssignedWorkerID = workerID
 			job.FencingToken = currentLock.FencingToken
@@ -212,10 +260,68 @@ func (s *Store) ClaimJob(
 	return cloneJob(job), nil
 }
 
+// ReclaimExpiredJob releases an expired job lease and returns the job to
+// PENDING so another worker can claim it.
+//
+// The fencing token is mandatory. This prevents an old scheduler from
+// reclaiming a newer ownership generation.
+//
+// The operation is intended to be invoked through the Raft state machine.
+func (s *Store) ReclaimExpiredJob(
+	id model.JobID,
+	expectedToken uint64,
+	at int64,
+) (model.Job, error) {
+	if id == "" || expectedToken == 0 || at <= 0 {
+		return model.Job{}, ErrInvalidJob
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	job, ok := s.jobs[id]
+	if !ok {
+		return model.Job{}, ErrJobNotFound
+	}
+
+	if job.State != model.JobScheduled &&
+		job.State != model.JobRunning {
+		return model.Job{}, ErrInvalidJobState
+	}
+
+	if job.FencingToken != expectedToken {
+		return model.Job{}, ErrJobOwnershipLost
+	}
+
+	currentLock, ok := s.locks.Get(string(id))
+	if !ok {
+		return model.Job{}, ErrJobOwnershipLost
+	}
+
+	if currentLock.FencingToken != expectedToken {
+		return model.Job{}, ErrJobOwnershipLost
+	}
+
+	if currentLock.ExpiresAt > at {
+		return model.Job{}, ErrJobOwnershipLost
+	}
+
+	delete(s.locks.Locks, string(id))
+
+	job.State = model.JobPending
+	job.AssignedWorkerID = ""
+	job.FencingToken = 0
+
+	job.Payload = append([]byte(nil), job.Payload...)
+	s.jobs[id] = job
+
+	return cloneJob(job), nil
+}
+
 // ListAssignedJobs returns jobs currently assigned to the specified worker.
 //
-// Only SCHEDULED jobs are returned because RUNNING/SUCCEEDED/FAILED state
-// transitions will be introduced by the worker lifecycle implementation.
+// Only SCHEDULED jobs are returned because the worker must explicitly
+// transition SCHEDULED -> RUNNING before executing application work.
 func (s *Store) ListAssignedJobs(workerID string) []model.Job {
 	if workerID == "" {
 		return nil
@@ -235,10 +341,7 @@ func (s *Store) ListAssignedJobs(workerID string) []model.Job {
 			continue
 		}
 
-		copied := job
-		copied.Payload = append([]byte(nil), job.Payload...)
-
-		jobs = append(jobs, copied)
+		jobs = append(jobs, cloneJob(job))
 	}
 
 	sort.Slice(jobs, func(i, j int) bool {
@@ -255,8 +358,6 @@ func (s *Store) ListAssignedJobs(workerID string) []model.Job {
 // ValidateJobOwnership verifies that the supplied worker still owns the job
 // under the supplied fencing token and that the corresponding lock has not
 // expired.
-//
-// This method is read-only. It does not renew, acquire, or mutate the lock.
 func (s *Store) ValidateJobOwnership(
 	jobID model.JobID,
 	workerID string,
@@ -312,9 +413,6 @@ func (s *Store) ValidateJobOwnership(
 //
 // The transition is validated atomically against the current job ownership,
 // fencing token, lock owner, lock fencing token, and lock expiry.
-//
-// The timestamp is supplied by the Raft command rather than obtained from
-// time.Now() so every replica applies the same deterministic state transition.
 func (s *Store) TransitionJobState(
 	jobID model.JobID,
 	workerID string,
@@ -392,9 +490,7 @@ func (s *Store) TransitionJobState(
 
 	job.State = nextState
 
-	copied := job
-	copied.Payload = append([]byte(nil), job.Payload...)
-
+	copied := cloneJob(job)
 	s.jobs[jobID] = copied
 
 	return copied, nil

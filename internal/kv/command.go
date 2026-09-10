@@ -17,6 +17,7 @@ const (
 	CommandFencedPut   CommandType = "FENCED_PUT"
 
 	CommandClaimJob     CommandType = "CLAIM_JOB"
+	CommandJobReclaim   CommandType = "JOB_RECLAIM"
 	CommandJobStart     CommandType = "JOB_START"
 	CommandJobSucceeded CommandType = "JOB_SUCCEEDED"
 	CommandJobFailed    CommandType = "JOB_FAILED"

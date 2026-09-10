@@ -148,6 +148,17 @@ func Apply(store *Store, entry raft.LogEntry) ApplyResult {
 			Err: err,
 		}
 
+	case CommandJobReclaim:
+		job, err := store.ReclaimExpiredJob(
+			model.JobID(command.JobID),
+			command.FencingToken,
+			command.At,
+		)
+
+		return ApplyResult{
+			Job: &job,
+			Err: err,
+		}
 	default:
 		return ApplyResult{
 			Err: fmt.Errorf(
