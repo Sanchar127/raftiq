@@ -4,7 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
+	"hash/fnv"
+	"sort"
 	"time"
 
 	"github.com/sanchar127/raftiq/internal/kv"
@@ -27,13 +28,16 @@ type WorkerSelector interface {
 	SelectWorker(job model.Job) (string, error)
 }
 
-type RoundRobinSelector struct {
-	mu      sync.Mutex
+// HashWorkerSelector deterministically maps a job to a worker.
+//
+// The mapping depends only on the job ID and the configured worker set.
+// It does not depend on scheduler-local state, so a different Raft leader
+// produces the same assignment for the same job.
+type HashWorkerSelector struct {
 	workers []string
-	next    int
 }
 
-func NewRoundRobinSelector(workers []string) (*RoundRobinSelector, error) {
+func NewHashWorkerSelector(workers []string) (*HashWorkerSelector, error) {
 	if len(workers) == 0 {
 		return nil, ErrNoWorkers
 	}
@@ -46,23 +50,30 @@ func NewRoundRobinSelector(workers []string) (*RoundRobinSelector, error) {
 		}
 	}
 
-	return &RoundRobinSelector{
+	sort.Strings(copied)
+
+	for i := 1; i < len(copied); i++ {
+		if copied[i] == copied[i-1] {
+			return nil, fmt.Errorf("duplicate worker ID %q", copied[i])
+		}
+	}
+
+	return &HashWorkerSelector{
 		workers: copied,
 	}, nil
 }
 
-func (s *RoundRobinSelector) SelectWorker(_ model.Job) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+func (s *HashWorkerSelector) SelectWorker(job model.Job) (string, error) {
 	if len(s.workers) == 0 {
 		return "", ErrNoWorkers
 	}
 
-	worker := s.workers[s.next%len(s.workers)]
-	s.next++
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(job.ID))
 
-	return worker, nil
+	index := uint64(hash.Sum32()) % uint64(len(s.workers))
+
+	return s.workers[index], nil
 }
 
 type Scheduler struct {
