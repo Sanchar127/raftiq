@@ -231,3 +231,267 @@ func TestGRPCTransportRequestVote(t *testing.T) {
 		)
 	}
 }
+func TestGRPCTransportAppendEntries(t *testing.T) {
+	serverNode := &grpcTestNode{
+		appendEntriesReply: raft.AppendEntriesReply{
+			Term:       8,
+			FollowerID: "node-2",
+			Success:    true,
+		},
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	server := grpc.NewServer()
+	raftiqv1.RegisterRaftServiceServer(server, serverNode)
+
+	go func() {
+		if err := server.Serve(listener); err != nil {
+			t.Errorf("gRPC test server failed: %v", err)
+		}
+	}()
+
+	defer func() {
+		server.GracefulStop()
+		_ = listener.Close()
+	}()
+
+	transport := NewGRPCTransport()
+
+	err = transport.AddPeer(
+		"node-2",
+		listener.Addr().String(),
+	)
+	if err != nil {
+		t.Fatalf("add peer: %v", err)
+	}
+
+	defer func() {
+		if err := transport.Close(); err != nil {
+			t.Fatalf("close transport: %v", err)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
+	defer cancel()
+
+	entries := []raft.LogEntry{
+		{
+			Index: 4,
+			Term:  3,
+			Data:  []byte("set foo=bar"),
+		},
+		{
+			Index: 5,
+			Term:  3,
+			Data:  []byte("set count=10"),
+		},
+	}
+
+	reply, err := transport.AppendEntries(
+		ctx,
+		"node-2",
+		raft.AppendEntriesArgs{
+			Term:         6,
+			LeaderID:     "node-1",
+			PrevLogIndex: 3,
+			PrevLogTerm:  2,
+			Entries:      entries,
+			LeaderCommit: 4,
+		},
+	)
+	if err != nil {
+		t.Fatalf("append entries: %v", err)
+	}
+
+	if reply.Term != 8 {
+		t.Fatalf("expected term 8, got %d", reply.Term)
+	}
+
+	if reply.FollowerID != "node-2" {
+		t.Fatalf(
+			"expected follower node-2, got %s",
+			reply.FollowerID,
+		)
+	}
+
+	if !reply.Success {
+		t.Fatal("expected append entries to succeed")
+	}
+
+	got := serverNode.appendEntriesArgs
+
+	if got.Term != 6 {
+		t.Fatalf("expected term 6, got %d", got.Term)
+	}
+
+	if got.LeaderID != "node-1" {
+		t.Fatalf(
+			"expected leader node-1, got %s",
+			got.LeaderID,
+		)
+	}
+
+	if got.PrevLogIndex != 3 {
+		t.Fatalf(
+			"expected previous log index 3, got %d",
+			got.PrevLogIndex,
+		)
+	}
+
+	if got.PrevLogTerm != 2 {
+		t.Fatalf(
+			"expected previous log term 2, got %d",
+			got.PrevLogTerm,
+		)
+	}
+
+	if got.LeaderCommit != 4 {
+		t.Fatalf(
+			"expected leader commit 4, got %d",
+			got.LeaderCommit,
+		)
+	}
+
+	if len(got.Entries) != 2 {
+		t.Fatalf(
+			"expected 2 entries, got %d",
+			len(got.Entries),
+		)
+	}
+
+	if got.Entries[0].Index != 4 ||
+		got.Entries[0].Term != 3 ||
+		string(got.Entries[0].Data) != "set foo=bar" {
+		t.Fatalf("unexpected first entry: %+v", got.Entries[0])
+	}
+
+	if got.Entries[1].Index != 5 ||
+		got.Entries[1].Term != 3 ||
+		string(got.Entries[1].Data) != "set count=10" {
+		t.Fatalf("unexpected second entry: %+v", got.Entries[1])
+	}
+}
+func TestGRPCTransportInstallSnapshot(t *testing.T) {
+	serverNode := &grpcTestNode{
+		installSnapshotReply: raft.InstallSnapshotReply{
+			Term:       11,
+			FollowerID: "node-2",
+			Success:    true,
+		},
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	server := grpc.NewServer()
+	raftiqv1.RegisterRaftServiceServer(server, serverNode)
+
+	go func() {
+		if err := server.Serve(listener); err != nil {
+			t.Errorf("gRPC test server failed: %v", err)
+		}
+	}()
+
+	defer func() {
+		server.GracefulStop()
+		_ = listener.Close()
+	}()
+
+	transport := NewGRPCTransport()
+
+	err = transport.AddPeer(
+		"node-2",
+		listener.Addr().String(),
+	)
+	if err != nil {
+		t.Fatalf("add peer: %v", err)
+	}
+
+	defer func() {
+		if err := transport.Close(); err != nil {
+			t.Fatalf("close transport: %v", err)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
+	defer cancel()
+
+	snapshot := []byte("snapshot-state-v42")
+
+	reply, err := transport.InstallSnapshot(
+		ctx,
+		"node-2",
+		raft.InstallSnapshotArgs{
+			Term:              10,
+			LeaderID:          "node-1",
+			LastIncludedIndex: 42,
+			LastIncludedTerm:  9,
+			Data:              snapshot,
+		},
+	)
+	if err != nil {
+		t.Fatalf("install snapshot: %v", err)
+	}
+
+	if reply.Term != 11 {
+		t.Fatalf("expected term 11, got %d", reply.Term)
+	}
+
+	if reply.FollowerID != "node-2" {
+		t.Fatalf(
+			"expected follower node-2, got %s",
+			reply.FollowerID,
+		)
+	}
+
+	if !reply.Success {
+		t.Fatal("expected snapshot installation to succeed")
+	}
+
+	got := serverNode.installSnapshotArgs
+
+	if got.Term != 10 {
+		t.Fatalf("expected term 10, got %d", got.Term)
+	}
+
+	if got.LeaderID != "node-1" {
+		t.Fatalf(
+			"expected leader node-1, got %s",
+			got.LeaderID,
+		)
+	}
+
+	if got.LastIncludedIndex != 42 {
+		t.Fatalf(
+			"expected last included index 42, got %d",
+			got.LastIncludedIndex,
+		)
+	}
+
+	if got.LastIncludedTerm != 9 {
+		t.Fatalf(
+			"expected last included term 9, got %d",
+			got.LastIncludedTerm,
+		)
+	}
+
+	if string(got.Data) != string(snapshot) {
+		t.Fatalf(
+			"expected snapshot %q, got %q",
+			snapshot,
+			got.Data,
+		)
+	}
+}
