@@ -7,6 +7,12 @@ import (
 	"github.com/sanchar127/raftiq/internal/model"
 )
 
+const (
+	testScheduleEarly  = int64(1_000_000_000_000)
+	testScheduleMiddle = int64(2_000_000_000_000)
+	testScheduleLate   = int64(3_000_000_000_000)
+)
+
 func TestStoreCreateAndGetJob(t *testing.T) {
 	store := NewStore()
 
@@ -14,7 +20,7 @@ func TestStoreCreateAndGetJob(t *testing.T) {
 		ID:               "job-1",
 		Payload:          []byte("send-email"),
 		State:            model.JobPending,
-		ScheduledAt:      100,
+		ScheduledAt:      testScheduleMiddle,
 		AssignedWorkerID: "",
 		FencingToken:     0,
 		Attempt:          0,
@@ -243,22 +249,22 @@ func TestStoreListPendingJobsReturnsDeterministicOrder(t *testing.T) {
 		{
 			ID:          "job-c",
 			State:       model.JobPending,
-			ScheduledAt: 200,
+			ScheduledAt: testScheduleLate,
 		},
 		{
 			ID:          "job-b",
 			State:       model.JobPending,
-			ScheduledAt: 100,
+			ScheduledAt: testScheduleMiddle,
 		},
 		{
 			ID:          "job-a",
 			State:       model.JobPending,
-			ScheduledAt: 100,
+			ScheduledAt: testScheduleEarly,
 		},
 		{
 			ID:          "job-d",
 			State:       model.JobScheduled,
-			ScheduledAt: 50,
+			ScheduledAt: testScheduleEarly - 1,
 		},
 	}
 

@@ -19,6 +19,8 @@ type Job struct {
 
 	State JobState
 
+	// ScheduledAt is the Unix timestamp in nanoseconds at which the job
+	// becomes eligible for scheduling.
 	ScheduledAt int64
 
 	AssignedWorkerID string
