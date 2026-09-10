@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/sanchar127/raftiq/internal/model"
@@ -2300,4 +2301,162 @@ func TestInstallSnapshotRestoresStateMachine(t *testing.T) {
 
 	require.Equal(t, LogIndex(1), state.Volatile.CommitIndex)
 	require.Equal(t, LogIndex(1), state.Volatile.LastApplied)
+}
+
+func TestRaftNodeRPCTimeout(t *testing.T) {
+	transport := &blockingTransport{
+		requestVoteStarted: make(chan struct{}),
+	}
+
+	node := NewRaftNode(NodeID("node-1"))
+
+	if err := node.SetTransport(
+		transport,
+		[]NodeID{"node-2"},
+	); err != nil {
+		t.Fatalf("set transport: %v", err)
+	}
+
+	if err := node.SetRPCTimeout(50 * time.Millisecond); err != nil {
+		t.Fatalf("set RPC timeout: %v", err)
+	}
+
+	node.mu.Lock()
+	node.state.Role = Candidate
+	node.state.Persistent.CurrentTerm = 1
+	node.mu.Unlock()
+
+	done := make(chan struct{})
+
+	go func() {
+		node.requestVotes()
+		close(done)
+	}()
+
+	select {
+	case <-transport.requestVoteStarted:
+	case <-time.After(time.Second):
+		t.Fatal("RequestVote RPC did not start")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("RequestVote did not return after RPC timeout")
+	}
+}
+
+func TestRaftNodeRPCTimeoutValidation(t *testing.T) {
+	node := NewRaftNode(NodeID("node-1"))
+
+	if err := node.SetRPCTimeout(0); err == nil {
+		t.Fatal("expected error for zero RPC timeout")
+	}
+
+	if err := node.SetRPCTimeout(-time.Second); err == nil {
+		t.Fatal("expected error for negative RPC timeout")
+	}
+
+	if err := node.SetRPCTimeout(100 * time.Millisecond); err != nil {
+		t.Fatalf("valid RPC timeout rejected: %v", err)
+	}
+}
+
+func TestRaftNodeStopCancelsRPC(t *testing.T) {
+	transport := &blockingTransport{
+		appendEntriesStarted: make(chan struct{}),
+	}
+
+	node := NewRaftNode(NodeID("node-1"))
+
+	if err := node.SetTransport(
+		transport,
+		[]NodeID{"node-2"},
+	); err != nil {
+		t.Fatalf("set transport: %v", err)
+	}
+
+	if err := node.SetRPCTimeout(10 * time.Second); err != nil {
+		t.Fatalf("set RPC timeout: %v", err)
+	}
+
+	if err := node.Start(); err != nil {
+		t.Fatalf("start node: %v", err)
+	}
+
+	// Initialize the node using the real Raft leader transition.
+	node.becomeLeader()
+
+	go node.sendHeartbeat("node-2")
+
+	select {
+	case <-transport.appendEntriesStarted:
+	case <-time.After(2 * time.Second):
+		node.Stop()
+		t.Fatal("AppendEntries RPC did not start")
+	}
+
+	stopped := make(chan struct{})
+
+	go func() {
+		node.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("node Stop did not cancel the in-flight RPC")
+	}
+}
+
+type blockingTransport struct {
+	requestVoteStarted   chan struct{}
+	appendEntriesStarted chan struct{}
+}
+
+func (t *blockingTransport) RequestVote(
+	ctx context.Context,
+	_ NodeID,
+	_ RequestVoteArgs,
+) (RequestVoteReply, error) {
+	if t.requestVoteStarted != nil {
+		select {
+		case <-t.requestVoteStarted:
+		default:
+			close(t.requestVoteStarted)
+		}
+	}
+
+	<-ctx.Done()
+
+	return RequestVoteReply{}, ctx.Err()
+}
+
+func (t *blockingTransport) AppendEntries(
+	ctx context.Context,
+	_ NodeID,
+	_ AppendEntriesArgs,
+) (AppendEntriesReply, error) {
+	if t.appendEntriesStarted != nil {
+		select {
+		case <-t.appendEntriesStarted:
+		default:
+			close(t.appendEntriesStarted)
+		}
+	}
+
+	<-ctx.Done()
+
+	return AppendEntriesReply{}, ctx.Err()
+}
+
+func (t *blockingTransport) InstallSnapshot(
+	ctx context.Context,
+	_ NodeID,
+	_ InstallSnapshotArgs,
+) (InstallSnapshotReply, error) {
+	<-ctx.Done()
+
+	return InstallSnapshotReply{}, ctx.Err()
 }
