@@ -13,6 +13,8 @@ var (
 	ErrInvalidJob        = errors.New("invalid job")
 	ErrJobNotClaimable   = errors.New("job is not claimable")
 	ErrJobAlreadyClaimed = errors.New("job is already claimed")
+	ErrInvalidJobState   = errors.New("invalid job state transition")
+	ErrJobOwnershipLost  = errors.New("job ownership lost")
 )
 
 func (s *Store) CreateJob(job model.Job) error {
@@ -304,4 +306,96 @@ func (s *Store) ValidateJobOwnership(
 	}
 
 	return true
+}
+
+// TransitionJobState changes a claimed job's lifecycle state.
+//
+// The transition is validated atomically against the current job ownership,
+// fencing token, lock owner, lock fencing token, and lock expiry.
+//
+// The timestamp is supplied by the Raft command rather than obtained from
+// time.Now() so every replica applies the same deterministic state transition.
+func (s *Store) TransitionJobState(
+	jobID model.JobID,
+	workerID string,
+	fencingToken uint64,
+	expectedState model.JobState,
+	nextState model.JobState,
+	at int64,
+) (model.Job, error) {
+	if jobID == "" || workerID == "" || fencingToken == 0 {
+		return model.Job{}, ErrInvalidJob
+	}
+
+	if at <= 0 {
+		return model.Job{}, ErrInvalidJob
+	}
+
+	if expectedState != model.JobScheduled &&
+		expectedState != model.JobRunning {
+		return model.Job{}, ErrInvalidJobState
+	}
+
+	if nextState != model.JobRunning &&
+		nextState != model.JobSucceeded &&
+		nextState != model.JobFailed {
+		return model.Job{}, ErrInvalidJobState
+	}
+
+	if expectedState == model.JobScheduled &&
+		nextState != model.JobRunning {
+		return model.Job{}, ErrInvalidJobState
+	}
+
+	if expectedState == model.JobRunning &&
+		nextState != model.JobSucceeded &&
+		nextState != model.JobFailed {
+		return model.Job{}, ErrInvalidJobState
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	job, ok := s.jobs[jobID]
+	if !ok {
+		return model.Job{}, ErrJobNotFound
+	}
+
+	if job.State != expectedState {
+		return model.Job{}, ErrInvalidJobState
+	}
+
+	if job.AssignedWorkerID != workerID {
+		return model.Job{}, ErrJobOwnershipLost
+	}
+
+	if job.FencingToken != fencingToken {
+		return model.Job{}, ErrJobOwnershipLost
+	}
+
+	currentLock, ok := s.locks.Get(string(jobID))
+	if !ok {
+		return model.Job{}, ErrJobOwnershipLost
+	}
+
+	if currentLock.OwnerID != workerID {
+		return model.Job{}, ErrJobOwnershipLost
+	}
+
+	if currentLock.FencingToken != fencingToken {
+		return model.Job{}, ErrJobOwnershipLost
+	}
+
+	if currentLock.ExpiresAt <= at {
+		return model.Job{}, ErrJobOwnershipLost
+	}
+
+	job.State = nextState
+
+	copied := job
+	copied.Payload = append([]byte(nil), job.Payload...)
+
+	s.jobs[jobID] = copied
+
+	return copied, nil
 }

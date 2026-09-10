@@ -2,6 +2,7 @@ package kv
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -167,13 +168,18 @@ func (a *Applier) RestoreSnapshot(
 }
 
 func commandNeedsResult(entry raft.LogEntry) bool {
-	command, err := DecodeCommand(entry.Data)
-	if err != nil {
+	var command Command
+
+	if err := json.Unmarshal(entry.Data, &command); err != nil {
 		return false
 	}
 
 	switch command.Type {
-	case CommandFencedPut, CommandClaimJob:
+	case CommandFencedPut,
+		CommandClaimJob,
+		CommandJobStart,
+		CommandJobSucceeded,
+		CommandJobFailed:
 		return true
 
 	default:

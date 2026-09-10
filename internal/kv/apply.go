@@ -104,6 +104,50 @@ func Apply(store *Store, entry raft.LogEntry) ApplyResult {
 			Job: &job,
 		}
 
+	case CommandJobStart:
+		job, err := store.TransitionJobState(
+			model.JobID(command.JobID),
+			command.OwnerID,
+			command.FencingToken,
+			model.JobScheduled,
+			model.JobRunning,
+			command.At,
+		)
+
+		return ApplyResult{
+			Job: &job,
+			Err: err,
+		}
+
+	case CommandJobSucceeded:
+		job, err := store.TransitionJobState(
+			model.JobID(command.JobID),
+			command.OwnerID,
+			command.FencingToken,
+			model.JobRunning,
+			model.JobSucceeded,
+			command.At,
+		)
+
+		return ApplyResult{
+			Job: &job,
+			Err: err,
+		}
+	case CommandJobFailed:
+		job, err := store.TransitionJobState(
+			model.JobID(command.JobID),
+			command.OwnerID,
+			command.FencingToken,
+			model.JobRunning,
+			model.JobFailed,
+			command.At,
+		)
+
+		return ApplyResult{
+			Job: &job,
+			Err: err,
+		}
+
 	default:
 		return ApplyResult{
 			Err: fmt.Errorf(

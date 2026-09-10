@@ -1,6 +1,9 @@
 package kv
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"github.com/sanchar127/raftiq/internal/model"
+)
 
 type CommandType string
 
@@ -13,7 +16,10 @@ const (
 	CommandLockExpire  CommandType = "LOCK_EXPIRE"
 	CommandFencedPut   CommandType = "FENCED_PUT"
 
-	CommandClaimJob CommandType = "CLAIM_JOB"
+	CommandClaimJob     CommandType = "CLAIM_JOB"
+	CommandJobStart     CommandType = "JOB_START"
+	CommandJobSucceeded CommandType = "JOB_SUCCEEDED"
+	CommandJobFailed    CommandType = "JOB_FAILED"
 )
 
 type Command struct {
@@ -23,9 +29,11 @@ type Command struct {
 
 	JobID string `json:"job_id,omitempty"`
 
-	OwnerID      string `json:"owner_id,omitempty"`
-	ExpiresAt    int64  `json:"expires_at,omitempty"`
-	FencingToken uint64 `json:"fencing_token,omitempty"`
+	OwnerID       string         `json:"owner_id,omitempty"`
+	ExpiresAt     int64          `json:"expires_at,omitempty"`
+	FencingToken  uint64         `json:"fencing_token,omitempty"`
+	ExpectedState model.JobState `json:"expected_state,omitempty"`
+	At            int64          `json:"at,omitempty"`
 }
 
 func EncodeCommand(command Command) ([]byte, error) {

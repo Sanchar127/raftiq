@@ -3,10 +3,13 @@ package worker
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/sanchar127/raftiq/internal/kv"
 	"github.com/sanchar127/raftiq/internal/model"
+	"github.com/sanchar127/raftiq/internal/raft"
 )
 
 func TestNewRejectsInvalidWorker(t *testing.T) {
@@ -234,52 +237,179 @@ func TestWorkerExecuteRejectsCancelledContext(t *testing.T) {
 }
 
 type fakeJobSource struct {
-	jobs []model.Job
-}
+	mu sync.Mutex
 
-func (s *fakeJobSource) GetJob(id model.JobID) (model.Job, bool) {
-	for _, job := range s.jobs {
-		if job.ID == id {
-			return job, true
-		}
-	}
-	return model.Job{}, false
-}
+	jobs           []model.Job
+	ownershipValid bool
 
-func (s *fakeJobSource) ListPendingJobs() []model.Job {
-	pending := make([]model.Job, 0)
-	for _, job := range s.jobs {
-		if job.AssignedWorkerID == "" {
-			pending = append(pending, job)
-		}
-	}
-	return pending
+	ownershipChecked bool
 }
 
 func (s *fakeJobSource) ListAssignedJobs(
 	workerID string,
 ) []model.Job {
-	jobs := make([]model.Job, 0)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	jobs := make([]model.Job, 0, len(s.jobs))
 
 	for _, job := range s.jobs {
-		if job.AssignedWorkerID == workerID {
-			jobs = append(jobs, job)
+		if job.AssignedWorkerID != workerID {
+			continue
 		}
+
+		if job.State != model.JobScheduled {
+			continue
+		}
+
+		job.Payload = append([]byte(nil), job.Payload...)
+		jobs = append(jobs, job)
 	}
 
 	return jobs
 }
 
-func TestWorkerRunExecutesAssignedJobs(t *testing.T) {
-	t.Parallel()
+func (s *fakeJobSource) ValidateJobOwnership(
+	jobID model.JobID,
+	workerID string,
+	fencingToken uint64,
+	now int64,
+) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	executed := make(chan model.JobID, 1)
+	s.ownershipChecked = true
+
+	if !s.ownershipValid {
+		return false
+	}
+
+	for _, job := range s.jobs {
+		if job.ID != jobID {
+			continue
+		}
+
+		return job.AssignedWorkerID == workerID &&
+			job.FencingToken == fencingToken &&
+			job.State == model.JobScheduled
+	}
+
+	return false
+}
+
+func (s *fakeJobSource) OwnershipWasChecked() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.ownershipChecked
+}
+
+func newTestRaftApplier(
+	t *testing.T,
+) (*raft.RaftNode, *kv.Store, *kv.Applier) {
+	t.Helper()
+
+	node := raft.NewRaftNode("node-1")
+	store := kv.NewStore()
+	applier := kv.NewApplier(store)
+
+	if err := node.Start(); err != nil {
+		t.Fatalf("Raft Start() error = %v", err)
+	}
+
+	t.Cleanup(func() {
+		node.Stop()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+
+	go func() {
+		done <- applier.Run(ctx, node.ApplyCh())
+	}()
+
+	t.Cleanup(func() {
+		cancel()
+
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf(
+					"Applier.Run() error = %v, want context.Canceled",
+					err,
+				)
+			}
+
+		case <-time.After(time.Second):
+			t.Error("Applier.Run() did not stop")
+		}
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(deadline) {
+		if node.State().Role == raft.Leader {
+			return node, store, applier
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	t.Fatalf(
+		"single-node Raft did not become leader; role=%v",
+		node.State().Role,
+	)
+
+	return nil, nil, nil
+}
+
+func claimTestJob(
+	t *testing.T,
+	store *kv.Store,
+	jobID model.JobID,
+	workerID string,
+) model.Job {
+	t.Helper()
+
+	err := store.CreateJob(model.Job{
+		ID:      jobID,
+		Payload: []byte("payload"),
+		State:   model.JobPending,
+	})
+	if err != nil {
+		t.Fatalf("CreateJob() error = %v", err)
+	}
+
+	job, err := store.ClaimJob(
+		jobID,
+		workerID,
+		time.Now().Add(time.Minute).UnixNano(),
+		1,
+	)
+	if err != nil {
+		t.Fatalf("ClaimJob() error = %v", err)
+	}
+
+	return job
+}
+
+func TestWorkerRunExecutesAssignedJobs(t *testing.T) {
+	node, store, applier := newTestRaftApplier(t)
+
+	job := claimTestJob(
+		t,
+		store,
+		"job-1",
+		"worker-1",
+	)
+
+	executed := make(chan model.Job, 1)
 
 	handler := HandlerFunc(func(
 		ctx context.Context,
 		job model.Job,
 	) error {
-		executed <- job.ID
+		executed <- job
 		return nil
 	})
 
@@ -288,24 +418,13 @@ func TestWorkerRunExecutesAssignedJobs(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	source := &fakeJobSource{
-		jobs: []model.Job{
-			{
-				ID:               "job-1",
-				State:            model.JobScheduled,
-				AssignedWorkerID: "worker-1",
-			},
-			{
-				ID:               "job-2",
-				State:            model.JobScheduled,
-				AssignedWorkerID: "worker-2",
-			},
-		},
-	}
-
 	if err := worker.ConfigureLoop(
-		source,
-		Config{Interval: 10 * time.Millisecond},
+		store,
+		Config{
+			Interval: 10 * time.Millisecond,
+			Raft:     node,
+			Applier:  applier,
+		},
 	); err != nil {
 		t.Fatalf("ConfigureLoop() error = %v", err)
 	}
@@ -318,18 +437,93 @@ func TestWorkerRunExecutesAssignedJobs(t *testing.T) {
 	}()
 
 	select {
-	case jobID := <-executed:
-		if jobID != "job-1" {
-			t.Fatalf("expected job-1, got %q", jobID)
+	case executedJob := <-executed:
+		if executedJob.ID != job.ID {
+			t.Fatalf(
+				"expected job ID %q, got %q",
+				job.ID,
+				executedJob.ID,
+			)
+		}
+
+		if executedJob.State != model.JobRunning {
+			t.Fatalf(
+				"handler received state %q, want %q",
+				executedJob.State,
+				model.JobRunning,
+			)
 		}
 
 	case <-time.After(time.Second):
 		t.Fatal("worker did not execute assigned job")
 	}
+
+	waitForJobState(
+		t,
+		store,
+		job.ID,
+		model.JobSucceeded,
+	)
+}
+
+func TestWorkerRunMarksFailedJob(t *testing.T) {
+	node, store, applier := newTestRaftApplier(t)
+
+	job := claimTestJob(
+		t,
+		store,
+		"job-1",
+		"worker-1",
+	)
+
+	handlerErr := errors.New("handler failed")
+
+	handler := HandlerFunc(func(
+		ctx context.Context,
+		job model.Job,
+	) error {
+		return handlerErr
+	})
+
+	worker, err := New("worker-1", handler)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := worker.ConfigureLoop(
+		store,
+		Config{
+			Interval: 10 * time.Millisecond,
+			Raft:     node,
+			Applier:  applier,
+		},
+	); err != nil {
+		t.Fatalf("ConfigureLoop() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		_ = worker.Run(ctx)
+	}()
+
+	waitForJobState(
+		t,
+		store,
+		job.ID,
+		model.JobFailed,
+	)
 }
 
 func TestWorkerRunStopsOnCancellation(t *testing.T) {
 	t.Parallel()
+
+	node := raft.NewRaftNode("node-1")
+	store := &fakeJobSource{
+		ownershipValid: true,
+	}
+	applier := kv.NewApplier(kv.NewStore())
 
 	handler := HandlerFunc(func(
 		context.Context,
@@ -343,11 +537,13 @@ func TestWorkerRunStopsOnCancellation(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	source := &fakeJobSource{}
-
 	if err := worker.ConfigureLoop(
-		source,
-		Config{Interval: 10 * time.Millisecond},
+		store,
+		Config{
+			Interval: 10 * time.Millisecond,
+			Raft:     node,
+			Applier:  applier,
+		},
 	); err != nil {
 		t.Fatalf("ConfigureLoop() error = %v", err)
 	}
@@ -376,24 +572,6 @@ func TestWorkerRunStopsOnCancellation(t *testing.T) {
 	}
 }
 
-func (s *fakeJobSource) ValidateJobOwnership(
-	jobID model.JobID,
-	workerID string,
-	fencingToken uint64,
-	now int64,
-) bool {
-	for _, job := range s.jobs {
-		if job.ID != jobID {
-			continue
-		}
-
-		return job.AssignedWorkerID == workerID &&
-			job.FencingToken == fencingToken &&
-			job.State == model.JobScheduled
-	}
-
-	return false
-}
 func TestWorkerRunSkipsJobWhenOwnershipIsLost(t *testing.T) {
 	t.Parallel()
 
@@ -413,23 +591,27 @@ func TestWorkerRunSkipsJobWhenOwnershipIsLost(t *testing.T) {
 	}
 
 	source := &fakeJobSource{
+		ownershipValid: false,
 		jobs: []model.Job{
 			{
 				ID:               "job-1",
 				State:            model.JobScheduled,
 				AssignedWorkerID: "worker-1",
-				FencingToken:     10,
+				FencingToken:     11,
 			},
 		},
 	}
 
-	// The job still appears assigned to worker-1, but its current fencing
-	// token is considered invalid by the source.
-	source.jobs[0].FencingToken = 11
+	node := raft.NewRaftNode("node-1")
+	applier := kv.NewApplier(kv.NewStore())
 
 	if err := worker.ConfigureLoop(
 		source,
-		Config{Interval: 10 * time.Millisecond},
+		Config{
+			Interval: 10 * time.Millisecond,
+			Raft:     node,
+			Applier:  applier,
+		},
 	); err != nil {
 		t.Fatalf("ConfigureLoop() error = %v", err)
 	}
@@ -449,6 +631,46 @@ func TestWorkerRunSkipsJobWhenOwnershipIsLost(t *testing.T) {
 		)
 
 	case <-time.After(100 * time.Millisecond):
-		// Expected: job was never executed.
+		// Expected: ownership validation prevented execution.
 	}
+
+	if !source.OwnershipWasChecked() {
+		t.Fatal("expected worker to validate job ownership")
+	}
+}
+
+func waitForJobState(
+	t *testing.T,
+	store *kv.Store,
+	jobID model.JobID,
+	expected model.JobState,
+) {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+
+	for time.Now().Before(deadline) {
+		job, ok := store.GetJob(jobID)
+		if ok && job.State == expected {
+			return
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	job, ok := store.GetJob(jobID)
+	if !ok {
+		t.Fatalf(
+			"job %q not found while waiting for state %q",
+			jobID,
+			expected,
+		)
+	}
+
+	t.Fatalf(
+		"job %q state = %q, want %q",
+		jobID,
+		job.State,
+		expected,
+	)
 }
