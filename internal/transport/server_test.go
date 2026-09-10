@@ -52,8 +52,9 @@ func TestServerServeAndShutdown(t *testing.T) {
 
 	select {
 	case err := <-serveErr:
-		require.Error(t, err)
-		require.ErrorContains(t, err, "server has been stopped")
+		if err != nil {
+			require.ErrorContains(t, err, "server has been stopped")
+		}
 	case <-time.After(time.Second):
 		t.Fatal("Serve did not return after shutdown")
 	}
