@@ -674,3 +674,212 @@ func TestGRPCTransportFollowerRecovery(t *testing.T) {
 		initialTerm,
 	)
 }
+func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
+	nodes := []*raft.RaftNode{
+		raft.NewRaftNode("node-1"),
+		raft.NewRaftNode("node-2"),
+		raft.NewRaftNode("node-3"),
+	}
+
+	// node-1 wins the initial election deterministically.
+	nodes[0].SetElectionTimeout(10)
+	nodes[1].SetElectionTimeout(15)
+	nodes[2].SetElectionTimeout(20)
+
+	servers := make([]*testRaftServer, 0, len(nodes))
+
+	for _, node := range nodes {
+		servers = append(
+			servers,
+			startTestRaftServer(t, node),
+		)
+	}
+
+	transports := make([]*GRPCTransport, 0, len(nodes))
+
+	t.Cleanup(func() {
+		for _, transport := range transports {
+			if err := transport.Close(); err != nil {
+				t.Errorf("close transport: %v", err)
+			}
+		}
+	})
+
+	peerIDs := []raft.NodeID{
+		"node-1",
+		"node-2",
+		"node-3",
+	}
+
+	// Configure every node with the other two nodes as peers.
+	for i, node := range nodes {
+		transport := NewGRPCTransport()
+		transports = append(transports, transport)
+
+		for j, peerID := range peerIDs {
+			if i == j {
+				continue
+			}
+
+			if err := transport.AddPeer(
+				peerID,
+				servers[j].listener.Addr().String(),
+			); err != nil {
+				t.Fatalf(
+					"add peer %s to %s: %v",
+					peerID,
+					peerIDs[i],
+					err,
+				)
+			}
+		}
+
+		otherPeers := make(
+			[]raft.NodeID,
+			0,
+			len(peerIDs)-1,
+		)
+
+		for j, peerID := range peerIDs {
+			if i == j {
+				continue
+			}
+
+			otherPeers = append(otherPeers, peerID)
+		}
+
+		if err := node.SetTransport(
+			transport,
+			otherPeers,
+		); err != nil {
+			t.Fatalf(
+				"set transport for %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+	}
+
+	// Start all nodes.
+	for i, node := range nodes {
+		if err := node.Start(); err != nil {
+			t.Fatalf(
+				"start %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+	}
+
+	t.Cleanup(func() {
+		for _, node := range nodes {
+			node.Stop()
+		}
+	})
+
+	// Wait for exactly one initial leader.
+	initialLeaderIndex := -1
+	deadline := time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(deadline) {
+		leaders := 0
+		initialLeaderIndex = -1
+
+		for i, node := range nodes {
+			if node.State().Role == raft.Leader {
+				leaders++
+				initialLeaderIndex = i
+			}
+		}
+
+		if leaders == 1 {
+			break
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if initialLeaderIndex == -1 {
+		t.Fatal("expected an initial leader to be elected")
+	}
+
+	initialLeader := nodes[initialLeaderIndex]
+	initialLeaderID := peerIDs[initialLeaderIndex]
+	initialTerm := initialLeader.State().Persistent.CurrentTerm
+
+	// Stop the leader's network endpoint.
+	//
+	// The RaftNode itself is intentionally kept running so this test
+	// simulates a failed network/server endpoint. The remaining two
+	// nodes must detect the missing heartbeats and elect a new leader.
+	initialLeader.Stop()
+	servers[initialLeaderIndex].close()
+
+	// Wait for a new leader among the two surviving nodes.
+	newLeaderIndex := -1
+	deadline = time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(deadline) {
+		leaders := 0
+		newLeaderIndex = -1
+
+		for i, node := range nodes {
+			if i == initialLeaderIndex {
+				continue
+			}
+
+			if node.State().Role == raft.Leader {
+				leaders++
+				newLeaderIndex = i
+			}
+		}
+
+		if leaders == 1 {
+			break
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if newLeaderIndex == -1 {
+		t.Fatalf(
+			"expected a new leader after %s failed",
+			initialLeaderID,
+		)
+	}
+
+	if newLeaderIndex == initialLeaderIndex {
+		t.Fatal("new leader must differ from failed leader")
+	}
+
+	newLeader := nodes[newLeaderIndex]
+	newLeaderState := newLeader.State()
+
+	if newLeaderState.Persistent.CurrentTerm <= initialTerm {
+		t.Fatalf(
+			"expected new leader term > initial term: initial=%d new=%d",
+			initialTerm,
+			newLeaderState.Persistent.CurrentTerm,
+		)
+	}
+
+	// Verify exactly one surviving node is leader.
+	leaders := 0
+
+	for i, node := range nodes {
+		if i == initialLeaderIndex {
+			continue
+		}
+
+		if node.State().Role == raft.Leader {
+			leaders++
+		}
+	}
+
+	if leaders != 1 {
+		t.Fatalf(
+			"expected exactly one new leader among surviving nodes, got %d",
+			leaders,
+		)
+	}
+}
