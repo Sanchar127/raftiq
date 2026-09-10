@@ -135,9 +135,22 @@ func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 		return 0, fmt.Errorf("append proposed entry: %w", err)
 	}
 
+	// The leader itself counts toward the replication majority.
+	//
+	// This is especially important for a single-node cluster, where
+	// the leader is already the complete majority and therefore the
+	// newly appended entry can be committed immediately.
+	advanced := n.advanceCommitIndexLocked()
+
 	peers := append([]Peer(nil), n.peers...)
 
 	n.mu.Unlock()
+
+	// Apply outside the Raft lock because applying may block on the
+	// apply channel and must never hold the Raft mutex.
+	if advanced {
+		n.applyCommitted()
+	}
 
 	for _, peer := range peers {
 		n.replicateTo(peer)
@@ -145,7 +158,6 @@ func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 
 	return index, nil
 }
-
 func (n *RaftNode) RequestVote(args RequestVoteArgs) RequestVoteReply {
 	n.mu.Lock()
 	defer n.mu.Unlock()
