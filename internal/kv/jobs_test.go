@@ -235,3 +235,94 @@ func TestStoreJobPayloadIsDefensivelyCopied(t *testing.T) {
 		)
 	}
 }
+
+func TestStoreListPendingJobsReturnsDeterministicOrder(t *testing.T) {
+	store := NewStore()
+
+	jobs := []model.Job{
+		{
+			ID:          "job-c",
+			State:       model.JobPending,
+			ScheduledAt: 200,
+		},
+		{
+			ID:          "job-b",
+			State:       model.JobPending,
+			ScheduledAt: 100,
+		},
+		{
+			ID:          "job-a",
+			State:       model.JobPending,
+			ScheduledAt: 100,
+		},
+		{
+			ID:          "job-d",
+			State:       model.JobScheduled,
+			ScheduledAt: 50,
+		},
+	}
+
+	for _, job := range jobs {
+		if err := store.CreateJob(job); err != nil {
+			t.Fatalf("CreateJob(%q) error = %v", job.ID, err)
+		}
+	}
+
+	got := store.ListPendingJobs()
+
+	if len(got) != 3 {
+		t.Fatalf("ListPendingJobs() returned %d jobs, want 3", len(got))
+	}
+
+	wantIDs := []model.JobID{
+		"job-a",
+		"job-b",
+		"job-c",
+	}
+
+	for i, wantID := range wantIDs {
+		if got[i].ID != wantID {
+			t.Fatalf(
+				"job[%d].ID = %q, want %q",
+				i,
+				got[i].ID,
+				wantID,
+			)
+		}
+	}
+}
+
+func TestStoreListPendingJobsReturnsIndependentPayloads(t *testing.T) {
+	store := NewStore()
+
+	payload := []byte("original")
+
+	err := store.CreateJob(model.Job{
+		ID:      "job-1",
+		State:   model.JobPending,
+		Payload: payload,
+	})
+	if err != nil {
+		t.Fatalf("CreateJob() error = %v", err)
+	}
+
+	got := store.ListPendingJobs()
+
+	if len(got) != 1 {
+		t.Fatalf("ListPendingJobs() returned %d jobs, want 1", len(got))
+	}
+
+	got[0].Payload[0] = 'X'
+
+	stored, ok := store.GetJob("job-1")
+	if !ok {
+		t.Fatal("GetJob() did not find job")
+	}
+
+	if string(stored.Payload) != "original" {
+		t.Fatalf(
+			"stored payload changed through ListPendingJobs(): %q",
+			stored.Payload,
+		)
+	}
+}

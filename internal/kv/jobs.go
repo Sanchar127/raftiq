@@ -3,6 +3,7 @@ package kv
 import (
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/sanchar127/raftiq/internal/model"
 )
@@ -51,6 +52,36 @@ func (s *Store) GetJob(
 	job.Payload = append([]byte(nil), job.Payload...)
 
 	return job, true
+}
+
+// ListPendingJobs returns a deterministic snapshot of all pending jobs.
+//
+// Jobs are ordered by ScheduledAt and then JobID. The returned jobs are
+// independent copies and can therefore be safely inspected by callers
+// without holding the store lock.
+func (s *Store) ListPendingJobs() []model.Job {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	jobs := make([]model.Job, 0, len(s.jobs))
+
+	for _, job := range s.jobs {
+		if job.State != model.JobPending {
+			continue
+		}
+
+		jobs = append(jobs, cloneJob(job))
+	}
+
+	sort.Slice(jobs, func(i, j int) bool {
+		if jobs[i].ScheduledAt != jobs[j].ScheduledAt {
+			return jobs[i].ScheduledAt < jobs[j].ScheduledAt
+		}
+
+		return jobs[i].ID < jobs[j].ID
+	})
+
+	return jobs
 }
 
 func (s *Store) UpdateJob(job model.Job) error {
