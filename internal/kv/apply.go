@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/sanchar127/raftiq/internal/lock"
+	"github.com/sanchar127/raftiq/internal/model"
 	"github.com/sanchar127/raftiq/internal/raft"
 )
 
@@ -77,6 +78,23 @@ func Apply(store *Store, entry raft.LogEntry) ApplyResult {
 				Err: fmt.Errorf(
 					"fenced put %q: %w",
 					command.Key,
+					err,
+				),
+			}
+		}
+
+	case CommandClaimJob:
+		_, err := store.ClaimJob(
+			model.JobID(command.JobID),
+			command.OwnerID,
+			command.ExpiresAt,
+			entry.Index,
+		)
+		if err != nil {
+			return ApplyResult{
+				Err: fmt.Errorf(
+					"claim job %q: %w",
+					command.JobID,
 					err,
 				),
 			}
