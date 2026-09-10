@@ -160,6 +160,13 @@ func (s *Scheduler) scheduleDueJobs(ctx context.Context) error {
 
 	now := time.Now().UnixNano()
 
+	if err := s.reclaimExpiredJobs(ctx, now); err != nil {
+		if errors.Is(err, context.Canceled) ||
+			errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+	}
+
 	for _, job := range s.store.ListPendingJobs() {
 		if job.ScheduledAt > now {
 			break
@@ -171,6 +178,68 @@ func (s *Scheduler) scheduleDueJobs(ctx context.Context) error {
 				return err
 			}
 		}
+	}
+
+	return nil
+}
+
+func (s *Scheduler) reclaimExpiredJobs(
+	ctx context.Context,
+	now int64,
+) error {
+	for _, job := range s.store.ListExpiredJobs(now) {
+		if err := s.reclaimExpiredJob(ctx, job, now); err != nil {
+			if errors.Is(err, context.Canceled) ||
+				errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+
+			if isExpectedReclaimError(err) {
+				continue
+			}
+
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *Scheduler) reclaimExpiredJob(
+	ctx context.Context,
+	job model.Job,
+	now int64,
+) error {
+	if job.FencingToken == 0 {
+		return nil
+	}
+
+	commandData, err := kv.EncodeCommand(kv.Command{
+		Type:         kv.CommandJobReclaim,
+		JobID:        string(job.ID),
+		FencingToken: job.FencingToken,
+		At:           now,
+	})
+	if err != nil {
+		return fmt.Errorf("encode job reclaim command: %w", err)
+	}
+
+	index, err := s.raft.Propose(commandData)
+	if err != nil {
+		return err
+	}
+
+	result, err := s.applier.WaitResult(ctx, index)
+	if err != nil {
+		return fmt.Errorf("wait for job reclaim result: %w", err)
+	}
+
+	if result.Err != nil {
+		if isExpectedReclaimError(result.Err) {
+			return nil
+		}
+
+		return result.Err
 	}
 
 	return nil
@@ -216,4 +285,10 @@ func (s *Scheduler) scheduleJob(
 	}
 
 	return nil
+}
+
+func isExpectedReclaimError(err error) bool {
+	return errors.Is(err, kv.ErrJobNotFound) ||
+		errors.Is(err, kv.ErrInvalidJobState) ||
+		errors.Is(err, kv.ErrJobOwnershipLost)
 }

@@ -548,6 +548,540 @@ func TestSchedulerHandlesClaimConflict(t *testing.T) {
 	}
 }
 
+func TestSchedulerReclaimsExpiredScheduledJob(t *testing.T) {
+	node := raft.NewRaftNode("A")
+	store := kv.NewStore()
+	applier := kv.NewApplier(store)
+
+	selector, err := NewHashWorkerSelector([]string{"worker-1"})
+	if err != nil {
+		t.Fatalf("NewHashWorkerSelector() error = %v", err)
+	}
+
+	scheduler, err := New(
+		node,
+		store,
+		applier,
+		selector,
+		Config{
+			Interval: 10 * time.Millisecond,
+			Lease:    time.Minute,
+		},
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	now := time.Now().UnixNano()
+
+	job := model.Job{
+		ID:          "job-expired-scheduled",
+		Payload:     []byte("task"),
+		State:       model.JobPending,
+		ScheduledAt: now - time.Second.Nanoseconds(),
+	}
+
+	if err := store.CreateJob(job); err != nil {
+		t.Fatalf("CreateJob() error = %v", err)
+	}
+
+	claimed, err := store.ClaimJob(
+		job.ID,
+		"worker-1",
+		now-time.Millisecond.Nanoseconds(),
+		1,
+	)
+	if err != nil {
+		t.Fatalf("ClaimJob() error = %v", err)
+	}
+
+	node.Start()
+	defer node.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		_ = applier.Run(ctx, node.ApplyCh())
+	}()
+
+	waitForSchedulerLeader(t, node)
+
+	if err := scheduler.reclaimExpiredJobs(ctx, now); err != nil {
+		t.Fatalf("reclaimExpiredJobs() error = %v", err)
+	}
+
+	got, ok := store.GetJob(job.ID)
+	if !ok {
+		t.Fatal("expected job to exist")
+	}
+
+	if got.State != model.JobPending {
+		t.Fatalf(
+			"expected state %q, got %q",
+			model.JobPending,
+			got.State,
+		)
+	}
+
+	if got.AssignedWorkerID != "" {
+		t.Fatalf(
+			"expected no assigned worker, got %q",
+			got.AssignedWorkerID,
+		)
+	}
+
+	if got.FencingToken != 0 {
+		t.Fatalf(
+			"expected fencing token 0, got %d",
+			got.FencingToken,
+		)
+	}
+
+	if got.Attempt != claimed.Attempt {
+		t.Fatalf(
+			"expected attempt %d to be preserved, got %d",
+			claimed.Attempt,
+			got.Attempt,
+		)
+	}
+}
+
+func TestSchedulerReclaimsExpiredRunningJob(t *testing.T) {
+	node := raft.NewRaftNode("A")
+	store := kv.NewStore()
+	applier := kv.NewApplier(store)
+
+	selector, err := NewHashWorkerSelector([]string{"worker-1"})
+	if err != nil {
+		t.Fatalf("NewHashWorkerSelector() error = %v", err)
+	}
+
+	scheduler, err := New(
+		node,
+		store,
+		applier,
+		selector,
+		Config{
+			Interval: 10 * time.Millisecond,
+			Lease:    time.Minute,
+		},
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	now := time.Now().UnixNano()
+
+	job := model.Job{
+		ID:          "job-expired-running",
+		Payload:     []byte("task"),
+		State:       model.JobPending,
+		ScheduledAt: now - time.Second.Nanoseconds(),
+	}
+
+	if err := store.CreateJob(job); err != nil {
+		t.Fatalf("CreateJob() error = %v", err)
+	}
+
+	// Claim with a lease that is still valid at `now` so the
+	// transition to Running can succeed.
+	expiresAt := now + time.Minute.Nanoseconds()
+
+	claimed, err := store.ClaimJob(
+		job.ID,
+		"worker-1",
+		expiresAt,
+		1,
+	)
+	if err != nil {
+		t.Fatalf("ClaimJob() error = %v", err)
+	}
+
+	if _, err := store.TransitionJobState(
+		job.ID,
+		"worker-1",
+		claimed.FencingToken,
+		model.JobScheduled,
+		model.JobRunning,
+		now,
+	); err != nil {
+		t.Fatalf("TransitionJobState() error = %v", err)
+	}
+
+	node.Start()
+	defer node.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		_ = applier.Run(ctx, node.ApplyCh())
+	}()
+
+	waitForSchedulerLeader(t, node)
+
+	// Reclaim at a moment after the lease has expired.
+	reclaimAt := expiresAt + 1
+
+	if err := scheduler.reclaimExpiredJobs(ctx, reclaimAt); err != nil {
+		t.Fatalf("reclaimExpiredJobs() error = %v", err)
+	}
+
+	got, ok := store.GetJob(job.ID)
+	if !ok {
+		t.Fatal("expected job to exist")
+	}
+
+	if got.State != model.JobPending {
+		t.Fatalf(
+			"expected state %q, got %q",
+			model.JobPending,
+			got.State,
+		)
+	}
+
+	if got.AssignedWorkerID != "" {
+		t.Fatalf(
+			"expected no assigned worker, got %q",
+			got.AssignedWorkerID,
+		)
+	}
+
+	if got.FencingToken != 0 {
+		t.Fatalf(
+			"expected fencing token 0, got %d",
+			got.FencingToken,
+		)
+	}
+}
+
+func TestSchedulerDoesNotReclaimUnexpiredJob(t *testing.T) {
+	node := raft.NewRaftNode("A")
+	store := kv.NewStore()
+	applier := kv.NewApplier(store)
+
+	selector, err := NewHashWorkerSelector([]string{"worker-1"})
+	if err != nil {
+		t.Fatalf("NewHashWorkerSelector() error = %v", err)
+	}
+
+	scheduler, err := New(
+		node,
+		store,
+		applier,
+		selector,
+		Config{
+			Interval: 10 * time.Millisecond,
+			Lease:    time.Minute,
+		},
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	now := time.Now().UnixNano()
+
+	job := model.Job{
+		ID:          "job-unexpired",
+		Payload:     []byte("task"),
+		State:       model.JobPending,
+		ScheduledAt: now - time.Second.Nanoseconds(),
+	}
+
+	if err := store.CreateJob(job); err != nil {
+		t.Fatalf("CreateJob() error = %v", err)
+	}
+
+	claimed, err := store.ClaimJob(
+		job.ID,
+		"worker-1",
+		now+time.Minute.Nanoseconds(),
+		1,
+	)
+	if err != nil {
+		t.Fatalf("ClaimJob() error = %v", err)
+	}
+
+	node.Start()
+	defer node.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		_ = applier.Run(ctx, node.ApplyCh())
+	}()
+
+	waitForSchedulerLeader(t, node)
+
+	if err := scheduler.reclaimExpiredJobs(ctx, now); err != nil {
+		t.Fatalf("reclaimExpiredJobs() error = %v", err)
+	}
+
+	got, ok := store.GetJob(job.ID)
+	if !ok {
+		t.Fatal("expected job to exist")
+	}
+
+	if got.State != model.JobScheduled {
+		t.Fatalf(
+			"expected state %q, got %q",
+			model.JobScheduled,
+			got.State,
+		)
+	}
+
+	if got.FencingToken != claimed.FencingToken {
+		t.Fatalf(
+			"expected fencing token %d, got %d",
+			claimed.FencingToken,
+			got.FencingToken,
+		)
+	}
+}
+
+func TestSchedulerReclaimedJobGetsNewFencingToken(t *testing.T) {
+	node := raft.NewRaftNode("A")
+	store := kv.NewStore()
+	applier := kv.NewApplier(store)
+
+	selector, err := NewHashWorkerSelector([]string{"worker-1"})
+	if err != nil {
+		t.Fatalf("NewHashWorkerSelector() error = %v", err)
+	}
+
+	scheduler, err := New(
+		node,
+		store,
+		applier,
+		selector,
+		Config{
+			Interval: 10 * time.Millisecond,
+			Lease:    time.Minute,
+		},
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	now := time.Now().UnixNano()
+
+	job := model.Job{
+		ID:          "job-new-token",
+		Payload:     []byte("task"),
+		State:       model.JobPending,
+		ScheduledAt: now - time.Second.Nanoseconds(),
+	}
+
+	if err := store.CreateJob(job); err != nil {
+		t.Fatalf("CreateJob() error = %v", err)
+	}
+
+	first, err := store.ClaimJob(
+		job.ID,
+		"worker-1",
+		now-time.Millisecond.Nanoseconds(),
+		1,
+	)
+	if err != nil {
+		t.Fatalf("first ClaimJob() error = %v", err)
+	}
+
+	node.Start()
+	defer node.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		_ = applier.Run(ctx, node.ApplyCh())
+	}()
+
+	waitForSchedulerLeader(t, node)
+
+	if err := scheduler.reclaimExpiredJobs(ctx, now); err != nil {
+		t.Fatalf("reclaimExpiredJobs() error = %v", err)
+	}
+
+	reclaimed, ok := store.GetJob(job.ID)
+	if !ok {
+		t.Fatal("expected reclaimed job to exist")
+	}
+
+	if reclaimed.State != model.JobPending {
+		t.Fatalf(
+			"expected reclaimed state %q, got %q",
+			model.JobPending,
+			reclaimed.State,
+		)
+	}
+
+	if err := scheduler.scheduleDueJobs(ctx); err != nil {
+		t.Fatalf("scheduleDueJobs() error = %v", err)
+	}
+
+	got, ok := store.GetJob(job.ID)
+	if !ok {
+		t.Fatal("expected job to exist")
+	}
+
+	if got.State != model.JobScheduled {
+		t.Fatalf(
+			"expected state %q, got %q",
+			model.JobScheduled,
+			got.State,
+		)
+	}
+
+	if got.FencingToken <= first.FencingToken {
+		t.Fatalf(
+			"expected new fencing token greater than %d, got %d",
+			first.FencingToken,
+			got.FencingToken,
+		)
+	}
+
+	if got.Attempt != first.Attempt+1 {
+		t.Fatalf(
+			"expected attempt %d, got %d",
+			first.Attempt+1,
+			got.Attempt,
+		)
+	}
+}
+
+func TestSchedulerStaleReclaimCannotRemoveNewClaim(t *testing.T) {
+	node := raft.NewRaftNode("A")
+	store := kv.NewStore()
+	applier := kv.NewApplier(store)
+
+	selector, err := NewHashWorkerSelector([]string{"worker-1"})
+	if err != nil {
+		t.Fatalf("NewHashWorkerSelector() error = %v", err)
+	}
+
+	scheduler, err := New(
+		node,
+		store,
+		applier,
+		selector,
+		Config{
+			Interval: 10 * time.Millisecond,
+			Lease:    time.Minute,
+		},
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	now := time.Now().UnixNano()
+
+	job := model.Job{
+		ID:          "job-stale-reclaim",
+		Payload:     []byte("task"),
+		State:       model.JobPending,
+		ScheduledAt: now - time.Second.Nanoseconds(),
+	}
+
+	if err := store.CreateJob(job); err != nil {
+		t.Fatalf("CreateJob() error = %v", err)
+	}
+
+	first, err := store.ClaimJob(
+		job.ID,
+		"worker-1",
+		now-time.Millisecond.Nanoseconds(),
+		1,
+	)
+	if err != nil {
+		t.Fatalf("first ClaimJob() error = %v", err)
+	}
+
+	node.Start()
+	defer node.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		_ = applier.Run(ctx, node.ApplyCh())
+	}()
+
+	waitForSchedulerLeader(t, node)
+
+	if err := scheduler.reclaimExpiredJobs(ctx, now); err != nil {
+		t.Fatalf("first reclaimExpiredJobs() error = %v", err)
+	}
+
+	if err := scheduler.scheduleDueJobs(ctx); err != nil {
+		t.Fatalf("scheduleDueJobs() error = %v", err)
+	}
+
+	current, ok := store.GetJob(job.ID)
+	if !ok {
+		t.Fatal("expected job to exist")
+	}
+
+	if current.FencingToken <= first.FencingToken {
+		t.Fatalf(
+			"expected new token greater than %d, got %d",
+			first.FencingToken,
+			current.FencingToken,
+		)
+	}
+
+	newToken := current.FencingToken
+
+	commandData, err := kv.EncodeCommand(kv.Command{
+		Type:         kv.CommandJobReclaim,
+		JobID:        string(job.ID),
+		FencingToken: first.FencingToken,
+		At:           now + time.Second.Nanoseconds(),
+	})
+	if err != nil {
+		t.Fatalf("EncodeCommand() error = %v", err)
+	}
+
+	index, err := node.Propose(commandData)
+	if err != nil {
+		t.Fatalf("Propose() error = %v", err)
+	}
+
+	result, err := applier.WaitResult(ctx, index)
+	if err != nil {
+		t.Fatalf("WaitResult() error = %v", err)
+	}
+
+	if !errors.Is(result.Err, kv.ErrJobOwnershipLost) {
+		t.Fatalf(
+			"expected ErrJobOwnershipLost, got %v",
+			result.Err,
+		)
+	}
+
+	current, ok = store.GetJob(job.ID)
+	if !ok {
+		t.Fatal("expected job to exist")
+	}
+
+	if current.FencingToken != newToken {
+		t.Fatalf(
+			"expected fencing token %d to remain current, got %d",
+			newToken,
+			current.FencingToken,
+		)
+	}
+
+	if current.State != model.JobScheduled {
+		t.Fatalf(
+			"expected state %q to remain unchanged, got %q",
+			model.JobScheduled,
+			current.State,
+		)
+	}
+}
+
 func waitForSchedulerLeader(t *testing.T, node *raft.RaftNode) {
 	t.Helper()
 
