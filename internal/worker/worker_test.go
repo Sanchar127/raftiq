@@ -375,3 +375,80 @@ func TestWorkerRunStopsOnCancellation(t *testing.T) {
 		t.Fatal("worker did not stop after cancellation")
 	}
 }
+
+func (s *fakeJobSource) ValidateJobOwnership(
+	jobID model.JobID,
+	workerID string,
+	fencingToken uint64,
+	now int64,
+) bool {
+	for _, job := range s.jobs {
+		if job.ID != jobID {
+			continue
+		}
+
+		return job.AssignedWorkerID == workerID &&
+			job.FencingToken == fencingToken &&
+			job.State == model.JobScheduled
+	}
+
+	return false
+}
+func TestWorkerRunSkipsJobWhenOwnershipIsLost(t *testing.T) {
+	t.Parallel()
+
+	executed := make(chan model.JobID, 1)
+
+	handler := HandlerFunc(func(
+		ctx context.Context,
+		job model.Job,
+	) error {
+		executed <- job.ID
+		return nil
+	})
+
+	worker, err := New("worker-1", handler)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	source := &fakeJobSource{
+		jobs: []model.Job{
+			{
+				ID:               "job-1",
+				State:            model.JobScheduled,
+				AssignedWorkerID: "worker-1",
+				FencingToken:     10,
+			},
+		},
+	}
+
+	// The job still appears assigned to worker-1, but its current fencing
+	// token is considered invalid by the source.
+	source.jobs[0].FencingToken = 11
+
+	if err := worker.ConfigureLoop(
+		source,
+		Config{Interval: 10 * time.Millisecond},
+	); err != nil {
+		t.Fatalf("ConfigureLoop() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		_ = worker.Run(ctx)
+	}()
+
+	select {
+	case jobID := <-executed:
+		t.Fatalf(
+			"stale worker must not execute job %q",
+			jobID,
+		)
+
+	case <-time.After(100 * time.Millisecond):
+		// Expected: job was never executed.
+	}
+}

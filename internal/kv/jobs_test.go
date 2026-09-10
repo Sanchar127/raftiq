@@ -332,3 +332,97 @@ func TestStoreListPendingJobsReturnsIndependentPayloads(t *testing.T) {
 		)
 	}
 }
+func TestStoreValidateJobOwnership(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+
+	job := model.Job{
+		ID:               "job-1",
+		State:            model.JobScheduled,
+		AssignedWorkerID: "worker-1",
+		FencingToken:     1,
+	}
+
+	if err := store.CreateJob(job); err != nil {
+		t.Fatalf("CreateJob() error = %v", err)
+	}
+
+	// Create the corresponding lock using the same ownership information.
+	lock, acquired := store.locks.Acquire(
+		string(job.ID),
+		"worker-1",
+		2_000,
+		1,
+	)
+	if !acquired {
+		t.Fatal("expected lock acquisition")
+	}
+
+	if lock.FencingToken != 1 {
+		t.Fatalf(
+			"expected fencing token 1, got %d",
+			lock.FencingToken,
+		)
+	}
+
+	tests := []struct {
+		name  string
+		owner string
+		token uint64
+		now   int64
+		want  bool
+	}{
+		{
+			name:  "valid ownership",
+			owner: "worker-1",
+			token: 1,
+			now:   1_000,
+			want:  true,
+		},
+		{
+			name:  "wrong worker",
+			owner: "worker-2",
+			token: 1,
+			now:   1_000,
+			want:  false,
+		},
+		{
+			name:  "stale fencing token",
+			owner: "worker-1",
+			token: 2,
+			now:   1_000,
+			want:  false,
+		},
+		{
+			name:  "expired lock",
+			owner: "worker-1",
+			token: 1,
+			now:   2_000,
+			want:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := store.ValidateJobOwnership(
+				job.ID,
+				tt.owner,
+				tt.token,
+				tt.now,
+			)
+
+			if got != tt.want {
+				t.Fatalf(
+					"ValidateJobOwnership() = %v, want %v",
+					got,
+					tt.want,
+				)
+			}
+		})
+	}
+}

@@ -10,8 +10,10 @@ import (
 )
 
 var (
-	ErrInvalidWorker = errors.New("invalid worker")
-	ErrInvalidJob    = errors.New("invalid job")
+	ErrInvalidWorker  = errors.New("invalid worker")
+	ErrInvalidJob     = errors.New("invalid job")
+	ErrOwnershipLost  = errors.New("job ownership lost")
+	ErrInvalidFencing = errors.New("invalid fencing token")
 )
 
 // JobHandler executes the application-specific work represented by a job.
@@ -38,9 +40,13 @@ func (f HandlerFunc) Execute(
 // The source is intentionally read-only from the worker's perspective.
 // Durable job-state mutations belong to the Raft state machine.
 type JobSource interface {
-	ListPendingJobs() []model.Job
-	GetJob(id model.JobID) (model.Job, bool)
 	ListAssignedJobs(workerID string) []model.Job
+	ValidateJobOwnership(
+		jobID model.JobID,
+		workerID string,
+		fencingToken uint64,
+		now int64,
+	) bool
 }
 
 // Worker represents a worker capable of executing claimed jobs.
@@ -169,8 +175,18 @@ func (w *Worker) Run(ctx context.Context) error {
 
 func (w *Worker) executeAssignedJobs(ctx context.Context) error {
 	jobs := w.source.ListAssignedJobs(w.id)
+	now := time.Now().UnixNano()
 
 	for _, job := range jobs {
+		if !w.source.ValidateJobOwnership(
+			job.ID,
+			w.id,
+			0,
+			now,
+		) {
+			continue
+		}
+
 		if err := w.Execute(ctx, job); err != nil {
 			if errors.Is(err, context.Canceled) ||
 				errors.Is(err, context.DeadlineExceeded) {

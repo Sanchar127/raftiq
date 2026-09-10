@@ -249,3 +249,59 @@ func (s *Store) ListAssignedJobs(workerID string) []model.Job {
 
 	return jobs
 }
+
+// ValidateJobOwnership verifies that the supplied worker still owns the job
+// under the supplied fencing token and that the corresponding lock has not
+// expired.
+//
+// This method is read-only. It does not renew, acquire, or mutate the lock.
+func (s *Store) ValidateJobOwnership(
+	jobID model.JobID,
+	workerID string,
+	fencingToken uint64,
+	now int64,
+) bool {
+	if jobID == "" || workerID == "" || fencingToken == 0 {
+		return false
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	job, ok := s.jobs[jobID]
+	if !ok {
+		return false
+	}
+
+	if job.AssignedWorkerID != workerID {
+		return false
+	}
+
+	if job.FencingToken != fencingToken {
+		return false
+	}
+
+	if job.State != model.JobScheduled &&
+		job.State != model.JobRunning {
+		return false
+	}
+
+	currentLock, ok := s.locks.Get(string(jobID))
+	if !ok {
+		return false
+	}
+
+	if currentLock.OwnerID != workerID {
+		return false
+	}
+
+	if currentLock.FencingToken != fencingToken {
+		return false
+	}
+
+	if currentLock.ExpiresAt <= now {
+		return false
+	}
+
+	return true
+}
