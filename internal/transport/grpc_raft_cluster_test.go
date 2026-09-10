@@ -116,3 +116,155 @@ func TestGRPCTransportRealRaftNodeRequestVote(t *testing.T) {
 		)
 	}
 }
+
+func TestGRPCTransportThreeNodeRaftElection(t *testing.T) {
+	nodes := []*raft.RaftNode{
+		raft.NewRaftNode("node-1"),
+		raft.NewRaftNode("node-2"),
+		raft.NewRaftNode("node-3"),
+	}
+
+	// Stagger election timeouts so the nodes do not all become
+	// candidates simultaneously. This makes the integration test
+	// deterministic while the production election-timeout
+	// randomization is implemented separately.
+	nodes[0].SetElectionTimeout(10)
+	nodes[1].SetElectionTimeout(15)
+	nodes[2].SetElectionTimeout(20)
+
+	servers := make([]*testRaftServer, 0, len(nodes))
+
+	for _, node := range nodes {
+		servers = append(
+			servers,
+			startTestRaftServer(t, node),
+		)
+	}
+
+	t.Cleanup(func() {
+		for _, server := range servers {
+			server.close()
+		}
+	})
+
+	transports := make([]*GRPCTransport, 0, len(nodes))
+
+	t.Cleanup(func() {
+		for _, transport := range transports {
+			if err := transport.Close(); err != nil {
+				t.Errorf("close transport: %v", err)
+			}
+		}
+	})
+
+	peerIDs := []raft.NodeID{
+		"node-1",
+		"node-2",
+		"node-3",
+	}
+
+	for i, node := range nodes {
+		transport := NewGRPCTransport()
+		transports = append(transports, transport)
+
+		for j, peerID := range peerIDs {
+			if i == j {
+				continue
+			}
+
+			if err := transport.AddPeer(
+				peerID,
+				servers[j].listener.Addr().String(),
+			); err != nil {
+				t.Fatalf(
+					"add peer %s to %s: %v",
+					peerID,
+					peerIDs[i],
+					err,
+				)
+			}
+		}
+
+		otherPeers := make(
+			[]raft.NodeID,
+			0,
+			len(peerIDs)-1,
+		)
+
+		for j, peerID := range peerIDs {
+			if i == j {
+				continue
+			}
+
+			otherPeers = append(otherPeers, peerID)
+		}
+
+		if err := node.SetTransport(
+			transport,
+			otherPeers,
+		); err != nil {
+			t.Fatalf(
+				"set transport for %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+	}
+
+	for i, node := range nodes {
+		if err := node.Start(); err != nil {
+			t.Fatalf(
+				"start %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+	}
+
+	t.Cleanup(func() {
+		for _, node := range nodes {
+			node.Stop()
+		}
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+
+	var leader *raft.RaftNode
+
+	for time.Now().Before(deadline) {
+		leaders := 0
+		leader = nil
+
+		for _, node := range nodes {
+			if node.State().Role == raft.Leader {
+				leaders++
+				leader = node
+			}
+		}
+
+		if leaders == 1 {
+			break
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if leader == nil {
+		t.Fatal("expected exactly one leader to be elected")
+	}
+
+	leaders := 0
+
+	for _, node := range nodes {
+		if node.State().Role == raft.Leader {
+			leaders++
+		}
+	}
+
+	if leaders != 1 {
+		t.Fatalf(
+			"expected exactly one leader, got %d",
+			leaders,
+		)
+	}
+}
