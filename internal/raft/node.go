@@ -11,6 +11,8 @@ import (
 	"github.com/sanchar127/raftiq/internal/storage"
 )
 
+const DefaultRPCTimeout = 2 * time.Second
+
 type RaftNode struct {
 	mu      sync.RWMutex
 	applyMu sync.Mutex
@@ -41,6 +43,7 @@ type RaftNode struct {
 	heartbeatTimeout int
 
 	tickInterval time.Duration
+	rpcTimeout   time.Duration
 }
 
 func NewRaftNode(id NodeID) *RaftNode {
@@ -388,11 +391,16 @@ func (n *RaftNode) requestVotes() {
 	}
 
 	for _, peerID := range peerIDs {
+		ctx, cancel := n.rpcContext()
+
 		reply, err := transport.RequestVote(
-			context.Background(),
+			ctx,
 			peerID,
 			args,
 		)
+
+		cancel()
+
 		if err != nil {
 			continue
 		}
@@ -688,11 +696,16 @@ func (n *RaftNode) replicateTo(peerID NodeID) {
 			return
 		}
 
+		ctx, cancel := n.rpcContext()
+
 		reply, err := transport.AppendEntries(
-			context.Background(),
+			ctx,
 			peerID,
 			args,
 		)
+
+		cancel()
+
 		if err != nil {
 			return
 		}
@@ -791,7 +804,6 @@ func (n *RaftNode) advanceCommitIndexLocked() bool {
 	majority := clusterSize/2 + 1
 
 	for index := n.state.Volatile.CommitIndex + 1; index <= n.log.LastIndex(); index++ {
-
 		if n.logTerm(index) != n.state.Persistent.CurrentTerm {
 			continue
 		}
@@ -886,11 +898,16 @@ func (n *RaftNode) sendHeartbeat(peerID NodeID) {
 		return
 	}
 
+	ctx, cancel := n.rpcContext()
+
 	reply, err := transport.AppendEntries(
-		context.Background(),
+		ctx,
 		peerID,
 		args,
 	)
+
+	cancel()
+
 	if err != nil {
 		return
 	}
@@ -1010,6 +1027,7 @@ func NewRaftNodeWithStorage(
 		electionTimeout:  10,
 		heartbeatTimeout: 1,
 		tickInterval:     100 * time.Millisecond,
+		rpcTimeout:       DefaultRPCTimeout,
 	}, nil
 }
 
@@ -1018,6 +1036,33 @@ func (n *RaftNode) Storage() storage.Storage {
 	defer n.mu.RUnlock()
 
 	return n.storage
+}
+
+func (n *RaftNode) SetRPCTimeout(timeout time.Duration) error {
+	if timeout <= 0 {
+		return errors.New("raft RPC timeout must be positive")
+	}
+
+	n.mu.Lock()
+	n.rpcTimeout = timeout
+	n.mu.Unlock()
+
+	return nil
+}
+
+func (n *RaftNode) rpcContext() (context.Context, context.CancelFunc) {
+	n.mu.RLock()
+	timeout := n.rpcTimeout
+	n.mu.RUnlock()
+
+	if timeout <= 0 {
+		timeout = DefaultRPCTimeout
+	}
+
+	return context.WithTimeout(
+		context.Background(),
+		timeout,
+	)
 }
 
 func (n *RaftNode) persistStateLocked() error {
@@ -1478,11 +1523,16 @@ func (n *RaftNode) sendInstallSnapshot(
 		return false
 	}
 
+	ctx, cancel := n.rpcContext()
+
 	reply, err := transport.InstallSnapshot(
-		context.Background(),
+		ctx,
 		peerID,
 		args,
 	)
+
+	cancel()
+
 	if err != nil {
 		return false
 	}
