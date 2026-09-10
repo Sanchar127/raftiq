@@ -2,12 +2,15 @@ package transport
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
 	raftiqv1 "github.com/sanchar127/raftiq/api/proto"
 	"github.com/sanchar127/raftiq/internal/raft"
+	"github.com/sanchar127/raftiq/internal/storage"
 	"google.golang.org/grpc"
 )
 
@@ -461,21 +464,23 @@ func TestGRPCTransportFollowerRecovery(t *testing.T) {
 		raft.NewRaftNode("node-3"),
 	}
 
-	// Deterministic election ordering for the integration test.
 	nodes[0].SetElectionTimeout(10)
 	nodes[1].SetElectionTimeout(15)
 	nodes[2].SetElectionTimeout(20)
 
-	servers := make([]*testRaftServer, 0, len(nodes))
+	servers := make([]*testRaftServer, len(nodes))
 
-	for _, node := range nodes {
-		servers = append(
-			servers,
-			startTestRaftServer(t, node),
-		)
+	for i, node := range nodes {
+		servers[i] = startTestRaftServer(t, node)
 	}
 
-	transports := make([]*GRPCTransport, 0, len(nodes))
+	t.Cleanup(func() {
+		for _, server := range servers {
+			server.close()
+		}
+	})
+
+	transports := make([]*GRPCTransport, len(nodes))
 
 	t.Cleanup(func() {
 		for _, transport := range transports {
@@ -491,10 +496,9 @@ func TestGRPCTransportFollowerRecovery(t *testing.T) {
 		"node-3",
 	}
 
-	// Configure every node with every other node as a peer.
 	for i, node := range nodes {
 		transport := NewGRPCTransport()
-		transports = append(transports, transport)
+		transports[i] = transport
 
 		for j, peerID := range peerIDs {
 			if i == j {
@@ -506,7 +510,7 @@ func TestGRPCTransportFollowerRecovery(t *testing.T) {
 				servers[j].listener.Addr().String(),
 			); err != nil {
 				t.Fatalf(
-					"add peer %s to %s: %v",
+					"add peer %s to node %s: %v",
 					peerID,
 					peerIDs[i],
 					err,
@@ -540,7 +544,6 @@ func TestGRPCTransportFollowerRecovery(t *testing.T) {
 		}
 	}
 
-	// Start all Raft nodes.
 	for i, node := range nodes {
 		if err := node.Start(); err != nil {
 			t.Fatalf(
@@ -603,31 +606,52 @@ func TestGRPCTransportFollowerRecovery(t *testing.T) {
 
 	initialTerm := leader.State().Persistent.CurrentTerm
 
-	// Simulate follower failure by stopping its gRPC server.
+	// Simulate follower failure by shutting down its gRPC endpoint.
 	servers[followerIndex].close()
 
-	// Give the cluster time to operate with only two reachable nodes.
-	time.Sleep(500 * time.Millisecond)
+	// The leader must remain leader because the other two nodes
+	// still form a majority.
+	deadline = time.Now().Add(3 * time.Second)
 
-	if leader.State().Role != raft.Leader {
-		t.Fatalf(
-			"expected leader %s to remain leader while follower %s is down",
-			peerIDs[leaderIndex],
-			peerIDs[followerIndex],
-		)
+	for time.Now().Before(deadline) {
+		state := leader.State()
+
+		if state.Role != raft.Leader {
+			t.Fatalf(
+				"leader %s lost leadership while follower %s was down",
+				peerIDs[leaderIndex],
+				peerIDs[followerIndex],
+			)
+		}
+
+		if state.Persistent.CurrentTerm < initialTerm {
+			t.Fatalf(
+				"leader term moved backwards: initial=%d current=%d",
+				initialTerm,
+				state.Persistent.CurrentTerm,
+			)
+		}
+
+		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Restart the follower's network endpoint while keeping the same
-	// RaftNode instance. This simulates the process/network endpoint
-	// recovering with its existing Raft state.
+	// Start a new gRPC endpoint for the same follower Raft process.
 	servers[followerIndex] = startTestRaftServer(
 		t,
 		follower,
 	)
 
-	// Update every other node's transport with the recovered endpoint.
-	recoveredAddress := servers[followerIndex].listener.Addr().String()
+	t.Cleanup(func() {
+		servers[followerIndex].close()
+	})
 
+	recoveredAddress := servers[followerIndex].
+		listener.
+		Addr().
+		String()
+
+	// Replace the failed follower's old address in the
+	// transports of the other two nodes.
 	for i, transport := range transports {
 		if i == followerIndex {
 			continue
@@ -640,7 +664,7 @@ func TestGRPCTransportFollowerRecovery(t *testing.T) {
 			recoveredAddress,
 		); err != nil {
 			t.Fatalf(
-				"re-add recovered peer %s to %s: %v",
+				"add recovered peer %s to node %s: %v",
 				peerIDs[followerIndex],
 				peerIDs[i],
 				err,
@@ -648,14 +672,24 @@ func TestGRPCTransportFollowerRecovery(t *testing.T) {
 		}
 	}
 
-	// Wait for the recovered follower to observe the current leader.
+	// Wait for the recovered follower to receive heartbeats
+	// from the current leader.
 	deadline = time.Now().Add(5 * time.Second)
 
 	for time.Now().Before(deadline) {
 		state := follower.State()
 
-		if state.LeaderID == peerIDs[leaderIndex] &&
+		if state.Role == raft.Follower &&
+			state.LeaderID == peerIDs[leaderIndex] &&
 			state.Persistent.CurrentTerm >= initialTerm {
+			t.Logf(
+				"follower recovered: node=%s role=%v leader=%s term=%d",
+				peerIDs[followerIndex],
+				state.Role,
+				state.LeaderID,
+				state.Persistent.CurrentTerm,
+			)
+
 			return
 		}
 
@@ -674,60 +708,80 @@ func TestGRPCTransportFollowerRecovery(t *testing.T) {
 		initialTerm,
 	)
 }
+
 func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
-	nodes := []*raft.RaftNode{
-		raft.NewRaftNode("node-1"),
-		raft.NewRaftNode("node-2"),
-		raft.NewRaftNode("node-3"),
-	}
-
-	// node-1 wins the initial election deterministically.
-	nodes[0].SetElectionTimeout(10)
-	nodes[1].SetElectionTimeout(15)
-	nodes[2].SetElectionTimeout(20)
-
-	servers := make([]*testRaftServer, 0, len(nodes))
-
-	for _, node := range nodes {
-		servers = append(
-			servers,
-			startTestRaftServer(t, node),
-		)
-	}
-
-	transports := make([]*GRPCTransport, 0, len(nodes))
-
-	t.Cleanup(func() {
-		for _, transport := range transports {
-			if err := transport.Close(); err != nil {
-				t.Errorf("close transport: %v", err)
-			}
-		}
-	})
-
 	peerIDs := []raft.NodeID{
 		"node-1",
 		"node-2",
 		"node-3",
 	}
 
-	// Configure every node with the other two nodes as peers.
-	for i, node := range nodes {
-		transport := NewGRPCTransport()
-		transports = append(transports, transport)
+	testDir := t.TempDir()
 
-		for j, peerID := range peerIDs {
+	nodes := make([]*raft.RaftNode, len(peerIDs))
+	stores := make([]*storage.WALStorage, len(peerIDs))
+	servers := make([]*testRaftServer, len(peerIDs))
+	transports := make([]*GRPCTransport, len(peerIDs))
+
+	electionTimeouts := []int{
+		10,
+		15,
+		20,
+	}
+
+	// Create three Raft nodes backed by persistent WAL storage.
+	for i, id := range peerIDs {
+		node, store := newPersistentTestNode(
+			t,
+			id,
+			testDir,
+		)
+
+		nodes[i] = node
+		stores[i] = store
+
+		t.Cleanup(func() {
+			node.Stop()
+			_ = store.Close()
+		})
+
+		node.SetElectionTimeout(electionTimeouts[i])
+	}
+
+	// Start one real gRPC server for every Raft node.
+	for i, node := range nodes {
+		server := startTestRaftServer(t, node)
+		servers[i] = server
+
+		t.Cleanup(func() {
+			server.close()
+		})
+	}
+
+	// Create one real gRPC transport per Raft node.
+	for i := range nodes {
+		transport := NewGRPCTransport()
+		transports[i] = transport
+
+		t.Cleanup(func() {
+			_ = transport.Close()
+		})
+	}
+
+	// Connect every node to every other node.
+	for i := range nodes {
+		for j := range nodes {
 			if i == j {
 				continue
 			}
 
-			if err := transport.AddPeer(
-				peerID,
+			if err := transports[i].AddPeer(
+				peerIDs[j],
 				servers[j].listener.Addr().String(),
 			); err != nil {
 				t.Fatalf(
-					"add peer %s to %s: %v",
-					peerID,
+					"add peer %s to node %s: %v",
+					peerIDs[j],
 					peerIDs[i],
 					err,
 				)
@@ -748,51 +802,46 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 			otherPeers = append(otherPeers, peerID)
 		}
 
-		if err := node.SetTransport(
-			transport,
+		if err := nodes[i].SetTransport(
+			transports[i],
 			otherPeers,
 		); err != nil {
 			t.Fatalf(
-				"set transport for %s: %v",
+				"set transport for node %s: %v",
 				peerIDs[i],
 				err,
 			)
 		}
 	}
 
-	// Start all nodes.
+	// Start all Raft processes.
 	for i, node := range nodes {
 		if err := node.Start(); err != nil {
 			t.Fatalf(
-				"start %s: %v",
+				"start node %s: %v",
 				peerIDs[i],
 				err,
 			)
 		}
 	}
-
-	t.Cleanup(func() {
-		for _, node := range nodes {
-			node.Stop()
-		}
-	})
 
 	// Wait for exactly one initial leader.
 	initialLeaderIndex := -1
 	deadline := time.Now().Add(5 * time.Second)
 
 	for time.Now().Before(deadline) {
-		leaders := 0
-		initialLeaderIndex = -1
+		leaderCount := 0
+		candidate := -1
 
 		for i, node := range nodes {
 			if node.State().Role == raft.Leader {
-				leaders++
-				initialLeaderIndex = i
+				leaderCount++
+				candidate = i
 			}
 		}
 
-		if leaders == 1 {
+		if leaderCount == 1 {
+			initialLeaderIndex = candidate
 			break
 		}
 
@@ -800,28 +849,39 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 	}
 
 	if initialLeaderIndex == -1 {
-		t.Fatal("expected an initial leader to be elected")
+		t.Fatal("expected exactly one initial leader")
 	}
 
-	initialLeader := nodes[initialLeaderIndex]
-	initialLeaderID := peerIDs[initialLeaderIndex]
-	initialTerm := initialLeader.State().Persistent.CurrentTerm
+	initialState := nodes[initialLeaderIndex].State()
+	initialTerm := initialState.Persistent.CurrentTerm
 
-	// Stop the leader's network endpoint.
-	//
-	// The RaftNode itself is intentionally kept running so this test
-	// simulates a failed network/server endpoint. The remaining two
-	// nodes must detect the missing heartbeats and elect a new leader.
-	initialLeader.Stop()
+	t.Logf(
+		"initial leader: %s term=%d",
+		peerIDs[initialLeaderIndex],
+		initialTerm,
+	)
+
+	// Simulate a complete leader process failure:
+	// stop the Raft process and shut down its network endpoint.
+	nodes[initialLeaderIndex].Stop()
 	servers[initialLeaderIndex].close()
 
-	// Wait for a new leader among the two surviving nodes.
+	// Close the old WAL before reopening it later as a new process.
+	if err := stores[initialLeaderIndex].Close(); err != nil {
+		t.Fatalf(
+			"close WAL for failed leader %s: %v",
+			peerIDs[initialLeaderIndex],
+			err,
+		)
+	}
+
+	// Wait for one of the surviving nodes to become leader.
 	newLeaderIndex := -1
 	deadline = time.Now().Add(5 * time.Second)
 
 	for time.Now().Before(deadline) {
-		leaders := 0
-		newLeaderIndex = -1
+		leaderCount := 0
+		candidate := -1
 
 		for i, node := range nodes {
 			if i == initialLeaderIndex {
@@ -829,12 +889,13 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 			}
 
 			if node.State().Role == raft.Leader {
-				leaders++
-				newLeaderIndex = i
+				leaderCount++
+				candidate = i
 			}
 		}
 
-		if leaders == 1 {
+		if leaderCount == 1 {
+			newLeaderIndex = candidate
 			break
 		}
 
@@ -843,43 +904,236 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 
 	if newLeaderIndex == -1 {
 		t.Fatalf(
-			"expected a new leader after %s failed",
-			initialLeaderID,
+			"expected new leader after %s failed",
+			peerIDs[initialLeaderIndex],
 		)
 	}
 
-	if newLeaderIndex == initialLeaderIndex {
-		t.Fatal("new leader must differ from failed leader")
-	}
+	newLeaderState := nodes[newLeaderIndex].State()
+	newTerm := newLeaderState.Persistent.CurrentTerm
 
-	newLeader := nodes[newLeaderIndex]
-	newLeaderState := newLeader.State()
-
-	if newLeaderState.Persistent.CurrentTerm <= initialTerm {
+	if newTerm <= initialTerm {
 		t.Fatalf(
-			"expected new leader term > initial term: initial=%d new=%d",
+			"new leader term=%d, want > initial term=%d",
+			newTerm,
 			initialTerm,
-			newLeaderState.Persistent.CurrentTerm,
 		)
 	}
 
-	// Verify exactly one surviving node is leader.
-	leaders := 0
+	t.Logf(
+		"new leader: %s term=%d",
+		peerIDs[newLeaderIndex],
+		newTerm,
+	)
 
-	for i, node := range nodes {
+	// -----------------------------------------------------------------
+	// Recover the failed leader as a completely new Raft process.
+	// -----------------------------------------------------------------
+
+	walPath := filepath.Join(
+		testDir,
+		fmt.Sprintf("%s.wal", peerIDs[initialLeaderIndex]),
+	)
+
+	recoveredStore, err := storage.OpenWAL(walPath)
+	if err != nil {
+		t.Fatalf(
+			"reopen WAL for recovered node %s: %v",
+			peerIDs[initialLeaderIndex],
+			err,
+		)
+	}
+
+	recoveredNode, err := raft.NewRaftNodeWithStorage(
+		peerIDs[initialLeaderIndex],
+		recoveredStore,
+	)
+	if err != nil {
+		_ = recoveredStore.Close()
+
+		t.Fatalf(
+			"reconstruct recovered node %s: %v",
+			peerIDs[initialLeaderIndex],
+			err,
+		)
+	}
+
+	t.Cleanup(func() {
+		recoveredNode.Stop()
+		_ = recoveredStore.Close()
+	})
+
+	recoveredNode.SetElectionTimeout(
+		electionTimeouts[initialLeaderIndex],
+	)
+
+	// The recovered process gets a fresh transport.
+	recoveredTransport := NewGRPCTransport()
+
+	t.Cleanup(func() {
+		_ = recoveredTransport.Close()
+	})
+
+	// Connect the recovered node to both surviving nodes.
+	survivorIDs := make(
+		[]raft.NodeID,
+		0,
+		len(peerIDs)-1,
+	)
+
+	for i, id := range peerIDs {
 		if i == initialLeaderIndex {
 			continue
 		}
 
-		if node.State().Role == raft.Leader {
-			leaders++
+		survivorIDs = append(
+			survivorIDs,
+			id,
+		)
+
+		if err := recoveredTransport.AddPeer(
+			id,
+			servers[i].listener.Addr().String(),
+		); err != nil {
+			t.Fatalf(
+				"add surviving peer %s to recovered node: %v",
+				id,
+				err,
+			)
 		}
 	}
 
-	if leaders != 1 {
+	if err := recoveredNode.SetTransport(
+		recoveredTransport,
+		survivorIDs,
+	); err != nil {
 		t.Fatalf(
-			"expected exactly one new leader among surviving nodes, got %d",
-			leaders,
+			"set transport for recovered node %s: %v",
+			recoveredNode.ID(),
+			err,
 		)
 	}
+
+	// Start a new network endpoint for the reconstructed process.
+	recoveredServer := startTestRaftServer(
+		t,
+		recoveredNode,
+	)
+
+	t.Cleanup(func() {
+		recoveredServer.close()
+	})
+
+	recoveredAddress := recoveredServer.
+		listener.
+		Addr().
+		String()
+
+	// The surviving nodes still have the crashed leader's old
+	// network address. Replace those peer connections.
+	for i, transport := range transports {
+		if i == initialLeaderIndex {
+			continue
+		}
+
+		transport.RemovePeer(
+			peerIDs[initialLeaderIndex],
+		)
+
+		if err := transport.AddPeer(
+			peerIDs[initialLeaderIndex],
+			recoveredAddress,
+		); err != nil {
+			t.Fatalf(
+				"add recovered peer %s to node %s: %v",
+				peerIDs[initialLeaderIndex],
+				peerIDs[i],
+				err,
+			)
+		}
+	}
+
+	// Start the reconstructed Raft process.
+	if err := recoveredNode.Start(); err != nil {
+		t.Fatalf(
+			"start recovered node %s: %v",
+			recoveredNode.ID(),
+			err,
+		)
+	}
+
+	// The recovered process must:
+	//   1. load its old persistent term from WAL,
+	//   2. observe the newer leader term,
+	//   3. step down to follower,
+	//   4. recognize the current leader.
+	recoveryDeadline := time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(recoveryDeadline) {
+		state := recoveredNode.State()
+
+		if state.Role == raft.Follower &&
+			state.LeaderID == peerIDs[newLeaderIndex] &&
+			state.Persistent.CurrentTerm >= newTerm {
+			t.Logf(
+				"leader recovered: node=%s role=%v leader=%s term=%d",
+				recoveredNode.ID(),
+				state.Role,
+				state.LeaderID,
+				state.Persistent.CurrentTerm,
+			)
+
+			return
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	state := recoveredNode.State()
+
+	t.Fatalf(
+		"recovered leader did not rejoin correctly: role=%v leader=%s term=%d want follower leader=%s term>=%d",
+		state.Role,
+		state.LeaderID,
+		state.Persistent.CurrentTerm,
+		peerIDs[newLeaderIndex],
+		newTerm,
+	)
+}
+func newPersistentTestNode(
+	t *testing.T,
+	id raft.NodeID,
+	dir string,
+) (*raft.RaftNode, *storage.WALStorage) {
+	t.Helper()
+
+	path := filepath.Join(
+		dir,
+		fmt.Sprintf("%s.wal", id),
+	)
+
+	store, err := storage.OpenWAL(path)
+	if err != nil {
+		t.Fatalf(
+			"open WAL for node %s: %v",
+			id,
+			err,
+		)
+	}
+
+	node, err := raft.NewRaftNodeWithStorage(
+		id,
+		store,
+	)
+	if err != nil {
+		_ = store.Close()
+
+		t.Fatalf(
+			"create persistent node %s: %v",
+			id,
+			err,
+		)
+	}
+
+	return node, store
 }
