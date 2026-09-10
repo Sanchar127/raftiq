@@ -2,11 +2,14 @@ package raft
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/sanchar127/raftiq/internal/model"
 )
 
 type Log struct {
+	mu sync.RWMutex
+
 	entries           []LogEntry
 	lastIncludedIndex LogIndex
 	lastIncludedTerm  Term
@@ -19,23 +22,24 @@ func NewLog() *Log {
 }
 
 func (l *Log) LastIndex() LogIndex {
-	if len(l.entries) == 0 {
-		return l.lastIncludedIndex
-	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 
-	return l.entries[len(l.entries)-1].Index
+	return l.lastIndexLocked()
 }
 
 func (l *Log) LastTerm() Term {
-	if len(l.entries) == 0 {
-		return l.lastIncludedTerm
-	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 
-	return l.entries[len(l.entries)-1].Term
+	return l.lastTermLocked()
 }
 
 func (l *Log) Append(entry LogEntry) error {
-	expectedIndex := l.LastIndex() + 1
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	expectedIndex := l.lastIndexLocked() + 1
 
 	if entry.Index != expectedIndex {
 		return fmt.Errorf(
@@ -45,38 +49,37 @@ func (l *Log) Append(entry LogEntry) error {
 		)
 	}
 
+	entry.Data = cloneBytes(entry.Data)
 	l.entries = append(l.entries, entry)
 
 	return nil
 }
 
 func (l *Log) TruncateFrom(index LogIndex) {
-	if index == 0 {
-		l.entries = nil
-		return
-	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
-	if index <= l.lastIncludedIndex {
-		return
-	}
-
-	for i, entry := range l.entries {
-		if entry.Index >= index {
-			l.entries = l.entries[:i]
-			return
-		}
-	}
+	l.truncateFromLocked(index)
 }
 
 func (l *Log) LastIncludedIndex() LogIndex {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
 	return l.lastIncludedIndex
 }
 
 func (l *Log) LastIncludedTerm() Term {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
 	return l.lastIncludedTerm
 }
 
 func (l *Log) Compact(snapshot model.Snapshot) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	if snapshot.LastIncludedIndex < l.lastIncludedIndex {
 		return fmt.Errorf(
 			"cannot move snapshot backwards: current %d, requested %d",
@@ -85,11 +88,11 @@ func (l *Log) Compact(snapshot model.Snapshot) error {
 		)
 	}
 
-	if snapshot.LastIncludedIndex > l.LastIndex() {
+	if snapshot.LastIncludedIndex > l.lastIndexLocked() {
 		return fmt.Errorf(
 			"cannot compact beyond last log index: snapshot %d, last index %d",
 			snapshot.LastIncludedIndex,
-			l.LastIndex(),
+			l.lastIndexLocked(),
 		)
 	}
 
@@ -106,7 +109,7 @@ func (l *Log) Compact(snapshot model.Snapshot) error {
 		return nil
 	}
 
-	entry, ok := l.Get(snapshot.LastIncludedIndex)
+	entry, ok := l.getLocked(snapshot.LastIncludedIndex)
 	if !ok {
 		return fmt.Errorf(
 			"cannot compact: snapshot boundary index %d not found",
@@ -127,6 +130,7 @@ func (l *Log) Compact(snapshot model.Snapshot) error {
 
 	for _, entry := range l.entries {
 		if entry.Index > snapshot.LastIncludedIndex {
+			entry.Data = cloneBytes(entry.Data)
 			remaining = append(remaining, entry)
 		}
 	}
@@ -139,23 +143,16 @@ func (l *Log) Compact(snapshot model.Snapshot) error {
 }
 
 func (l *Log) Get(index LogIndex) (LogEntry, bool) {
-	if index == l.lastIncludedIndex && index != 0 {
-		return LogEntry{
-			Index: index,
-			Term:  l.lastIncludedTerm,
-		}, true
-	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 
-	for _, entry := range l.entries {
-		if entry.Index == index {
-			return entry, true
-		}
-	}
-
-	return LogEntry{}, false
+	return l.getLocked(index)
 }
 
 func (l *Log) RestoreSnapshot(snapshot model.Snapshot) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	if snapshot.LastIncludedIndex < l.lastIncludedIndex {
 		return fmt.Errorf(
 			"cannot restore snapshot backwards: current %d, requested %d",
@@ -181,7 +178,7 @@ func (l *Log) RestoreSnapshot(snapshot model.Snapshot) error {
 	// as the snapshot boundary.
 	boundaryMatches := false
 
-	if entry, ok := l.Get(snapshot.LastIncludedIndex); ok {
+	if entry, ok := l.getLocked(snapshot.LastIncludedIndex); ok {
 		boundaryMatches = entry.Term == snapshot.LastIncludedTerm
 	}
 
@@ -192,6 +189,7 @@ func (l *Log) RestoreSnapshot(snapshot model.Snapshot) error {
 
 		for _, entry := range l.entries {
 			if entry.Index > snapshot.LastIncludedIndex {
+				entry.Data = cloneBytes(entry.Data)
 				remaining = append(remaining, entry)
 			}
 		}
@@ -207,4 +205,64 @@ func (l *Log) RestoreSnapshot(snapshot model.Snapshot) error {
 	l.lastIncludedTerm = snapshot.LastIncludedTerm
 
 	return nil
+}
+
+func (l *Log) lastIndexLocked() LogIndex {
+	if len(l.entries) == 0 {
+		return l.lastIncludedIndex
+	}
+
+	return l.entries[len(l.entries)-1].Index
+}
+
+func (l *Log) lastTermLocked() Term {
+	if len(l.entries) == 0 {
+		return l.lastIncludedTerm
+	}
+
+	return l.entries[len(l.entries)-1].Term
+}
+
+func (l *Log) getLocked(index LogIndex) (LogEntry, bool) {
+	if index == l.lastIncludedIndex && index != 0 {
+		return LogEntry{
+			Index: index,
+			Term:  l.lastIncludedTerm,
+		}, true
+	}
+
+	for _, entry := range l.entries {
+		if entry.Index == index {
+			entry.Data = cloneBytes(entry.Data)
+			return entry, true
+		}
+	}
+
+	return LogEntry{}, false
+}
+
+func (l *Log) truncateFromLocked(index LogIndex) {
+	if index == 0 {
+		l.entries = nil
+		return
+	}
+
+	if index <= l.lastIncludedIndex {
+		return
+	}
+
+	for i, entry := range l.entries {
+		if entry.Index >= index {
+			l.entries = l.entries[:i]
+			return
+		}
+	}
+}
+
+func cloneBytes(data []byte) []byte {
+	if data == nil {
+		return nil
+	}
+
+	return append([]byte(nil), data...)
 }
