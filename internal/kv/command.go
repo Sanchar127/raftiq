@@ -33,6 +33,7 @@ type Command struct {
 	OwnerID       string         `json:"owner_id,omitempty"`
 	ExpiresAt     int64          `json:"expires_at,omitempty"`
 	FencingToken  uint64         `json:"fencing_token,omitempty"`
+	ExecutionID   string         `json:"execution_id,omitempty"`
 	ExpectedState model.JobState `json:"expected_state,omitempty"`
 	At            int64          `json:"at,omitempty"`
 }

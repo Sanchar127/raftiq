@@ -254,6 +254,7 @@ func (s *Store) ClaimJob(
 	job.AssignedWorkerID = workerID
 	job.FencingToken = currentLock.FencingToken
 	job.Attempt++
+	job.ExecutionID = executionID(job.ID, job.Attempt)
 
 	s.jobs[id] = job
 
@@ -416,12 +417,13 @@ func (s *Store) ValidateJobOwnership(
 func (s *Store) TransitionJobState(
 	jobID model.JobID,
 	workerID string,
+	executionID string,
 	fencingToken uint64,
 	expectedState model.JobState,
 	nextState model.JobState,
 	at int64,
 ) (model.Job, error) {
-	if jobID == "" || workerID == "" || fencingToken == 0 {
+	if jobID == "" || workerID == "" || executionID == "" || fencingToken == 0 {
 		return model.Job{}, ErrInvalidJob
 	}
 
@@ -467,6 +469,10 @@ func (s *Store) TransitionJobState(
 		return model.Job{}, ErrJobOwnershipLost
 	}
 
+	if job.ExecutionID != executionID {
+		return model.Job{}, ErrJobOwnershipLost
+	}
+
 	if job.FencingToken != fencingToken {
 		return model.Job{}, ErrJobOwnershipLost
 	}
@@ -494,4 +500,7 @@ func (s *Store) TransitionJobState(
 	s.jobs[jobID] = copied
 
 	return copied, nil
+}
+func executionID(jobID model.JobID, attempt uint32) string {
+	return fmt.Sprintf("%s/%d", jobID, attempt)
 }

@@ -108,6 +108,7 @@ func Apply(store *Store, entry raft.LogEntry) ApplyResult {
 		job, err := store.TransitionJobState(
 			model.JobID(command.JobID),
 			command.OwnerID,
+			command.ExecutionID,
 			command.FencingToken,
 			model.JobScheduled,
 			model.JobRunning,
@@ -123,6 +124,7 @@ func Apply(store *Store, entry raft.LogEntry) ApplyResult {
 		job, err := store.TransitionJobState(
 			model.JobID(command.JobID),
 			command.OwnerID,
+			command.ExecutionID,
 			command.FencingToken,
 			model.JobRunning,
 			model.JobSucceeded,
@@ -133,10 +135,12 @@ func Apply(store *Store, entry raft.LogEntry) ApplyResult {
 			Job: &job,
 			Err: err,
 		}
+
 	case CommandJobFailed:
 		job, err := store.TransitionJobState(
 			model.JobID(command.JobID),
 			command.OwnerID,
+			command.ExecutionID,
 			command.FencingToken,
 			model.JobRunning,
 			model.JobFailed,

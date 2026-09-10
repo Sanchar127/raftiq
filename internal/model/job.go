@@ -26,7 +26,8 @@ type Job struct {
 	AssignedWorkerID string
 	FencingToken     uint64
 
-	Attempt uint32
+	Attempt     uint32
+	ExecutionID string
 
 	CreatedIndex LogIndex
 }

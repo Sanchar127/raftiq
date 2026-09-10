@@ -701,6 +701,7 @@ func TestSchedulerReclaimsExpiredRunningJob(t *testing.T) {
 	if _, err := store.TransitionJobState(
 		job.ID,
 		"worker-1",
+		claimed.ExecutionID,
 		claimed.FencingToken,
 		model.JobScheduled,
 		model.JobRunning,

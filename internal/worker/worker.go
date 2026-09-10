@@ -312,6 +312,7 @@ func (w *Worker) transitionJob(
 		Type:          commandType,
 		JobID:         string(job.ID),
 		OwnerID:       w.id,
+		ExecutionID:   job.ExecutionID,
 		FencingToken:  job.FencingToken,
 		ExpectedState: expectedState,
 		At:            time.Now().UnixNano(),
