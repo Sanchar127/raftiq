@@ -1137,3 +1137,626 @@ func newPersistentTestNode(
 
 	return node, store
 }
+
+func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
+	peerIDs := []raft.NodeID{
+		"node-1",
+		"node-2",
+		"node-3",
+	}
+
+	testDir := t.TempDir()
+
+	nodes := make([]*raft.RaftNode, len(peerIDs))
+	stores := make([]*storage.WALStorage, len(peerIDs))
+	servers := make([]*testRaftServer, len(peerIDs))
+	transports := make([]*GRPCTransport, len(peerIDs))
+
+	electionTimeouts := []int{
+		10,
+		15,
+		20,
+	}
+
+	// ---------------------------------------------------------------
+	// Create persistent Raft nodes.
+	// ---------------------------------------------------------------
+
+	for i, id := range peerIDs {
+		node, store := newPersistentTestNode(
+			t,
+			id,
+			testDir,
+		)
+
+		nodes[i] = node
+		stores[i] = store
+
+		nodes[i].SetElectionTimeout(electionTimeouts[i])
+
+		t.Cleanup(func() {
+			node.Stop()
+			_ = store.Close()
+		})
+	}
+
+	// ---------------------------------------------------------------
+	// Start real gRPC servers.
+	// ---------------------------------------------------------------
+
+	for i, node := range nodes {
+		server := startTestRaftServer(t, node)
+		servers[i] = server
+
+		t.Cleanup(func() {
+			server.close()
+		})
+	}
+
+	// ---------------------------------------------------------------
+	// Create real gRPC transports.
+	// ---------------------------------------------------------------
+
+	for i := range nodes {
+		transport := NewGRPCTransport()
+		transports[i] = transport
+
+		t.Cleanup(func() {
+			_ = transport.Close()
+		})
+	}
+
+	// ---------------------------------------------------------------
+	// Fully connect the cluster.
+	// ---------------------------------------------------------------
+
+	for i := range nodes {
+		peerList := make([]raft.NodeID, 0, len(peerIDs)-1)
+
+		for j, peerID := range peerIDs {
+			if i == j {
+				continue
+			}
+
+			peerList = append(peerList, peerID)
+
+			if err := transports[i].AddPeer(
+				peerID,
+				servers[j].listener.Addr().String(),
+			); err != nil {
+				t.Fatalf(
+					"add peer %s to node %s: %v",
+					peerID,
+					peerIDs[i],
+					err,
+				)
+			}
+		}
+
+		if err := nodes[i].SetTransport(
+			transports[i],
+			peerList,
+		); err != nil {
+			t.Fatalf(
+				"set transport for node %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+	}
+
+	// ---------------------------------------------------------------
+	// Start the cluster.
+	// ---------------------------------------------------------------
+
+	for i, node := range nodes {
+		if err := node.Start(); err != nil {
+			t.Fatalf(
+				"start node %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+	}
+
+	// ---------------------------------------------------------------
+	// Wait for exactly one leader.
+	// ---------------------------------------------------------------
+
+	initialLeaderIndex := -1
+	deadline := time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(deadline) {
+		leaderCount := 0
+		candidate := -1
+
+		for i, node := range nodes {
+			if node.State().Role == raft.Leader {
+				leaderCount++
+				candidate = i
+			}
+		}
+
+		if leaderCount == 1 {
+			initialLeaderIndex = candidate
+			break
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if initialLeaderIndex == -1 {
+		t.Fatal("expected exactly one initial leader")
+	}
+
+	initialTerm :=
+		nodes[initialLeaderIndex].State().Persistent.CurrentTerm
+
+	t.Logf(
+		"initial leader: %s term=%d",
+		peerIDs[initialLeaderIndex],
+		initialTerm,
+	)
+
+	// ---------------------------------------------------------------
+	// Propose entries while the original leader is still alive.
+	//
+	// These entries must exist in the leader's WAL before failure.
+	// ---------------------------------------------------------------
+
+	initialEntries := [][]byte{
+		[]byte("entry-a"),
+		[]byte("entry-b"),
+	}
+
+	initialIndexes := make([]raft.LogIndex, 0, len(initialEntries))
+
+	for _, data := range initialEntries {
+		index, err := nodes[initialLeaderIndex].Propose(data)
+		if err != nil {
+			t.Fatalf(
+				"propose initial entry: %v",
+				err,
+			)
+		}
+
+		initialIndexes = append(initialIndexes, index)
+	}
+
+	expectedInitialLastIndex :=
+		initialIndexes[len(initialIndexes)-1]
+
+	// Wait until all currently connected followers have the
+	// initial entries.
+	deadline = time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(deadline) {
+		allReplicated := true
+
+		for i, node := range nodes {
+			if i == initialLeaderIndex {
+				continue
+			}
+
+			if node.Log().LastIndex() < expectedInitialLastIndex {
+				allReplicated = false
+				break
+			}
+		}
+
+		if allReplicated {
+			break
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	for i, node := range nodes {
+		if node.Log().LastIndex() < expectedInitialLastIndex {
+			t.Fatalf(
+				"node %s did not receive initial entries: lastIndex=%d want>=%d",
+				peerIDs[i],
+				node.Log().LastIndex(),
+				expectedInitialLastIndex,
+			)
+		}
+	}
+
+	// ---------------------------------------------------------------
+	// Crash the original leader completely.
+	// ---------------------------------------------------------------
+
+	nodes[initialLeaderIndex].Stop()
+	servers[initialLeaderIndex].close()
+
+	if err := stores[initialLeaderIndex].Close(); err != nil {
+		t.Fatalf(
+			"close WAL for failed leader %s: %v",
+			peerIDs[initialLeaderIndex],
+			err,
+		)
+	}
+
+	// ---------------------------------------------------------------
+	// Wait for a surviving leader.
+	// ---------------------------------------------------------------
+
+	newLeaderIndex := -1
+	deadline = time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(deadline) {
+		leaderCount := 0
+		candidate := -1
+
+		for i, node := range nodes {
+			if i == initialLeaderIndex {
+				continue
+			}
+
+			if node.State().Role == raft.Leader {
+				leaderCount++
+				candidate = i
+			}
+		}
+
+		if leaderCount == 1 {
+			newLeaderIndex = candidate
+			break
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if newLeaderIndex == -1 {
+		t.Fatal("expected surviving nodes to elect a new leader")
+	}
+
+	newLeaderTerm :=
+		nodes[newLeaderIndex].State().Persistent.CurrentTerm
+
+	if newLeaderTerm <= initialTerm {
+		t.Fatalf(
+			"new leader term=%d want > initial term=%d",
+			newLeaderTerm,
+			initialTerm,
+		)
+	}
+
+	t.Logf(
+		"new leader: %s term=%d",
+		peerIDs[newLeaderIndex],
+		newLeaderTerm,
+	)
+
+	// ---------------------------------------------------------------
+	// Make sure the surviving nodes no longer have a usable
+	// connection to the crashed leader.
+	//
+	// This makes the failure explicit and avoids relying on the old
+	// gRPC endpoint.
+	// ---------------------------------------------------------------
+
+	for i, transport := range transports {
+		if i == initialLeaderIndex {
+			continue
+		}
+
+		transport.RemovePeer(peerIDs[initialLeaderIndex])
+	}
+
+	// ---------------------------------------------------------------
+	// Propose new entries on the surviving leader.
+	//
+	// The crashed node is offline, so these entries cannot be
+	// replicated to it. The two surviving nodes form a majority.
+	// ---------------------------------------------------------------
+
+	recoveryEntries := [][]byte{
+		[]byte("entry-c"),
+		[]byte("entry-d"),
+		[]byte("entry-e"),
+	}
+
+	recoveryIndexes := make([]raft.LogIndex, 0, len(recoveryEntries))
+
+	for _, data := range recoveryEntries {
+		index, err := nodes[newLeaderIndex].Propose(data)
+		if err != nil {
+			t.Fatalf(
+				"propose recovery entry %q: %v",
+				data,
+				err,
+			)
+		}
+
+		recoveryIndexes = append(
+			recoveryIndexes,
+			index,
+		)
+	}
+
+	expectedLastIndex :=
+		recoveryIndexes[len(recoveryIndexes)-1]
+
+	t.Logf(
+		"new leader committed entries through index %d",
+		expectedLastIndex,
+	)
+
+	// ---------------------------------------------------------------
+	// Verify the surviving leader contains the complete log.
+	// ---------------------------------------------------------------
+
+	leaderLogLastIndex :=
+		nodes[newLeaderIndex].Log().LastIndex()
+
+	if leaderLogLastIndex != expectedLastIndex {
+		t.Fatalf(
+			"leader last index=%d want=%d",
+			leaderLogLastIndex,
+			expectedLastIndex,
+		)
+	}
+
+	// ---------------------------------------------------------------
+	// Reopen the crashed leader's WAL as a completely new process.
+	// ---------------------------------------------------------------
+
+	walPath := filepath.Join(
+		testDir,
+		fmt.Sprintf(
+			"%s.wal",
+			peerIDs[initialLeaderIndex],
+		),
+	)
+
+	recoveredStore, err := storage.OpenWAL(walPath)
+	if err != nil {
+		t.Fatalf(
+			"reopen WAL for recovered node %s: %v",
+			peerIDs[initialLeaderIndex],
+			err,
+		)
+	}
+
+	recoveredNode, err := raft.NewRaftNodeWithStorage(
+		peerIDs[initialLeaderIndex],
+		recoveredStore,
+	)
+	if err != nil {
+		_ = recoveredStore.Close()
+
+		t.Fatalf(
+			"reconstruct recovered node %s: %v",
+			peerIDs[initialLeaderIndex],
+			err,
+		)
+	}
+
+	t.Cleanup(func() {
+		recoveredNode.Stop()
+		_ = recoveredStore.Close()
+	})
+
+	recoveredNode.SetElectionTimeout(
+		electionTimeouts[initialLeaderIndex],
+	)
+
+	// ---------------------------------------------------------------
+	// Give the recovered node a fresh transport connected to the
+	// two surviving nodes.
+	// ---------------------------------------------------------------
+
+	recoveredTransport := NewGRPCTransport()
+
+	t.Cleanup(func() {
+		_ = recoveredTransport.Close()
+	})
+
+	survivorIDs := make(
+		[]raft.NodeID,
+		0,
+		len(peerIDs)-1,
+	)
+
+	for i, id := range peerIDs {
+		if i == initialLeaderIndex {
+			continue
+		}
+
+		survivorIDs = append(
+			survivorIDs,
+			id,
+		)
+
+		if err := recoveredTransport.AddPeer(
+			id,
+			servers[i].listener.Addr().String(),
+		); err != nil {
+			t.Fatalf(
+				"add surviving peer %s to recovered node: %v",
+				id,
+				err,
+			)
+		}
+	}
+
+	if err := recoveredNode.SetTransport(
+		recoveredTransport,
+		survivorIDs,
+	); err != nil {
+		t.Fatalf(
+			"set transport for recovered node: %v",
+			err,
+		)
+	}
+
+	// ---------------------------------------------------------------
+	// Start a fresh gRPC endpoint for the recovered process.
+	// ---------------------------------------------------------------
+
+	recoveredServer := startTestRaftServer(
+		t,
+		recoveredNode,
+	)
+
+	t.Cleanup(func() {
+		recoveredServer.close()
+	})
+
+	recoveredAddress :=
+		recoveredServer.listener.Addr().String()
+
+	// Update surviving nodes with the recovered leader's new address.
+	for i, transport := range transports {
+		if i == initialLeaderIndex {
+			continue
+		}
+
+		if err := transport.AddPeer(
+			peerIDs[initialLeaderIndex],
+			recoveredAddress,
+		); err != nil {
+			t.Fatalf(
+				"add recovered peer %s to node %s: %v",
+				peerIDs[initialLeaderIndex],
+				peerIDs[i],
+				err,
+			)
+		}
+	}
+
+	// ---------------------------------------------------------------
+	// Start the recovered node.
+	// ---------------------------------------------------------------
+
+	if err := recoveredNode.Start(); err != nil {
+		t.Fatalf(
+			"start recovered node %s: %v",
+			recoveredNode.ID(),
+			err,
+		)
+	}
+
+	// ---------------------------------------------------------------
+	// Wait for the recovered node to:
+	//
+	//   1. discover the current leader,
+	//   2. remain a follower,
+	//   3. receive the missing entries,
+	//   4. converge to the leader's last log index.
+	// ---------------------------------------------------------------
+
+	deadline = time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(deadline) {
+		state := recoveredNode.State()
+
+		if state.Role == raft.Follower &&
+			state.LeaderID == peerIDs[newLeaderIndex] &&
+			state.Persistent.CurrentTerm >= newLeaderTerm &&
+			recoveredNode.Log().LastIndex() >= expectedLastIndex {
+			break
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	state := recoveredNode.State()
+
+	if state.Role != raft.Follower {
+		t.Fatalf(
+			"recovered node role=%v want follower",
+			state.Role,
+		)
+	}
+
+	if state.LeaderID != peerIDs[newLeaderIndex] {
+		t.Fatalf(
+			"recovered node leader=%s want=%s",
+			state.LeaderID,
+			peerIDs[newLeaderIndex],
+		)
+	}
+
+	if state.Persistent.CurrentTerm < newLeaderTerm {
+		t.Fatalf(
+			"recovered node term=%d want>=%d",
+			state.Persistent.CurrentTerm,
+			newLeaderTerm,
+		)
+	}
+
+	recoveredLastIndex :=
+		recoveredNode.Log().LastIndex()
+
+	if recoveredLastIndex != expectedLastIndex {
+		t.Fatalf(
+			"recovered node last index=%d want=%d",
+			recoveredLastIndex,
+			expectedLastIndex,
+		)
+	}
+
+	// ---------------------------------------------------------------
+	// Verify every log entry matches the surviving leader.
+	// ---------------------------------------------------------------
+
+	leaderNode := nodes[newLeaderIndex]
+
+	for index := raft.LogIndex(1); index <= expectedLastIndex; index++ {
+		leaderEntry, leaderOK :=
+			leaderNode.Log().Get(index)
+
+		recoveredEntry, recoveredOK :=
+			recoveredNode.Log().Get(index)
+
+		if !leaderOK {
+			t.Fatalf(
+				"leader missing log entry at index %d",
+				index,
+			)
+		}
+
+		if !recoveredOK {
+			t.Fatalf(
+				"recovered node missing log entry at index %d",
+				index,
+			)
+		}
+
+		if recoveredEntry.Index != leaderEntry.Index {
+			t.Fatalf(
+				"log index mismatch at %d: recovered=%d leader=%d",
+				index,
+				recoveredEntry.Index,
+				leaderEntry.Index,
+			)
+		}
+
+		if recoveredEntry.Term != leaderEntry.Term {
+			t.Fatalf(
+				"log term mismatch at index %d: recovered=%d leader=%d",
+				index,
+				recoveredEntry.Term,
+				leaderEntry.Term,
+			)
+		}
+
+		if string(recoveredEntry.Data) != string(leaderEntry.Data) {
+			t.Fatalf(
+				"log data mismatch at index %d: recovered=%q leader=%q",
+				index,
+				recoveredEntry.Data,
+				leaderEntry.Data,
+			)
+		}
+	}
+
+	t.Logf(
+		"recovered node caught up: node=%s lastIndex=%d leader=%s",
+		recoveredNode.ID(),
+		recoveredLastIndex,
+		leaderNode.ID(),
+	)
+}

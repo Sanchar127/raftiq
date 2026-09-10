@@ -168,7 +168,10 @@ func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 
 	if n.state.Role != Leader {
 		n.mu.Unlock()
-		return 0, fmt.Errorf("node %s is not the leader", n.id)
+		return 0, fmt.Errorf(
+			"node %s is not the leader",
+			n.id,
+		)
 	}
 
 	index := n.log.LastIndex() + 1
@@ -179,9 +182,31 @@ func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 		Data:  append([]byte(nil), data...),
 	}
 
+	// Persist the entry before making it visible in the in-memory
+	// Raft log. This keeps the persistent log as the durability
+	// boundary for newly proposed entries.
+	if err := n.storage.AppendEntries([]LogEntry{entry}); err != nil {
+		n.mu.Unlock()
+		return 0, fmt.Errorf(
+			"persist proposed entry: %w",
+			err,
+		)
+	}
+
+	if err := n.storage.Sync(); err != nil {
+		n.mu.Unlock()
+		return 0, fmt.Errorf(
+			"sync proposed entry: %w",
+			err,
+		)
+	}
+
 	if err := n.log.Append(entry); err != nil {
 		n.mu.Unlock()
-		return 0, fmt.Errorf("append proposed entry: %w", err)
+		return 0, fmt.Errorf(
+			"append proposed entry to raft log: %w",
+			err,
+		)
 	}
 
 	// The leader itself counts toward the replication majority.
@@ -212,7 +237,6 @@ func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 
 	return index, nil
 }
-
 func (n *RaftNode) RequestVote(args RequestVoteArgs) RequestVoteReply {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -506,13 +530,13 @@ func (n *RaftNode) AppendEntries(
 		FollowerID: n.id,
 	}
 
-	// 1. Reject stale leader.
+	// 1. Reject stale leaders.
 	if args.Term < n.state.Persistent.CurrentTerm {
 		n.mu.Unlock()
 		return reply
 	}
 
-	// 2. Update term if leader is newer.
+	// 2. Update term if the leader is newer.
 	if args.Term > n.state.Persistent.CurrentTerm {
 		n.state.Persistent.CurrentTerm = args.Term
 		n.state.Role = Follower
@@ -534,37 +558,86 @@ func (n *RaftNode) AppendEntries(
 		}
 	}
 
-	// 4. Become follower and reset election timer.
+	// 4. Become follower and reset the election timer.
 	n.state.Role = Follower
 	n.state.LeaderID = args.LeaderID
 	n.electionElapsed = 0
 
-	// 5. Process replicated entries.
-	for _, entry := range args.Entries {
+	// 5. Find the first entry that must be written.
+	//
+	// Entries that already exist with the same term are already
+	// consistent and do not need to be persisted again.
+	//
+	// If an existing entry has a different term, Raft requires the
+	// conflicting suffix to be replaced.
+	firstNew := -1
+	replaceFrom := model.LogIndex(0)
+
+	for i, entry := range args.Entries {
 		existing, ok := n.log.Get(entry.Index)
 
-		if ok {
-			if existing.Term != entry.Term {
-				n.log.TruncateFrom(entry.Index)
+		if !ok {
+			firstNew = i
+			break
+		}
 
+		if existing.Term != entry.Term {
+			firstNew = i
+			replaceFrom = entry.Index
+			break
+		}
+	}
+
+	// 6. Persist new or conflicting entries before updating the
+	// in-memory Raft log.
+	if firstNew >= 0 {
+		newEntries := cloneEntries(args.Entries[firstNew:])
+
+		if replaceFrom > 0 {
+			if err := n.storage.ReplaceSuffix(
+				replaceFrom,
+				newEntries,
+			); err != nil {
+				n.mu.Unlock()
+				return reply
+			}
+
+			if err := n.storage.Sync(); err != nil {
+				n.mu.Unlock()
+				return reply
+			}
+
+			n.log.TruncateFrom(replaceFrom)
+
+			for _, entry := range newEntries {
 				if err := n.log.Append(entry); err != nil {
 					n.mu.Unlock()
 					return reply
 				}
 			}
+		} else {
+			if err := n.storage.AppendEntries(newEntries); err != nil {
+				n.mu.Unlock()
+				return reply
+			}
 
-			continue
-		}
+			if err := n.storage.Sync(); err != nil {
+				n.mu.Unlock()
+				return reply
+			}
 
-		if err := n.log.Append(entry); err != nil {
-			n.mu.Unlock()
-			return reply
+			for _, entry := range newEntries {
+				if err := n.log.Append(entry); err != nil {
+					n.mu.Unlock()
+					return reply
+				}
+			}
 		}
 	}
 
+	// 7. Advance commit index.
 	commitAdvanced := false
 
-	// 6. Advance commit index.
 	if args.LeaderCommit > n.state.Volatile.CommitIndex {
 		lastIndex := n.log.LastIndex()
 		oldCommitIndex := n.state.Volatile.CommitIndex
@@ -584,7 +657,7 @@ func (n *RaftNode) AppendEntries(
 
 	n.mu.Unlock()
 
-	// 7. Apply committed entries outside the Raft lock.
+	// 8. Apply committed entries outside the Raft lock.
 	if commitAdvanced {
 		n.applyCommitted()
 	}
@@ -932,10 +1005,9 @@ func (n *RaftNode) heartbeat() {
 	n.mu.RUnlock()
 
 	for _, peerID := range peerIDs {
-		n.sendHeartbeat(peerID)
+		n.replicateTo(peerID)
 	}
 }
-
 func NewRaftNodeWithStorage(
 	id NodeID,
 	store storage.Storage,
@@ -1544,4 +1616,14 @@ func (n *RaftNode) sendInstallSnapshot(
 	)
 
 	return reply.Success
+}
+func cloneEntries(entries []LogEntry) []LogEntry {
+	cloned := make([]LogEntry, len(entries))
+
+	for i, entry := range entries {
+		cloned[i] = entry
+		cloned[i].Data = append([]byte(nil), entry.Data...)
+	}
+
+	return cloned
 }
