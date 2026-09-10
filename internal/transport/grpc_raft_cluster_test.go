@@ -268,3 +268,188 @@ func TestGRPCTransportThreeNodeRaftElection(t *testing.T) {
 		)
 	}
 }
+
+func TestGRPCTransportFollowerFailure(t *testing.T) {
+	nodes := []*raft.RaftNode{
+		raft.NewRaftNode("node-1"),
+		raft.NewRaftNode("node-2"),
+		raft.NewRaftNode("node-3"),
+	}
+
+	// Deterministic election ordering for the integration test.
+	nodes[0].SetElectionTimeout(10)
+	nodes[1].SetElectionTimeout(15)
+	nodes[2].SetElectionTimeout(20)
+
+	servers := make([]*testRaftServer, 0, len(nodes))
+
+	for _, node := range nodes {
+		servers = append(
+			servers,
+			startTestRaftServer(t, node),
+		)
+	}
+
+	transports := make([]*GRPCTransport, 0, len(nodes))
+
+	t.Cleanup(func() {
+		for _, transport := range transports {
+			if err := transport.Close(); err != nil {
+				t.Errorf("close transport: %v", err)
+			}
+		}
+	})
+
+	peerIDs := []raft.NodeID{
+		"node-1",
+		"node-2",
+		"node-3",
+	}
+
+	for i, node := range nodes {
+		transport := NewGRPCTransport()
+		transports = append(transports, transport)
+
+		for j, peerID := range peerIDs {
+			if i == j {
+				continue
+			}
+
+			if err := transport.AddPeer(
+				peerID,
+				servers[j].listener.Addr().String(),
+			); err != nil {
+				t.Fatalf(
+					"add peer %s to %s: %v",
+					peerID,
+					peerIDs[i],
+					err,
+				)
+			}
+		}
+
+		otherPeers := make(
+			[]raft.NodeID,
+			0,
+			len(peerIDs)-1,
+		)
+
+		for j, peerID := range peerIDs {
+			if i == j {
+				continue
+			}
+
+			otherPeers = append(otherPeers, peerID)
+		}
+
+		if err := node.SetTransport(
+			transport,
+			otherPeers,
+		); err != nil {
+			t.Fatalf(
+				"set transport for %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+	}
+
+	for i, node := range nodes {
+		if err := node.Start(); err != nil {
+			t.Fatalf(
+				"start %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+	}
+
+	t.Cleanup(func() {
+		for _, node := range nodes {
+			node.Stop()
+		}
+	})
+
+	// Wait for the initial leader.
+	var leaderIndex = -1
+
+	deadline := time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(deadline) {
+		leaders := 0
+		leaderIndex = -1
+
+		for i, node := range nodes {
+			if node.State().Role == raft.Leader {
+				leaders++
+				leaderIndex = i
+			}
+		}
+
+		if leaders == 1 {
+			break
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if leaderIndex == -1 {
+		t.Fatal("expected a leader to be elected")
+	}
+
+	// Select a follower to fail.
+	followerIndex := -1
+
+	for i := range nodes {
+		if i != leaderIndex {
+			followerIndex = i
+			break
+		}
+	}
+
+	if followerIndex == -1 {
+		t.Fatal("expected a follower")
+	}
+
+	leader := nodes[leaderIndex]
+	follower := nodes[followerIndex]
+
+	initialTerm := leader.State().Persistent.CurrentTerm
+
+	// Simulate follower/network failure by shutting down its gRPC server.
+	servers[followerIndex].close()
+
+	// The leader should remain leader because the other two nodes
+	// still form a majority.
+	deadline = time.Now().Add(3 * time.Second)
+
+	for time.Now().Before(deadline) {
+		state := leader.State()
+
+		if state.Role != raft.Leader {
+			t.Fatalf(
+				"leader %s lost leadership after follower %s failed",
+				leader.State().LeaderID,
+				follower.State().LeaderID,
+			)
+		}
+
+		if state.Persistent.CurrentTerm < initialTerm {
+			t.Fatalf(
+				"leader term moved backwards: initial=%d current=%d",
+				initialTerm,
+				state.Persistent.CurrentTerm,
+			)
+		}
+
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if leader.State().Role != raft.Leader {
+		t.Fatalf(
+			"expected node %s to remain leader after follower %s failure",
+			peerIDs[leaderIndex],
+			peerIDs[followerIndex],
+		)
+	}
+}
