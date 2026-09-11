@@ -106,7 +106,7 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 				Namespace: "raftiq",
 				Subsystem: "raft",
 				Name:      "log_size",
-				Help:      "Number of entries currently stored in the Raft log.",
+				Help:      "Number of entries currently retained in the Raft log.",
 			},
 			[]string{"node_id"},
 		),
