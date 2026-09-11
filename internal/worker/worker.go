@@ -60,6 +60,7 @@ type Worker struct {
 	interval time.Duration
 	raft     *raft.RaftNode
 	applier  *kv.Applier
+	metrics  WorkerMetrics
 }
 
 // Config controls worker execution-loop behavior.
@@ -67,24 +68,29 @@ type Config struct {
 	Interval time.Duration
 	Raft     *raft.RaftNode
 	Applier  *kv.Applier
+	Metrics  WorkerMetrics
 }
 
 // New creates a worker with a stable worker ID and execution handler.
-//
-// The worker source and execution interval are configured separately so the
-// basic Execute method remains useful without a scheduler/store dependency.
 func New(id string, handler JobHandler) (*Worker, error) {
 	if id == "" {
-		return nil, fmt.Errorf("%w: missing worker ID", ErrInvalidWorker)
+		return nil, fmt.Errorf(
+			"%w: missing worker ID",
+			ErrInvalidWorker,
+		)
 	}
 
 	if handler == nil {
-		return nil, fmt.Errorf("%w: missing job handler", ErrInvalidWorker)
+		return nil, fmt.Errorf(
+			"%w: missing job handler",
+			ErrInvalidWorker,
+		)
 	}
 
 	return &Worker{
 		id:      id,
 		handler: handler,
+		metrics: NoopWorkerMetrics{},
 	}, nil
 }
 
@@ -99,11 +105,17 @@ func (w *Worker) Execute(
 	job model.Job,
 ) error {
 	if job.ID == "" {
-		return fmt.Errorf("%w: missing job ID", ErrInvalidJob)
+		return fmt.Errorf(
+			"%w: missing job ID",
+			ErrInvalidJob,
+		)
 	}
 
 	if ctx == nil {
-		return fmt.Errorf("%w: nil execution context", ErrInvalidJob)
+		return fmt.Errorf(
+			"%w: nil execution context",
+			ErrInvalidJob,
+		)
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -111,22 +123,26 @@ func (w *Worker) Execute(
 	}
 
 	if err := w.handler.Execute(ctx, job); err != nil {
-		return fmt.Errorf("execute job %q: %w", job.ID, err)
+		return fmt.Errorf(
+			"execute job %q: %w",
+			job.ID,
+			err,
+		)
 	}
 
 	return nil
 }
 
 // ConfigureLoop attaches the job source and execution-loop configuration.
-//
-// This keeps construction backward-compatible with the simple Worker API
-// while allowing the execution loop to be introduced independently.
 func (w *Worker) ConfigureLoop(
 	source JobSource,
 	config Config,
 ) error {
 	if source == nil {
-		return fmt.Errorf("%w: missing job source", ErrInvalidWorker)
+		return fmt.Errorf(
+			"%w: missing job source",
+			ErrInvalidWorker,
+		)
 	}
 
 	if config.Interval <= 0 {
@@ -150,10 +166,16 @@ func (w *Worker) ConfigureLoop(
 		)
 	}
 
+	metrics := config.Metrics
+	if metrics == nil {
+		metrics = NoopWorkerMetrics{}
+	}
+
 	w.source = source
 	w.interval = config.Interval
 	w.raft = config.Raft
 	w.applier = config.Applier
+	w.metrics = metrics
 
 	return nil
 }
@@ -162,10 +184,13 @@ func (w *Worker) ConfigureLoop(
 //
 // The loop only executes jobs that are already assigned to this worker.
 // Durable state transitions, fencing validation, retries, and reclaim
-// semantics are intentionally handled by later scheduling layers.
+// semantics are handled by the scheduling/state-machine layers.
 func (w *Worker) Run(ctx context.Context) error {
 	if ctx == nil {
-		return fmt.Errorf("%w: nil execution context", ErrInvalidWorker)
+		return fmt.Errorf(
+			"%w: nil execution context",
+			ErrInvalidWorker,
+		)
 	}
 
 	if w.source == nil {
@@ -208,7 +233,9 @@ func (w *Worker) Run(ctx context.Context) error {
 // is committed through Raft before the handler executes. The committed
 // RUNNING job returned by that transition is then passed to the handler and
 // reused for subsequent terminal transitions.
-func (w *Worker) executeAssignedJobs(ctx context.Context) error {
+func (w *Worker) executeAssignedJobs(
+	ctx context.Context,
+) error {
 	jobs := w.source.ListAssignedJobs(w.id)
 
 	for _, job := range jobs {
@@ -218,6 +245,7 @@ func (w *Worker) executeAssignedJobs(ctx context.Context) error {
 			job.FencingToken,
 			time.Now().UnixNano(),
 		) {
+			w.metrics.IncLeaseLosses()
 			continue
 		}
 
@@ -230,7 +258,12 @@ func (w *Worker) executeAssignedJobs(ctx context.Context) error {
 		)
 		if err != nil {
 			if errors.Is(err, kv.ErrJobOwnershipLost) ||
-				errors.Is(err, kv.ErrInvalidJobState) {
+				errors.Is(err, ErrOwnershipLost) {
+				w.metrics.IncLeaseLosses()
+				continue
+			}
+
+			if errors.Is(err, kv.ErrInvalidJobState) {
 				continue
 			}
 
@@ -239,12 +272,13 @@ func (w *Worker) executeAssignedJobs(ctx context.Context) error {
 				return err
 			}
 
+			w.metrics.IncJobExecutionFailures()
 			continue
 		}
 
-		err = w.Execute(ctx, runningJob)
+		executionErr := w.Execute(ctx, runningJob)
 
-		if err == nil {
+		if executionErr == nil {
 			_, transitionErr := w.transitionJob(
 				ctx,
 				runningJob,
@@ -256,22 +290,30 @@ func (w *Worker) executeAssignedJobs(ctx context.Context) error {
 			if errors.Is(
 				transitionErr,
 				kv.ErrJobOwnershipLost,
+			) || errors.Is(
+				transitionErr,
+				ErrOwnershipLost,
 			) {
+				w.metrics.IncLeaseLosses()
 				continue
 			}
 
-			if transitionErr != nil &&
-				(errors.Is(
+			if transitionErr != nil {
+				if errors.Is(
 					transitionErr,
 					context.Canceled,
-				) ||
-					errors.Is(
-						transitionErr,
-						context.DeadlineExceeded,
-					)) {
-				return transitionErr
+				) || errors.Is(
+					transitionErr,
+					context.DeadlineExceeded,
+				) {
+					return transitionErr
+				}
+
+				w.metrics.IncJobExecutionFailures()
+				continue
 			}
 
+			w.metrics.IncExecutedJobs()
 			continue
 		}
 
@@ -282,6 +324,17 @@ func (w *Worker) executeAssignedJobs(ctx context.Context) error {
 			model.JobRunning,
 			model.JobFailed,
 		)
+
+		if errors.Is(
+			transitionErr,
+			kv.ErrJobOwnershipLost,
+		) || errors.Is(
+			transitionErr,
+			ErrOwnershipLost,
+		) {
+			w.metrics.IncLeaseLosses()
+			continue
+		}
 
 		if transitionErr != nil &&
 			(errors.Is(
@@ -294,6 +347,8 @@ func (w *Worker) executeAssignedJobs(ctx context.Context) error {
 				)) {
 			return transitionErr
 		}
+
+		w.metrics.IncJobExecutionFailures()
 	}
 
 	return nil

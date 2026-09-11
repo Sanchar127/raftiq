@@ -674,3 +674,143 @@ func waitForJobState(
 		expected,
 	)
 }
+
+
+type recordingWorkerMetrics struct {
+	mu sync.Mutex
+
+	executedJobs         int
+	executionFailures    int
+	leaseLosses          int
+}
+
+func (m *recordingWorkerMetrics) IncExecutedJobs() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.executedJobs++
+}
+
+func (m *recordingWorkerMetrics) IncJobExecutionFailures() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.executionFailures++
+}
+
+func (m *recordingWorkerMetrics) IncLeaseLosses() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.leaseLosses++
+}
+
+func (m *recordingWorkerMetrics) Counts() (
+	executedJobs int,
+	executionFailures int,
+	leaseLosses int,
+) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.executedJobs, m.executionFailures, m.leaseLosses
+}
+
+func TestWorkerRunExecutesAssignedJobs(t *testing.T) {
+	node, store, applier := newTestRaftApplier(t)
+
+	job := claimTestJob(
+		t,
+		store,
+		"job-1",
+		"worker-1",
+	)
+
+	metrics := &recordingWorkerMetrics{}
+	executed := make(chan model.Job, 1)
+
+	handler := HandlerFunc(func(
+		ctx context.Context,
+		job model.Job,
+	) error {
+		executed <- job
+		return nil
+	})
+
+	worker, err := New("worker-1", handler)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := worker.ConfigureLoop(
+		store,
+		Config{
+			Interval: 10 * time.Millisecond,
+			Raft:     node,
+			Applier:  applier,
+			Metrics:  metrics,
+		},
+	); err != nil {
+		t.Fatalf("ConfigureLoop() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		_ = worker.Run(ctx)
+	}()
+
+	select {
+	case executedJob := <-executed:
+		if executedJob.ID != job.ID {
+			t.Fatalf(
+				"expected job ID %q, got %q",
+				job.ID,
+				executedJob.ID,
+			)
+		}
+
+		if executedJob.State != model.JobRunning {
+			t.Fatalf(
+				"handler received state %q, want %q",
+				executedJob.State,
+				model.JobRunning,
+			)
+		}
+
+	case <-time.After(time.Second):
+		t.Fatal("worker did not execute assigned job")
+	}
+
+	waitForJobState(
+		t,
+		store,
+		job.ID,
+		model.JobSucceeded,
+	)
+
+	executedJobs, executionFailures, leaseLosses :=
+		metrics.Counts()
+
+	if executedJobs != 1 {
+		t.Fatalf(
+			"executed jobs = %d, want 1",
+			executedJobs,
+		)
+	}
+
+	if executionFailures != 0 {
+		t.Fatalf(
+			"execution failures = %d, want 0",
+			executionFailures,
+		)
+	}
+
+	if leaseLosses != 0 {
+		t.Fatalf(
+			"lease losses = %d, want 0",
+			leaseLosses,
+		)
+	}
+}
