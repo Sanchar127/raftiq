@@ -71,17 +71,36 @@ func OpenWAL(path string) (*WALStorage, error) {
 	return storage, nil
 }
 
-func (s *WALStorage) SaveState(state model.PersistentState) (err error) {
+// SetMetrics replaces the storage metrics implementation.
+//
+// A nil implementation disables metrics by restoring the no-op implementation.
+func (s *WALStorage) SetMetrics(metrics StorageMetrics) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if metrics == nil {
+		s.metrics = NoopStorageMetrics{}
+		return
+	}
+
+	s.metrics = metrics
+}
+
+func (s *WALStorage) SaveState(
+	state model.PersistentState,
+) (err error) {
 	start := time.Now()
 
+	var metrics StorageMetrics
+
 	defer func() {
-		s.metrics.IncOperation(StorageOperationSaveState)
+		metrics.IncOperation(StorageOperationSaveState)
 
 		if err != nil {
-			s.metrics.IncOperationError(StorageOperationSaveState)
+			metrics.IncOperationError(StorageOperationSaveState)
 		}
 
-		s.metrics.ObserveOperationDuration(
+		metrics.ObserveOperationDuration(
 			StorageOperationSaveState,
 			time.Since(start),
 		)
@@ -89,6 +108,11 @@ func (s *WALStorage) SaveState(state model.PersistentState) (err error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	metrics = s.metrics
+	if metrics == nil {
+		metrics = NoopStorageMetrics{}
+	}
 
 	if err = s.ensureOpen(); err != nil {
 		return err
@@ -108,17 +132,22 @@ func (s *WALStorage) SaveState(state model.PersistentState) (err error) {
 	return nil
 }
 
-func (s *WALStorage) LoadState() (state model.PersistentState, err error) {
+func (s *WALStorage) LoadState() (
+	state model.PersistentState,
+	err error,
+) {
 	start := time.Now()
 
+	var metrics StorageMetrics
+
 	defer func() {
-		s.metrics.IncOperation(StorageOperationLoadState)
+		metrics.IncOperation(StorageOperationLoadState)
 
 		if err != nil {
-			s.metrics.IncOperationError(StorageOperationLoadState)
+			metrics.IncOperationError(StorageOperationLoadState)
 		}
 
-		s.metrics.ObserveOperationDuration(
+		metrics.ObserveOperationDuration(
 			StorageOperationLoadState,
 			time.Since(start),
 		)
@@ -126,6 +155,11 @@ func (s *WALStorage) LoadState() (state model.PersistentState, err error) {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	metrics = s.metrics
+	if metrics == nil {
+		metrics = NoopStorageMetrics{}
+	}
 
 	if err = s.ensureOpenRead(); err != nil {
 		return model.PersistentState{}, err
@@ -144,14 +178,16 @@ func (s *WALStorage) AppendEntries(
 ) (err error) {
 	start := time.Now()
 
+	var metrics StorageMetrics
+
 	defer func() {
-		s.metrics.IncOperation(StorageOperationAppendEntries)
+		metrics.IncOperation(StorageOperationAppendEntries)
 
 		if err != nil {
-			s.metrics.IncOperationError(StorageOperationAppendEntries)
+			metrics.IncOperationError(StorageOperationAppendEntries)
 		}
 
-		s.metrics.ObserveOperationDuration(
+		metrics.ObserveOperationDuration(
 			StorageOperationAppendEntries,
 			time.Since(start),
 		)
@@ -159,6 +195,11 @@ func (s *WALStorage) AppendEntries(
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	metrics = s.metrics
+	if metrics == nil {
+		metrics = NoopStorageMetrics{}
+	}
 
 	if err = s.ensureOpen(); err != nil {
 		return err
@@ -207,14 +248,16 @@ func (s *WALStorage) ReplaceSuffix(
 ) (err error) {
 	start := time.Now()
 
+	var metrics StorageMetrics
+
 	defer func() {
-		s.metrics.IncOperation(StorageOperationReplaceSuffix)
+		metrics.IncOperation(StorageOperationReplaceSuffix)
 
 		if err != nil {
-			s.metrics.IncOperationError(StorageOperationReplaceSuffix)
+			metrics.IncOperationError(StorageOperationReplaceSuffix)
 		}
 
-		s.metrics.ObserveOperationDuration(
+		metrics.ObserveOperationDuration(
 			StorageOperationReplaceSuffix,
 			time.Since(start),
 		)
@@ -222,6 +265,11 @@ func (s *WALStorage) ReplaceSuffix(
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	metrics = s.metrics
+	if metrics == nil {
+		metrics = NoopStorageMetrics{}
+	}
 
 	if err = s.ensureOpen(); err != nil {
 		return err
@@ -235,7 +283,10 @@ func (s *WALStorage) ReplaceSuffix(
 	}
 
 	if err = validateEntries(entries); err != nil {
-		return fmt.Errorf("validate replacement entries: %w", err)
+		return fmt.Errorf(
+			"validate replacement entries: %w",
+			err,
+		)
 	}
 
 	if len(entries) > 0 {
@@ -251,31 +302,44 @@ func (s *WALStorage) ReplaceSuffix(
 
 	record, err := encodeReplaceSuffixRecord(from, entries)
 	if err != nil {
-		return fmt.Errorf("encode suffix replacement: %w", err)
+		return fmt.Errorf(
+			"encode suffix replacement: %w",
+			err,
+		)
 	}
 
 	if err = writeFull(s.file, record); err != nil {
-		return fmt.Errorf("write suffix replacement record: %w", err)
+		return fmt.Errorf(
+			"write suffix replacement record: %w",
+			err,
+		)
 	}
 
-	s.entries = replaceSuffixCopy(s.entries, from, entries)
+	s.entries = replaceSuffixCopy(
+		s.entries,
+		from,
+		entries,
+	)
 
 	return nil
 }
+
 func (s *WALStorage) LoadEntries() (
 	entries []model.LogEntry,
 	err error,
 ) {
 	start := time.Now()
 
+	var metrics StorageMetrics
+
 	defer func() {
-		s.metrics.IncOperation(StorageOperationLoadEntries)
+		metrics.IncOperation(StorageOperationLoadEntries)
 
 		if err != nil {
-			s.metrics.IncOperationError(StorageOperationLoadEntries)
+			metrics.IncOperationError(StorageOperationLoadEntries)
 		}
 
-		s.metrics.ObserveOperationDuration(
+		metrics.ObserveOperationDuration(
 			StorageOperationLoadEntries,
 			time.Since(start),
 		)
@@ -283,6 +347,11 @@ func (s *WALStorage) LoadEntries() (
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	metrics = s.metrics
+	if metrics == nil {
+		metrics = NoopStorageMetrics{}
+	}
 
 	if err = s.ensureOpenRead(); err != nil {
 		return nil, err
@@ -300,14 +369,16 @@ func (s *WALStorage) SaveSnapshot(
 ) (err error) {
 	start := time.Now()
 
+	var metrics StorageMetrics
+
 	defer func() {
-		s.metrics.IncOperation(StorageOperationSaveSnapshot)
+		metrics.IncOperation(StorageOperationSaveSnapshot)
 
 		if err != nil {
-			s.metrics.IncOperationError(StorageOperationSaveSnapshot)
+			metrics.IncOperationError(StorageOperationSaveSnapshot)
 		}
 
-		s.metrics.ObserveOperationDuration(
+		metrics.ObserveOperationDuration(
 			StorageOperationSaveSnapshot,
 			time.Since(start),
 		)
@@ -315,6 +386,11 @@ func (s *WALStorage) SaveSnapshot(
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	metrics = s.metrics
+	if metrics == nil {
+		metrics = NoopStorageMetrics{}
+	}
 
 	if err = s.ensureOpen(); err != nil {
 		return err
@@ -333,7 +409,10 @@ func (s *WALStorage) SaveSnapshot(
 	}
 
 	if err = writeFull(s.file, record); err != nil {
-		return fmt.Errorf("write snapshot record: %w", err)
+		return fmt.Errorf(
+			"write snapshot record: %w",
+			err,
+		)
 	}
 
 	s.snapshot = &snapshot
@@ -347,14 +426,16 @@ func (s *WALStorage) LoadSnapshot() (
 ) {
 	start := time.Now()
 
+	var metrics StorageMetrics
+
 	defer func() {
-		s.metrics.IncOperation(StorageOperationLoadSnapshot)
+		metrics.IncOperation(StorageOperationLoadSnapshot)
 
 		if err != nil {
-			s.metrics.IncOperationError(StorageOperationLoadSnapshot)
+			metrics.IncOperationError(StorageOperationLoadSnapshot)
 		}
 
-		s.metrics.ObserveOperationDuration(
+		metrics.ObserveOperationDuration(
 			StorageOperationLoadSnapshot,
 			time.Since(start),
 		)
@@ -362,6 +443,11 @@ func (s *WALStorage) LoadSnapshot() (
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	metrics = s.metrics
+	if metrics == nil {
+		metrics = NoopStorageMetrics{}
+	}
 
 	if err = s.ensureOpenRead(); err != nil {
 		return model.Snapshot{}, err
@@ -383,18 +469,25 @@ func (s *WALStorage) LoadSnapshot() (
 func (s *WALStorage) Sync() (err error) {
 	start := time.Now()
 
+	var metrics StorageMetrics
+
 	defer func() {
-		s.metrics.IncSync()
+		metrics.IncSync()
 
 		if err != nil {
-			s.metrics.IncSyncError()
+			metrics.IncSyncError()
 		}
 
-		s.metrics.ObserveSyncDuration(time.Since(start))
+		metrics.ObserveSyncDuration(time.Since(start))
 	}()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	metrics = s.metrics
+	if metrics == nil {
+		metrics = NoopStorageMetrics{}
+	}
 
 	if err = s.ensureOpen(); err != nil {
 		return err
@@ -497,15 +590,24 @@ func (s *WALStorage) recover() error {
 			}
 
 			if err := validateRecoveredAppend(s.entries, entries); err != nil {
-				return fmt.Errorf("validate recovered entries: %w", err)
+				return fmt.Errorf(
+					"validate recovered entries: %w",
+					err,
+				)
 			}
 
-			s.entries = appendEntriesCopy(s.entries, entries)
+			s.entries = appendEntriesCopy(
+				s.entries,
+				entries,
+			)
 
 		case recordSnapshot:
 			snapshot, err := decodeSnapshotPayload(payload)
 			if err != nil {
-				return fmt.Errorf("decode snapshot: %w", err)
+				return fmt.Errorf(
+					"decode snapshot: %w",
+					err,
+				)
 			}
 
 			snapshot.Data = cloneBytes(snapshot.Data)
@@ -527,7 +629,8 @@ func (s *WALStorage) recover() error {
 				)
 			}
 
-			if len(entries) > 0 && entries[0].Index != from {
+			if len(entries) > 0 &&
+				entries[0].Index != from {
 				return fmt.Errorf(
 					"%w: replacement starts at %d, want %d",
 					ErrInvalidLog,
@@ -558,13 +661,18 @@ func (s *WALStorage) recover() error {
 	}
 
 	if _, err := s.file.Seek(0, io.SeekEnd); err != nil {
-		return fmt.Errorf("seek WAL end: %w", err)
+		return fmt.Errorf(
+			"seek WAL end: %w",
+			err,
+		)
 	}
 
 	return nil
 }
 
-func encodeStateRecord(state model.PersistentState) ([]byte, error) {
+func encodeStateRecord(
+	state model.PersistentState,
+) ([]byte, error) {
 	var payload bytes.Buffer
 
 	if err := binary.Write(
@@ -572,7 +680,10 @@ func encodeStateRecord(state model.PersistentState) ([]byte, error) {
 		binary.BigEndian,
 		uint64(state.CurrentTerm),
 	); err != nil {
-		return nil, fmt.Errorf("encode current term: %w", err)
+		return nil, fmt.Errorf(
+			"encode current term: %w",
+			err,
+		)
 	}
 
 	votedFor := []byte(state.VotedFor)
@@ -589,17 +700,28 @@ func encodeStateRecord(state model.PersistentState) ([]byte, error) {
 		binary.BigEndian,
 		uint32(len(votedFor)),
 	); err != nil {
-		return nil, fmt.Errorf("encode voted-for length: %w", err)
+		return nil, fmt.Errorf(
+			"encode voted-for length: %w",
+			err,
+		)
 	}
 
 	if _, err := payload.Write(votedFor); err != nil {
-		return nil, fmt.Errorf("encode voted-for: %w", err)
+		return nil, fmt.Errorf(
+			"encode voted-for: %w",
+			err,
+		)
 	}
 
-	return encodeRecord(recordState, payload.Bytes())
+	return encodeRecord(
+		recordState,
+		payload.Bytes(),
+	)
 }
 
-func encodeEntriesRecord(entries []model.LogEntry) ([]byte, error) {
+func encodeEntriesRecord(
+	entries []model.LogEntry,
+) ([]byte, error) {
 	var payload bytes.Buffer
 
 	if uint64(len(entries)) > uint64(^uint32(0)) {
@@ -614,11 +736,17 @@ func encodeEntriesRecord(entries []model.LogEntry) ([]byte, error) {
 		binary.BigEndian,
 		uint32(len(entries)),
 	); err != nil {
-		return nil, fmt.Errorf("encode entry count: %w", err)
+		return nil, fmt.Errorf(
+			"encode entry count: %w",
+			err,
+		)
 	}
 
 	for i, entry := range entries {
-		if err := encodeEntry(&payload, entry); err != nil {
+		if err := encodeEntry(
+			&payload,
+			entry,
+		); err != nil {
 			return nil, fmt.Errorf(
 				"encode entry %d: %w",
 				i,
@@ -627,7 +755,10 @@ func encodeEntriesRecord(entries []model.LogEntry) ([]byte, error) {
 		}
 	}
 
-	return encodeRecord(recordEntries, payload.Bytes())
+	return encodeRecord(
+		recordEntries,
+		payload.Bytes(),
+	)
 }
 
 func encodeReplaceSuffixRecord(
@@ -666,7 +797,10 @@ func encodeReplaceSuffixRecord(
 	}
 
 	for i, entry := range entries {
-		if err := encodeEntry(&payload, entry); err != nil {
+		if err := encodeEntry(
+			&payload,
+			entry,
+		); err != nil {
 			return nil, fmt.Errorf(
 				"encode replacement entry %d: %w",
 				i,
@@ -675,7 +809,10 @@ func encodeReplaceSuffixRecord(
 		}
 	}
 
-	return encodeRecord(recordReplaceSuffix, payload.Bytes())
+	return encodeRecord(
+		recordReplaceSuffix,
+		payload.Bytes(),
+	)
 }
 
 func encodeEntry(
@@ -687,7 +824,10 @@ func encodeEntry(
 		binary.BigEndian,
 		uint64(entry.Index),
 	); err != nil {
-		return fmt.Errorf("encode entry index: %w", err)
+		return fmt.Errorf(
+			"encode entry index: %w",
+			err,
+		)
 	}
 
 	if err := binary.Write(
@@ -695,7 +835,10 @@ func encodeEntry(
 		binary.BigEndian,
 		uint64(entry.Term),
 	); err != nil {
-		return fmt.Errorf("encode entry term: %w", err)
+		return fmt.Errorf(
+			"encode entry term: %w",
+			err,
+		)
 	}
 
 	if uint64(len(entry.Data)) > uint64(^uint32(0)) {
@@ -710,17 +853,26 @@ func encodeEntry(
 		binary.BigEndian,
 		uint32(len(entry.Data)),
 	); err != nil {
-		return fmt.Errorf("encode entry data length: %w", err)
+		return fmt.Errorf(
+			"encode entry data length: %w",
+			err,
+		)
 	}
 
 	if _, err := payload.Write(entry.Data); err != nil {
-		return fmt.Errorf("encode entry data: %w", err)
+		return fmt.Errorf(
+			"encode entry data: %w",
+			err,
+		)
 	}
 
 	return nil
 }
 
-func encodeRecord(recordType byte, payload []byte) ([]byte, error) {
+func encodeRecord(
+	recordType byte,
+	payload []byte,
+) ([]byte, error) {
 	if uint64(len(payload)) > uint64(maxRecordPayloadSize) {
 		return nil, fmt.Errorf(
 			"record payload too large: %d bytes, maximum %d",
@@ -732,7 +884,10 @@ func encodeRecord(recordType byte, payload []byte) ([]byte, error) {
 	var record bytes.Buffer
 
 	if err := record.WriteByte(recordType); err != nil {
-		return nil, fmt.Errorf("encode record type: %w", err)
+		return nil, fmt.Errorf(
+			"encode record type: %w",
+			err,
+		)
 	}
 
 	if err := binary.Write(
@@ -740,27 +895,40 @@ func encodeRecord(recordType byte, payload []byte) ([]byte, error) {
 		binary.BigEndian,
 		uint32(len(payload)),
 	); err != nil {
-		return nil, fmt.Errorf("encode record length: %w", err)
+		return nil, fmt.Errorf(
+			"encode record length: %w",
+			err,
+		)
 	}
 
 	if _, err := record.Write(payload); err != nil {
-		return nil, fmt.Errorf("encode record payload: %w", err)
+		return nil, fmt.Errorf(
+			"encode record payload: %w",
+			err,
+		)
 	}
 
-	checksum := crc32.ChecksumIEEE(record.Bytes())
+	checksum := crc32.ChecksumIEEE(
+		record.Bytes(),
+	)
 
 	if err := binary.Write(
 		&record,
 		binary.BigEndian,
 		checksum,
 	); err != nil {
-		return nil, fmt.Errorf("encode record checksum: %w", err)
+		return nil, fmt.Errorf(
+			"encode record checksum: %w",
+			err,
+		)
 	}
 
 	return record.Bytes(), nil
 }
 
-func decodeRecord(reader io.Reader) (byte, []byte, error) {
+func decodeRecord(
+	reader io.Reader,
+) (byte, []byte, error) {
 	var recordType byte
 
 	if err := binary.Read(
@@ -789,9 +957,15 @@ func decodeRecord(reader io.Reader) (byte, []byte, error) {
 		)
 	}
 
-	payload := make([]byte, payloadLength)
+	payload := make(
+		[]byte,
+		payloadLength,
+	)
 
-	if _, err := io.ReadFull(reader, payload); err != nil {
+	if _, err := io.ReadFull(
+		reader,
+		payload,
+	); err != nil {
 		return 0, nil, err
 	}
 
@@ -807,7 +981,9 @@ func decodeRecord(reader io.Reader) (byte, []byte, error) {
 
 	var headerAndPayload bytes.Buffer
 
-	if err := headerAndPayload.WriteByte(recordType); err != nil {
+	if err := headerAndPayload.WriteByte(
+		recordType,
+	); err != nil {
 		return 0, nil, err
 	}
 
@@ -819,7 +995,9 @@ func decodeRecord(reader io.Reader) (byte, []byte, error) {
 		return 0, nil, err
 	}
 
-	if _, err := headerAndPayload.Write(payload); err != nil {
+	if _, err := headerAndPayload.Write(
+		payload,
+	); err != nil {
 		return 0, nil, err
 	}
 
@@ -877,9 +1055,15 @@ func decodeStatePayload(
 		)
 	}
 
-	votedFor := make([]byte, votedForLength)
+	votedFor := make(
+		[]byte,
+		votedForLength,
+	)
 
-	if _, err := io.ReadFull(reader, votedFor); err != nil {
+	if _, err := io.ReadFull(
+		reader,
+		votedFor,
+	); err != nil {
 		return model.PersistentState{}, fmt.Errorf(
 			"decode voted-for: %w",
 			err,
@@ -1016,9 +1200,15 @@ func decodeEntry(
 		)
 	}
 
-	data := make([]byte, dataLength)
+	data := make(
+		[]byte,
+		dataLength,
+	)
 
-	if _, err := io.ReadFull(reader, data); err != nil {
+	if _, err := io.ReadFull(
+		reader,
+		data,
+	); err != nil {
 		return model.LogEntry{}, fmt.Errorf(
 			"decode entry data: %w",
 			err,
@@ -1108,7 +1298,10 @@ func encodeSnapshotPayload(
 ) ([]byte, error) {
 	data, err := json.Marshal(snapshot)
 	if err != nil {
-		return nil, fmt.Errorf("encode snapshot: %w", err)
+		return nil, fmt.Errorf(
+			"encode snapshot: %w",
+			err,
+		)
 	}
 
 	if uint64(len(data)) > uint64(maxRecordPayloadSize) {
@@ -1127,7 +1320,10 @@ func decodeSnapshotPayload(
 ) (model.Snapshot, error) {
 	var snapshot model.Snapshot
 
-	if err := json.Unmarshal(payload, &snapshot); err != nil {
+	if err := json.Unmarshal(
+		payload,
+		&snapshot,
+	); err != nil {
 		return model.Snapshot{}, fmt.Errorf(
 			"decode snapshot payload: %w",
 			err,
@@ -1139,7 +1335,9 @@ func decodeSnapshotPayload(
 	return snapshot, nil
 }
 
-func validateEntries(entries []model.LogEntry) error {
+func validateEntries(
+	entries []model.LogEntry,
+) error {
 	for i, entry := range entries {
 		if entry.Index == 0 {
 			return fmt.Errorf(
@@ -1166,7 +1364,9 @@ func validateEntries(entries []model.LogEntry) error {
 	return nil
 }
 
-func validateLog(entries []model.LogEntry) error {
+func validateLog(
+	entries []model.LogEntry,
+) error {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -1204,7 +1404,10 @@ func validateRecoveredAppend(
 		return nil
 	}
 
-	return validateAppend(existing, additions)
+	return validateAppend(
+		existing,
+		additions,
+	)
 }
 
 func replaceSuffixCopy(
@@ -1227,8 +1430,15 @@ func replaceSuffixCopy(
 		cut+len(replacement),
 	)
 
-	result = append(result, existing[:cut]...)
-	result = appendEntriesCopy(result, replacement)
+	result = append(
+		result,
+		existing[:cut]...,
+	)
+
+	result = appendEntriesCopy(
+		result,
+		replacement,
+	)
 
 	return result
 }
@@ -1246,12 +1456,17 @@ func appendEntriesCopy(
 	return dst
 }
 
-func cloneEntries(entries []model.LogEntry) []model.LogEntry {
+func cloneEntries(
+	entries []model.LogEntry,
+) []model.LogEntry {
 	if len(entries) == 0 {
 		return make([]model.LogEntry, 0)
 	}
 
-	result := make([]model.LogEntry, len(entries))
+	result := make(
+		[]model.LogEntry,
+		len(entries),
+	)
 
 	for i, entry := range entries {
 		result[i] = entry
@@ -1261,15 +1476,23 @@ func cloneEntries(entries []model.LogEntry) []model.LogEntry {
 	return result
 }
 
-func cloneBytes(data []byte) []byte {
+func cloneBytes(
+	data []byte,
+) []byte {
 	if data == nil {
 		return nil
 	}
 
-	return append([]byte(nil), data...)
+	return append(
+		[]byte(nil),
+		data...,
+	)
 }
 
-func writeFull(file *os.File, data []byte) error {
+func writeFull(
+	file *os.File,
+	data []byte,
+) error {
 	if file == nil {
 		return ErrClosedStorage
 	}

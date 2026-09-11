@@ -35,9 +35,10 @@ type Metrics struct {
 	// Storage.
 	StorageOperationsTotal   *prometheus.CounterVec
 	StorageOperationErrors   *prometheus.CounterVec
+	StorageOperationDuration *prometheus.HistogramVec
 	StorageSyncTotal         *prometheus.CounterVec
 	StorageSyncErrors        *prometheus.CounterVec
-	StorageOperationDuration *prometheus.HistogramVec
+	StorageSyncDuration      *prometheus.HistogramVec
 
 	// KV.
 	KVOperationsTotal *prometheus.CounterVec
@@ -53,6 +54,10 @@ type Metrics struct {
 
 func NewMetrics(registerer prometheus.Registerer) *Metrics {
 	metrics := &Metrics{
+		// -----------------------------------------------------------------
+		// Raft state.
+		// -----------------------------------------------------------------
+
 		CurrentTerm: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Namespace: "raftiq",
@@ -65,7 +70,8 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 
 		Role: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Namespace: "raft",
+				Namespace: "raftiq",
+				Subsystem: "raft",
 				Name:      "role",
 				Help:      "Current Raft role. Exactly one role is set to 1.",
 			},
@@ -111,6 +117,10 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 			},
 			[]string{"node_id"},
 		),
+
+		// -----------------------------------------------------------------
+		// Raft elections and leadership.
+		// -----------------------------------------------------------------
 
 		ElectionsTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -162,6 +172,10 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 			[]string{"node_id"},
 		),
 
+		// -----------------------------------------------------------------
+		// Raft replication.
+		// -----------------------------------------------------------------
+
 		AppendEntriesTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "raftiq",
@@ -192,6 +206,10 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 			[]string{"node_id", "peer_id"},
 		),
 
+		// -----------------------------------------------------------------
+		// Snapshots.
+		// -----------------------------------------------------------------
+
 		SnapshotsCreatedTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "raftiq",
@@ -211,6 +229,10 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 			},
 			[]string{"node_id"},
 		),
+
+		// -----------------------------------------------------------------
+		// RPC transport.
+		// -----------------------------------------------------------------
 
 		RPCRequestsTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -242,6 +264,10 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 			[]string{"method"},
 		),
 
+		// -----------------------------------------------------------------
+		// Storage.
+		// -----------------------------------------------------------------
+
 		StorageOperationsTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "raftiq",
@@ -262,6 +288,16 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 			[]string{"operation"},
 		),
 
+		StorageOperationDuration: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: "raftiq",
+				Subsystem: "storage",
+				Name:      "operation_duration_seconds",
+				Help:      "Storage operation duration.",
+			},
+			[]string{"operation"},
+		),
+
 		StorageSyncTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "raftiq",
@@ -277,20 +313,24 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 				Namespace: "raftiq",
 				Subsystem: "storage",
 				Name:      "sync_errors_total",
-				Help:      "Total number of storage synchronization failures.",
+				Help:      "Total number of failed storage synchronization operations.",
 			},
 			[]string{"node_id"},
 		),
 
-		StorageOperationDuration: prometheus.NewHistogramVec(
+		StorageSyncDuration: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
 				Namespace: "raftiq",
 				Subsystem: "storage",
-				Name:      "operation_duration_seconds",
-				Help:      "Storage operation duration.",
+				Name:      "sync_duration_seconds",
+				Help:      "Time spent syncing storage to stable storage.",
 			},
-			[]string{"operation"},
+			[]string{"node_id"},
 		),
+
+		// -----------------------------------------------------------------
+		// KV.
+		// -----------------------------------------------------------------
 
 		KVOperationsTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -311,6 +351,10 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 			},
 			[]string{"operation"},
 		),
+
+		// -----------------------------------------------------------------
+		// Scheduler.
+		// -----------------------------------------------------------------
 
 		ScheduledJobsTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -364,6 +408,7 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 	}
 
 	registerer.MustRegister(
+		// Raft state.
 		metrics.CurrentTerm,
 		metrics.Role,
 		metrics.CommitIndex,
@@ -371,32 +416,40 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 		metrics.LastLogIndex,
 		metrics.LogSize,
 
+		// Raft elections and leadership.
 		metrics.ElectionsTotal,
 		metrics.ElectionDuration,
 		metrics.LeaderChangesTotal,
 		metrics.VoteRequestsTotal,
 		metrics.VotesGrantedTotal,
 
+		// Raft replication.
 		metrics.AppendEntriesTotal,
 		metrics.AppendEntriesFailures,
 		metrics.AppendEntriesDuration,
 
+		// Snapshots.
 		metrics.SnapshotsCreatedTotal,
 		metrics.SnapshotsInstalledTotal,
 
+		// RPC transport.
 		metrics.RPCRequestsTotal,
 		metrics.RPCErrorsTotal,
 		metrics.RPCDuration,
 
+		// Storage.
 		metrics.StorageOperationsTotal,
 		metrics.StorageOperationErrors,
+		metrics.StorageOperationDuration,
 		metrics.StorageSyncTotal,
 		metrics.StorageSyncErrors,
-		metrics.StorageOperationDuration,
+		metrics.StorageSyncDuration,
 
+		// KV.
 		metrics.KVOperationsTotal,
 		metrics.KVOperationErrors,
 
+		// Scheduler.
 		metrics.ScheduledJobsTotal,
 		metrics.ExecutedJobsTotal,
 		metrics.JobExecutionFailures,
