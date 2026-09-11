@@ -29,6 +29,8 @@ type RaftNode struct {
 	transport Transport
 	peerIDs   []NodeID
 
+	metrics Metrics
+
 	applyCh chan LogEntry
 
 	storage storage.Storage
@@ -1073,6 +1075,7 @@ func NewRaftNodeWithStorage(
 		transport: NewLocalTransport(),
 		peerIDs:   make([]NodeID, 0),
 		applyCh:   make(chan LogEntry, 100),
+		metrics:   NoopMetrics{},
 
 		state: State{
 			Persistent: persistentState,
@@ -1102,7 +1105,6 @@ func NewRaftNodeWithStorage(
 		rpcTimeout:       DefaultRPCTimeout,
 	}, nil
 }
-
 func (n *RaftNode) Storage() storage.Storage {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
@@ -1626,4 +1628,13 @@ func cloneEntries(entries []LogEntry) []LogEntry {
 	}
 
 	return cloned
+}
+func (n *RaftNode) SetMetrics(metrics Metrics) {
+	if metrics == nil {
+		metrics = NoopMetrics{}
+	}
+
+	n.mu.Lock()
+	n.metrics = metrics
+	n.mu.Unlock()
 }
