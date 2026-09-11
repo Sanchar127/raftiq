@@ -1,0 +1,686 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Current Term",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "max(raftiq_raft_current_term)",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Leaders",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum(raftiq_raft_role{role=\"leader\"})",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Elections / 5m",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(raftiq_raft_elections_total[5m]))",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Leader Changes / 5m",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(raftiq_raft_leader_changes_total[5m]))",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Raft Commit / Apply Progress",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "raftiq_raft_commit_index",
+          "legendFormat": "commit {{node_id}}",
+          "refId": "A"
+        },
+        {
+          "expr": "raftiq_raft_last_applied",
+          "legendFormat": "applied {{node_id}}",
+          "refId": "B"
+        },
+        {
+          "expr": "raftiq_raft_last_log_index",
+          "legendFormat": "log {{node_id}}",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Raft Log Lag",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "raftiq_raft_last_log_index - raftiq_raft_commit_index",
+          "legendFormat": "{{node_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Raft Role by Node",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "targets": [
+        {
+          "expr": "raftiq_raft_role",
+          "legendFormat": "{{node_id}} - {{role}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Elections",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "targets": [
+        {
+          "expr": "sum by (node_id) (rate(raftiq_raft_elections_total[5m]))",
+          "legendFormat": "{{node_id}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (node_id) (rate(raftiq_raft_leader_changes_total[5m]))",
+          "legendFormat": "leader changes {{node_id}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Election Duration p95",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(raftiq_raft_election_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "AppendEntries Rate",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "targets": [
+        {
+          "expr": "sum by (node_id, peer_id, result) (rate(raftiq_raft_append_entries_total[5m]))",
+          "legendFormat": "{{node_id}} → {{peer_id}} {{result}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "AppendEntries Failure Rate",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "targets": [
+        {
+          "expr": "sum by (node_id, peer_id) (rate(raftiq_raft_append_entries_failures_total[5m]))",
+          "legendFormat": "{{node_id}} → {{peer_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "AppendEntries p95 Latency",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(raftiq_raft_append_entries_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "RPC Request Rate",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "targets": [
+        {
+          "expr": "sum by (method) (rate(raftiq_rpc_requests_total[5m]))",
+          "legendFormat": "{{method}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "RPC Error Rate",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "targets": [
+        {
+          "expr": "sum by (method) (rate(raftiq_rpc_errors_total[5m]))",
+          "legendFormat": "{{method}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "RPC Latency p95",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, method) (rate(raftiq_rpc_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{method}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Storage Operation Rate",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 44
+      },
+      "targets": [
+        {
+          "expr": "sum by (operation) (rate(raftiq_storage_operations_total[5m]))",
+          "legendFormat": "{{operation}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Storage Errors",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 52
+      },
+      "targets": [
+        {
+          "expr": "sum by (operation) (rate(raftiq_storage_operation_errors_total[5m]))",
+          "legendFormat": "{{operation}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(raftiq_storage_sync_errors_total[5m]))",
+          "legendFormat": "sync errors",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Storage Operation p95",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 52
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, operation) (rate(raftiq_storage_operation_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{operation}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "KV Operation Rate",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 60
+      },
+      "targets": [
+        {
+          "expr": "sum by (operation) (rate(raftiq_kv_operations_total[5m]))",
+          "legendFormat": "{{operation}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "KV Error Rate",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 60
+      },
+      "targets": [
+        {
+          "expr": "sum by (operation) (rate(raftiq_kv_operation_errors_total[5m]))",
+          "legendFormat": "{{operation}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Scheduler Jobs",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 68
+      },
+      "targets": [
+        {
+          "expr": "sum by (node_id) (rate(raftiq_scheduler_scheduled_jobs_total[5m]))",
+          "legendFormat": "scheduled {{node_id}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (node_id) (rate(raftiq_scheduler_executed_jobs_total[5m]))",
+          "legendFormat": "executed {{node_id}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (node_id) (rate(raftiq_scheduler_job_execution_failures_total[5m]))",
+          "legendFormat": "failed {{node_id}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Scheduler Leases",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 68
+      },
+      "targets": [
+        {
+          "expr": "sum by (node_id) (rate(raftiq_scheduler_lease_acquisitions_total[5m]))",
+          "legendFormat": "acquired {{node_id}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (node_id) (rate(raftiq_scheduler_lease_losses_total[5m]))",
+          "legendFormat": "lost {{node_id}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Snapshots Created",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 76
+      },
+      "targets": [
+        {
+          "expr": "sum(raftiq_raft_snapshots_created_total)",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Snapshots Installed",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 76
+      },
+      "targets": [
+        {
+          "expr": "sum(raftiq_raft_snapshots_installed_total)",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Storage Sync p95",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "raftiq-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 76
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(raftiq_storage_sync_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": [
+    "raftiq",
+    "raft",
+    "distributed-systems"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "RaftIQ Overview",
+  "uid": "raftiq-overview",
+  "version": 1
+}
