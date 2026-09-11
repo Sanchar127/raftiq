@@ -26,10 +26,10 @@ type FencedValue struct {
 }
 
 type snapshotEnvelope struct {
-	Version   uint64            `json:"version"`
-	Data      map[string][]byte `json:"data"`
+	Version   uint64               `json:"version"`
+	Data      map[string][]byte    `json:"data"`
 	Locks     map[string]lock.Lock `json:"locks"`
-	NextToken uint64            `json:"next_token"`
+	NextToken uint64               `json:"next_token"`
 }
 
 type snapshotState struct {
