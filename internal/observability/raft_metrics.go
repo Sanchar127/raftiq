@@ -14,6 +14,10 @@ type RaftMetrics struct {
 
 // NewRaftMetrics creates a Prometheus-backed Raft metrics adapter.
 func NewRaftMetrics(nodeID string, metrics *Metrics) *RaftMetrics {
+	if nodeID == "" {
+		panic("nodeID must not be empty")
+	}
+
 	if metrics == nil {
 		panic("metrics must not be nil")
 	}

@@ -487,3 +487,28 @@ func assertHistogramObserved(
 		labelValue,
 	)
 }
+
+func TestNewRaftMetricsValidation(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	metrics := NewMetrics(registry)
+
+	t.Run("empty node ID", func(t *testing.T) {
+		require.PanicsWithValue(
+			t,
+			"nodeID must not be empty",
+			func() {
+				NewRaftMetrics("", metrics)
+			},
+		)
+	})
+
+	t.Run("nil metrics", func(t *testing.T) {
+		require.PanicsWithValue(
+			t,
+			"metrics must not be nil",
+			func() {
+				NewRaftMetrics("node-1", nil)
+			},
+		)
+	})
+}
