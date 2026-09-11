@@ -266,3 +266,10 @@ func cloneBytes(data []byte) []byte {
 
 	return append([]byte(nil), data...)
 }
+
+func (l *Log) Size() int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	return len(l.entries)
+}

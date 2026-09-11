@@ -129,9 +129,20 @@ func TestRaftMetricsElection(t *testing.T) {
 
 	metrics.IncElections()
 	metrics.IncElections()
+
 	metrics.ObserveElectionDuration(
 		250*time.Millisecond,
 		"won",
+	)
+
+	metrics.ObserveElectionDuration(
+		400*time.Millisecond,
+		"lost",
+	)
+
+	metrics.ObserveElectionDuration(
+		50*time.Millisecond,
+		"failed",
 	)
 
 	expectedElections := `
@@ -153,7 +164,11 @@ raftiq_raft_elections_total{node_id="node-1"} 2
 		t.Fatalf("gather metrics: %v", err)
 	}
 
-	found := false
+	expectedResults := map[string]bool{
+		"won":    false,
+		"lost":   false,
+		"failed": false,
+	}
 
 	for _, metricFamily := range gathered {
 		if metricFamily.GetName() != "raftiq_raft_election_duration_seconds" {
@@ -162,16 +177,24 @@ raftiq_raft_elections_total{node_id="node-1"} 2
 
 		for _, metric := range metricFamily.GetMetric() {
 			for _, label := range metric.GetLabel() {
-				if label.GetName() == "result" &&
-					label.GetValue() == "won" {
-					found = true
+				if label.GetName() != "result" {
+					continue
+				}
+
+				if _, ok := expectedResults[label.GetValue()]; ok {
+					expectedResults[label.GetValue()] = true
 				}
 			}
 		}
 	}
 
-	if !found {
-		t.Fatal("expected election duration metric with result=won")
+	for result, found := range expectedResults {
+		if !found {
+			t.Fatalf(
+				"expected election duration metric with result=%s",
+				result,
+			)
+		}
 	}
 }
 

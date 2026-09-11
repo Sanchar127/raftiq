@@ -31,6 +31,8 @@ type RaftNode struct {
 
 	metrics Metrics
 
+	electionStartedAt time.Time
+
 	applyCh chan LogEntry
 
 	storage storage.Storage
@@ -150,6 +152,9 @@ func (n *RaftNode) becomeLeaderLocked() {
 	n.state.LeaderID = n.id
 	n.heartbeatElapsed = 0
 
+	n.finishElectionLocked("won")
+	n.metrics.IncLeaderChanges()
+
 	nextIndex := n.log.LastIndex() + 1
 
 	for _, peerID := range n.peerIDs {
@@ -157,7 +162,6 @@ func (n *RaftNode) becomeLeaderLocked() {
 		n.state.Leader.MatchIndex[peerID] = 0
 	}
 }
-
 func (n *RaftNode) becomeLeader() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -386,7 +390,11 @@ func (n *RaftNode) startElection() (Term, error) {
 		n.id: {},
 	}
 
+	n.electionStartedAt = time.Now()
+	n.metrics.IncElections()
+
 	if err := n.persistStateLocked(); err != nil {
+		n.finishElectionLocked("failed")
 		return 0, err
 	}
 
@@ -443,6 +451,8 @@ func (n *RaftNode) handleVoteReply(
 	defer n.mu.Unlock()
 
 	if reply.Term > n.state.Persistent.CurrentTerm {
+		n.finishElectionLocked("lost")
+
 		n.state.Persistent.CurrentTerm = reply.Term
 		n.state.Role = Follower
 		n.state.Persistent.VotedFor = ""
@@ -1635,6 +1645,47 @@ func (n *RaftNode) SetMetrics(metrics Metrics) {
 	}
 
 	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	n.metrics = metrics
-	n.mu.Unlock()
+	n.updateStateMetricsLocked()
+}
+
+func (n *RaftNode) updateStateMetricsLocked() {
+	n.metrics.SetCurrentTerm(
+		n.state.Persistent.CurrentTerm,
+	)
+
+	n.metrics.SetRole(
+		n.state.Role,
+	)
+
+	n.metrics.SetCommitIndex(
+		n.state.Volatile.CommitIndex,
+	)
+
+	n.metrics.SetLastApplied(
+		n.state.Volatile.LastApplied,
+	)
+
+	n.metrics.SetLastLogIndex(
+		n.log.LastIndex(),
+	)
+
+	n.metrics.SetLogSize(
+		n.log.Size(),
+	)
+}
+
+func (n *RaftNode) finishElectionLocked(result string) {
+	if n.electionStartedAt.IsZero() {
+		return
+	}
+
+	n.metrics.ObserveElectionDuration(
+		time.Since(n.electionStartedAt),
+		result,
+	)
+
+	n.electionStartedAt = time.Time{}
 }
