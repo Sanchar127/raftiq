@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/sanchar127/raftiq/internal/model"
 )
@@ -38,6 +39,8 @@ type WALStorage struct {
 	state    model.PersistentState
 	entries  []model.LogEntry
 	snapshot *model.Snapshot
+
+	metrics StorageMetrics
 }
 
 // OpenWAL opens or creates a WAL and reconstructs the latest state from
@@ -56,6 +59,7 @@ func OpenWAL(path string) (*WALStorage, error) {
 	storage := &WALStorage{
 		file:    file,
 		entries: make([]model.LogEntry, 0),
+		metrics: NoopStorageMetrics{},
 	}
 
 	if err := storage.recover(); err != nil {
@@ -67,15 +71,26 @@ func OpenWAL(path string) (*WALStorage, error) {
 	return storage, nil
 }
 
-// SaveState appends a new persistent-state record.
-//
-// Durability is established by Sync. Callers must not treat a successful
-// SaveState call as durable until Sync has completed successfully.
-func (s *WALStorage) SaveState(state model.PersistentState) error {
+func (s *WALStorage) SaveState(state model.PersistentState) (err error) {
+	start := time.Now()
+
+	defer func() {
+		s.metrics.IncOperation(StorageOperationSaveState)
+
+		if err != nil {
+			s.metrics.IncOperationError(StorageOperationSaveState)
+		}
+
+		s.metrics.ObserveOperationDuration(
+			StorageOperationSaveState,
+			time.Since(start),
+		)
+	}()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := s.ensureOpen(); err != nil {
+	if err = s.ensureOpen(); err != nil {
 		return err
 	}
 
@@ -84,7 +99,7 @@ func (s *WALStorage) SaveState(state model.PersistentState) error {
 		return fmt.Errorf("encode state record: %w", err)
 	}
 
-	if err := writeFull(s.file, record); err != nil {
+	if err = writeFull(s.file, record); err != nil {
 		return fmt.Errorf("write state record: %w", err)
 	}
 
@@ -93,11 +108,26 @@ func (s *WALStorage) SaveState(state model.PersistentState) error {
 	return nil
 }
 
-func (s *WALStorage) LoadState() (model.PersistentState, error) {
+func (s *WALStorage) LoadState() (state model.PersistentState, err error) {
+	start := time.Now()
+
+	defer func() {
+		s.metrics.IncOperation(StorageOperationLoadState)
+
+		if err != nil {
+			s.metrics.IncOperationError(StorageOperationLoadState)
+		}
+
+		s.metrics.ObserveOperationDuration(
+			StorageOperationLoadState,
+			time.Since(start),
+		)
+	}()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if err := s.ensureOpenRead(); err != nil {
+	if err = s.ensureOpenRead(); err != nil {
 		return model.PersistentState{}, err
 	}
 
@@ -109,11 +139,28 @@ func (s *WALStorage) LoadState() (model.PersistentState, error) {
 // The caller is responsible for ensuring that the supplied entries form a
 // valid append at the current log boundary. For Raft conflict resolution,
 // use ReplaceSuffix.
-func (s *WALStorage) AppendEntries(entries []model.LogEntry) error {
+func (s *WALStorage) AppendEntries(
+	entries []model.LogEntry,
+) (err error) {
+	start := time.Now()
+
+	defer func() {
+		s.metrics.IncOperation(StorageOperationAppendEntries)
+
+		if err != nil {
+			s.metrics.IncOperationError(StorageOperationAppendEntries)
+		}
+
+		s.metrics.ObserveOperationDuration(
+			StorageOperationAppendEntries,
+			time.Since(start),
+		)
+	}()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := s.ensureOpen(); err != nil {
+	if err = s.ensureOpen(); err != nil {
 		return err
 	}
 
@@ -121,11 +168,11 @@ func (s *WALStorage) AppendEntries(entries []model.LogEntry) error {
 		return nil
 	}
 
-	if err := validateEntries(entries); err != nil {
+	if err = validateEntries(entries); err != nil {
 		return fmt.Errorf("validate entries: %w", err)
 	}
 
-	if err := validateAppend(s.entries, entries); err != nil {
+	if err = validateAppend(s.entries, entries); err != nil {
 		return err
 	}
 
@@ -134,7 +181,7 @@ func (s *WALStorage) AppendEntries(entries []model.LogEntry) error {
 		return fmt.Errorf("encode entries record: %w", err)
 	}
 
-	if err := writeFull(s.file, record); err != nil {
+	if err = writeFull(s.file, record); err != nil {
 		return fmt.Errorf("write entries record: %w", err)
 	}
 
@@ -157,11 +204,26 @@ func (s *WALStorage) AppendEntries(entries []model.LogEntry) error {
 func (s *WALStorage) ReplaceSuffix(
 	from model.LogIndex,
 	entries []model.LogEntry,
-) error {
+) (err error) {
+	start := time.Now()
+
+	defer func() {
+		s.metrics.IncOperation(StorageOperationReplaceSuffix)
+
+		if err != nil {
+			s.metrics.IncOperationError(StorageOperationReplaceSuffix)
+		}
+
+		s.metrics.ObserveOperationDuration(
+			StorageOperationReplaceSuffix,
+			time.Since(start),
+		)
+	}()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := s.ensureOpen(); err != nil {
+	if err = s.ensureOpen(); err != nil {
 		return err
 	}
 
@@ -172,7 +234,7 @@ func (s *WALStorage) ReplaceSuffix(
 		)
 	}
 
-	if err := validateEntries(entries); err != nil {
+	if err = validateEntries(entries); err != nil {
 		return fmt.Errorf("validate replacement entries: %w", err)
 	}
 
@@ -192,7 +254,7 @@ func (s *WALStorage) ReplaceSuffix(
 		return fmt.Errorf("encode suffix replacement: %w", err)
 	}
 
-	if err := writeFull(s.file, record); err != nil {
+	if err = writeFull(s.file, record); err != nil {
 		return fmt.Errorf("write suffix replacement record: %w", err)
 	}
 
@@ -200,12 +262,29 @@ func (s *WALStorage) ReplaceSuffix(
 
 	return nil
 }
+func (s *WALStorage) LoadEntries() (
+	entries []model.LogEntry,
+	err error,
+) {
+	start := time.Now()
 
-func (s *WALStorage) LoadEntries() ([]model.LogEntry, error) {
+	defer func() {
+		s.metrics.IncOperation(StorageOperationLoadEntries)
+
+		if err != nil {
+			s.metrics.IncOperationError(StorageOperationLoadEntries)
+		}
+
+		s.metrics.ObserveOperationDuration(
+			StorageOperationLoadEntries,
+			time.Since(start),
+		)
+	}()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if err := s.ensureOpenRead(); err != nil {
+	if err = s.ensureOpenRead(); err != nil {
 		return nil, err
 	}
 
@@ -216,11 +295,28 @@ func (s *WALStorage) LoadEntries() ([]model.LogEntry, error) {
 //
 // The snapshot becomes the latest recovered snapshot after the record has
 // been successfully written. Call Sync to make it durable.
-func (s *WALStorage) SaveSnapshot(snapshot model.Snapshot) error {
+func (s *WALStorage) SaveSnapshot(
+	snapshot model.Snapshot,
+) (err error) {
+	start := time.Now()
+
+	defer func() {
+		s.metrics.IncOperation(StorageOperationSaveSnapshot)
+
+		if err != nil {
+			s.metrics.IncOperationError(StorageOperationSaveSnapshot)
+		}
+
+		s.metrics.ObserveOperationDuration(
+			StorageOperationSaveSnapshot,
+			time.Since(start),
+		)
+	}()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := s.ensureOpen(); err != nil {
+	if err = s.ensureOpen(); err != nil {
 		return err
 	}
 
@@ -236,7 +332,7 @@ func (s *WALStorage) SaveSnapshot(snapshot model.Snapshot) error {
 		return fmt.Errorf("encode snapshot record: %w", err)
 	}
 
-	if err := writeFull(s.file, record); err != nil {
+	if err = writeFull(s.file, record); err != nil {
 		return fmt.Errorf("write snapshot record: %w", err)
 	}
 
@@ -245,11 +341,29 @@ func (s *WALStorage) SaveSnapshot(snapshot model.Snapshot) error {
 	return nil
 }
 
-func (s *WALStorage) LoadSnapshot() (model.Snapshot, error) {
+func (s *WALStorage) LoadSnapshot() (
+	snapshot model.Snapshot,
+	err error,
+) {
+	start := time.Now()
+
+	defer func() {
+		s.metrics.IncOperation(StorageOperationLoadSnapshot)
+
+		if err != nil {
+			s.metrics.IncOperationError(StorageOperationLoadSnapshot)
+		}
+
+		s.metrics.ObserveOperationDuration(
+			StorageOperationLoadSnapshot,
+			time.Since(start),
+		)
+	}()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if err := s.ensureOpenRead(); err != nil {
+	if err = s.ensureOpenRead(); err != nil {
 		return model.Snapshot{}, err
 	}
 
@@ -257,7 +371,7 @@ func (s *WALStorage) LoadSnapshot() (model.Snapshot, error) {
 		return model.Snapshot{}, nil
 	}
 
-	snapshot := *s.snapshot
+	snapshot = *s.snapshot
 	snapshot.Data = cloneBytes(s.snapshot.Data)
 
 	return snapshot, nil
@@ -266,15 +380,27 @@ func (s *WALStorage) LoadSnapshot() (model.Snapshot, error) {
 // Sync forces all WAL data written so far to stable storage.
 //
 // A successful Sync is the durability boundary used by the Raft layer.
-func (s *WALStorage) Sync() error {
+func (s *WALStorage) Sync() (err error) {
+	start := time.Now()
+
+	defer func() {
+		s.metrics.IncSync()
+
+		if err != nil {
+			s.metrics.IncSyncError()
+		}
+
+		s.metrics.ObserveSyncDuration(time.Since(start))
+	}()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := s.ensureOpen(); err != nil {
+	if err = s.ensureOpen(); err != nil {
 		return err
 	}
 
-	if err := s.file.Sync(); err != nil {
+	if err = s.file.Sync(); err != nil {
 		return fmt.Errorf("sync WAL: %w", err)
 	}
 
