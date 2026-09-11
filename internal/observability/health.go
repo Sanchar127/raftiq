@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -204,4 +205,3 @@ func writeHealthResponse(
 
 	_ = json.NewEncoder(w).Encode(response)
 }
-
