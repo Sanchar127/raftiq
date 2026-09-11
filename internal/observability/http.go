@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -16,7 +17,8 @@ const defaultMetricsPath = "/metrics"
 var ErrMetricsServerClosed = errors.New("metrics server is closed")
 
 type MetricsServer struct {
-	server *http.Server
+	server   *http.Server
+	listener net.Listener
 }
 
 func NewMetricsServer(
@@ -31,6 +33,11 @@ func NewMetricsServer(
 		return nil, errors.New("metrics gatherer is required")
 	}
 
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, fmt.Errorf("listen for metrics server: %w", err)
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle(
 		defaultMetricsPath,
@@ -43,20 +50,22 @@ func NewMetricsServer(
 	)
 
 	return &MetricsServer{
+		listener: listener,
 		server: &http.Server{
-			Addr:              address,
+			Addr:              listener.Addr().String(),
 			Handler:           mux,
 			ReadHeaderTimeout: 5 * time.Second,
+			IdleTimeout:       60 * time.Second,
 		},
 	}, nil
 }
 
 func (s *MetricsServer) Serve() error {
-	if s == nil || s.server == nil {
+	if s == nil || s.server == nil || s.listener == nil {
 		return ErrMetricsServerClosed
 	}
 
-	if err := s.server.ListenAndServe(); err != nil &&
+	if err := s.server.Serve(s.listener); err != nil &&
 		!errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serve metrics: %w", err)
 	}
@@ -81,9 +90,9 @@ func (s *MetricsServer) Shutdown(ctx context.Context) error {
 }
 
 func (s *MetricsServer) Address() string {
-	if s == nil || s.server == nil {
+	if s == nil || s.listener == nil {
 		return ""
 	}
 
-	return s.server.Addr
+	return s.listener.Addr().String()
 }
