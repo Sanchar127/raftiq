@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -87,6 +89,9 @@ type Scheduler struct {
 
 	metricsMu sync.RWMutex
 	metrics   SchedulerMetrics
+
+	loggerMu sync.RWMutex
+	logger   *slog.Logger
 }
 
 type Config struct {
@@ -133,6 +138,7 @@ func New(
 		interval: config.Interval,
 		lease:    config.Lease,
 		metrics:  NoopSchedulerMetrics{},
+		logger:   discardSchedulerLogger(),
 	}, nil
 }
 
@@ -155,13 +161,54 @@ func (s *Scheduler) getMetrics() SchedulerMetrics {
 	return s.metrics
 }
 
+func (s *Scheduler) SetLogger(logger *slog.Logger) {
+	s.loggerMu.Lock()
+	defer s.loggerMu.Unlock()
+
+	if logger == nil {
+		s.logger = discardSchedulerLogger()
+		return
+	}
+
+	s.logger = logger
+}
+
+func (s *Scheduler) getLogger() *slog.Logger {
+	s.loggerMu.RLock()
+	defer s.loggerMu.RUnlock()
+
+	if s.logger == nil {
+		return discardSchedulerLogger()
+	}
+
+	return s.logger
+}
+
 func (s *Scheduler) Run(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("scheduler context is required")
+	}
+
+	logger := s.getLogger()
+
+	logger.Info(
+		"scheduler started",
+		slog.String("component", "scheduler"),
+		slog.Duration("interval", s.interval),
+		slog.Duration("lease", s.lease),
+	)
+
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
+			logger.Debug(
+				"scheduler stopped",
+				slog.String("component", "scheduler"),
+				slog.String("reason", "context canceled"),
+			)
 			return ctx.Err()
 
 		case <-ticker.C:
@@ -170,6 +217,12 @@ func (s *Scheduler) Run(ctx context.Context) error {
 					errors.Is(err, context.DeadlineExceeded) {
 					return err
 				}
+
+				logger.Error(
+					"scheduler iteration failed",
+					slog.String("component", "scheduler"),
+					slog.Any("error", err),
+				)
 			}
 		}
 	}
@@ -187,6 +240,12 @@ func (s *Scheduler) scheduleDueJobs(ctx context.Context) error {
 			errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
+
+		s.getLogger().Error(
+			"failed to reclaim expired jobs",
+			slog.String("component", "scheduler"),
+			slog.Any("error", err),
+		)
 	}
 
 	for _, job := range s.store.ListPendingJobs() {
@@ -199,6 +258,13 @@ func (s *Scheduler) scheduleDueJobs(ctx context.Context) error {
 				errors.Is(err, context.DeadlineExceeded) {
 				return err
 			}
+
+			s.getLogger().Error(
+				"failed to schedule job",
+				slog.String("component", "scheduler"),
+				slog.String("job_id", string(job.ID)),
+				slog.Any("error", err),
+			)
 		}
 	}
 
@@ -217,6 +283,12 @@ func (s *Scheduler) reclaimExpiredJobs(
 			}
 
 			if isExpectedReclaimError(err) {
+				s.getLogger().Debug(
+					"expired job was not reclaimed due to expected state",
+					slog.String("component", "scheduler"),
+					slog.String("job_id", string(job.ID)),
+					slog.Any("error", err),
+				)
 				continue
 			}
 
@@ -232,7 +304,14 @@ func (s *Scheduler) reclaimExpiredJob(
 	job model.Job,
 	now int64,
 ) error {
+	logger := s.getLogger()
+
 	if job.FencingToken == 0 {
+		logger.Debug(
+			"skipping expired job without fencing token",
+			slog.String("component", "scheduler"),
+			slog.String("job_id", string(job.ID)),
+		)
 		return nil
 	}
 
@@ -243,6 +322,13 @@ func (s *Scheduler) reclaimExpiredJob(
 		At:           now,
 	})
 	if err != nil {
+		logger.Error(
+			"failed to encode job reclaim command",
+			slog.String("component", "scheduler"),
+			slog.String("job_id", string(job.ID)),
+			slog.Any("error", err),
+		)
+
 		return fmt.Errorf("encode job reclaim command: %w", err)
 	}
 
@@ -258,13 +344,21 @@ func (s *Scheduler) reclaimExpiredJob(
 
 	if result.Err != nil {
 		if isExpectedReclaimError(result.Err) {
-			return nil
+			return result.Err
 		}
 
 		return result.Err
 	}
 
 	s.getMetrics().IncLeaseLosses()
+
+	logger.Info(
+		"expired job lease reclaimed",
+		slog.String("component", "scheduler"),
+		slog.String("job_id", string(job.ID)),
+		slog.Uint64("fencing_token", job.FencingToken),
+		slog.Uint64("raft_index", uint64(index)),
+	)
 
 	return nil
 }
@@ -273,10 +367,26 @@ func (s *Scheduler) scheduleJob(
 	ctx context.Context,
 	job model.Job,
 ) error {
+	logger := s.getLogger()
+
 	workerID, err := s.selector.SelectWorker(job)
 	if err != nil {
+		logger.Error(
+			"failed to select worker for job",
+			slog.String("component", "scheduler"),
+			slog.String("job_id", string(job.ID)),
+			slog.Any("error", err),
+		)
+
 		return err
 	}
+
+	logger.Debug(
+		"selected worker for job",
+		slog.String("component", "scheduler"),
+		slog.String("job_id", string(job.ID)),
+		slog.String("worker_id", workerID),
+	)
 
 	commandData, err := kv.EncodeCommand(kv.Command{
 		Type:      kv.CommandClaimJob,
@@ -285,6 +395,14 @@ func (s *Scheduler) scheduleJob(
 		ExpiresAt: time.Now().Add(s.lease).UnixNano(),
 	})
 	if err != nil {
+		logger.Error(
+			"failed to encode job claim command",
+			slog.String("component", "scheduler"),
+			slog.String("job_id", string(job.ID)),
+			slog.String("worker_id", workerID),
+			slog.Any("error", err),
+		)
+
 		return fmt.Errorf("encode claim job command: %w", err)
 	}
 
@@ -302,8 +420,23 @@ func (s *Scheduler) scheduleJob(
 		if errors.Is(result.Err, kv.ErrJobAlreadyClaimed) ||
 			errors.Is(result.Err, kv.ErrJobNotClaimable) ||
 			errors.Is(result.Err, kv.ErrJobNotFound) {
+			logger.Debug(
+				"job claim rejected due to expected state",
+				slog.String("component", "scheduler"),
+				slog.String("job_id", string(job.ID)),
+				slog.String("worker_id", workerID),
+				slog.Any("error", result.Err),
+			)
 			return nil
 		}
+
+		logger.Error(
+			"job claim failed",
+			slog.String("component", "scheduler"),
+			slog.String("job_id", string(job.ID)),
+			slog.String("worker_id", workerID),
+			slog.Any("error", result.Err),
+		)
 
 		return result.Err
 	}
@@ -311,6 +444,15 @@ func (s *Scheduler) scheduleJob(
 	metrics := s.getMetrics()
 	metrics.IncScheduledJobs()
 	metrics.IncLeaseAcquisitions()
+
+	logger.Info(
+		"job scheduled",
+		slog.String("component", "scheduler"),
+		slog.String("job_id", string(job.ID)),
+		slog.String("worker_id", workerID),
+		slog.Uint64("raft_index", uint64(index)),
+		slog.Duration("lease", s.lease),
+	)
 
 	return nil
 }
@@ -320,3 +462,10 @@ func isExpectedReclaimError(err error) bool {
 		errors.Is(err, kv.ErrInvalidJobState) ||
 		errors.Is(err, kv.ErrJobOwnershipLost)
 }
+
+func discardSchedulerLogger() *slog.Logger {
+	return slog.New(
+		slog.NewTextHandler(io.Discard, nil),
+	)
+}
+

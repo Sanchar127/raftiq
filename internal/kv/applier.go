@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -21,6 +23,7 @@ type ApplyResult struct {
 type Applier struct {
 	store   *Store
 	metrics KVMetrics
+	logger  *slog.Logger
 
 	mu          sync.Mutex
 	lastApplied model.LogIndex
@@ -31,13 +34,12 @@ type Applier struct {
 }
 
 func NewApplier(store *Store) *Applier {
-	applier := &Applier{
+	return &Applier{
 		store:   store,
 		metrics: NoopKVMetrics{},
+		logger:  discardLogger(),
 		results: make(map[model.LogIndex]ApplyResult),
 	}
-
-	return applier
 }
 
 func (a *Applier) SetMetrics(metrics KVMetrics) {
@@ -52,17 +54,52 @@ func (a *Applier) SetMetrics(metrics KVMetrics) {
 	a.metrics = metrics
 }
 
+func (a *Applier) SetLogger(logger *slog.Logger) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if logger == nil {
+		a.logger = discardLogger()
+		return
+	}
+
+	a.logger = logger
+}
+
 func (a *Applier) Run(
 	ctx context.Context,
 	applyCh <-chan raft.LogEntry,
 ) error {
+	if ctx == nil {
+		return errors.New("applier context is required")
+	}
+
+	if applyCh == nil {
+		return errors.New("applier apply channel is required")
+	}
+
+	a.logger.Debug(
+		"applier started",
+		slog.String("component", "kv-applier"),
+	)
+
 	for {
 		select {
 		case <-ctx.Done():
+			a.logger.Debug(
+				"applier stopped",
+				slog.String("component", "kv-applier"),
+				slog.String("reason", "context canceled"),
+			)
 			return ctx.Err()
 
 		case entry, ok := <-applyCh:
 			if !ok {
+				a.logger.Debug(
+					"applier stopped",
+					slog.String("component", "kv-applier"),
+					slog.String("reason", "apply channel closed"),
+				)
 				return nil
 			}
 
@@ -96,10 +133,33 @@ func (a *Applier) Run(
 
 				a.mu.Unlock()
 
+				a.logger.Error(
+					"failed to apply Raft log entry",
+					slog.String("component", "kv-applier"),
+					slog.Uint64("log_index", uint64(entry.Index)),
+					slog.Any("error", result.Err),
+				)
+
 				return err
 			}
 
 			a.mu.Unlock()
+
+			if result.Err != nil {
+				a.logger.Debug(
+					"Raft log entry produced expected state-machine error",
+					slog.String("component", "kv-applier"),
+					slog.Uint64("log_index", uint64(entry.Index)),
+					slog.Any("error", result.Err),
+				)
+				continue
+			}
+
+			a.logger.Debug(
+				"Raft log entry applied",
+				slog.String("component", "kv-applier"),
+				slog.Uint64("log_index", uint64(entry.Index)),
+			)
 		}
 	}
 }
@@ -108,6 +168,10 @@ func (a *Applier) WaitApplied(
 	ctx context.Context,
 	index model.LogIndex,
 ) error {
+	if ctx == nil {
+		return errors.New("wait applied context is required")
+	}
+
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -140,6 +204,10 @@ func (a *Applier) WaitResult(
 	ctx context.Context,
 	index model.LogIndex,
 ) (ApplyResult, error) {
+	if ctx == nil {
+		return ApplyResult{}, errors.New("wait result context is required")
+	}
+
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -176,6 +244,20 @@ func (a *Applier) RestoreSnapshot(
 	snapshot model.Snapshot,
 ) error {
 	if err := a.store.Restore(snapshot.Data); err != nil {
+		a.logger.Error(
+			"failed to restore KV snapshot",
+			slog.String("component", "kv-applier"),
+			slog.Uint64(
+				"last_included_index",
+				uint64(snapshot.LastIncludedIndex),
+			),
+			slog.Uint64(
+				"last_included_term",
+				uint64(snapshot.LastIncludedTerm),
+			),
+			slog.Any("error", err),
+		)
+
 		return fmt.Errorf("restore KV snapshot: %w", err)
 	}
 
@@ -184,6 +266,19 @@ func (a *Applier) RestoreSnapshot(
 	a.applyErr = nil
 	a.results = make(map[model.LogIndex]ApplyResult)
 	a.mu.Unlock()
+
+	a.logger.Info(
+		"KV snapshot restored",
+		slog.String("component", "kv-applier"),
+		slog.Uint64(
+			"last_included_index",
+			uint64(snapshot.LastIncludedIndex),
+		),
+		slog.Uint64(
+			"last_included_term",
+			uint64(snapshot.LastIncludedTerm),
+		),
+	)
 
 	return nil
 }
@@ -218,4 +313,10 @@ func isExpectedApplyError(err error) bool {
 		errors.Is(err, ErrJobAlreadyClaimed) ||
 		errors.Is(err, ErrInvalidJobState) ||
 		errors.Is(err, ErrJobOwnershipLost)
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(
+		slog.NewTextHandler(io.Discard, nil),
+	)
 }
