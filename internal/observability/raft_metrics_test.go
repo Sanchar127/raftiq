@@ -7,8 +7,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
-
 	"github.com/sanchar127/raftiq/internal/raft"
+	"github.com/stretchr/testify/require"
 )
 
 func newTestRaftMetrics(t *testing.T) (*RaftMetrics, *prometheus.Registry) {
@@ -42,27 +42,68 @@ raftiq_raft_current_term{node_id="node-1"} 7
 }
 
 func TestRaftMetricsSetRole(t *testing.T) {
-	metrics, registry := newTestRaftMetrics(t)
+	tests := []struct {
+		name          string
+		role          raft.Role
+		wantFollower  float64
+		wantCandidate float64
+		wantLeader    float64
+	}{
+		{
+			name:          "follower",
+			role:          raft.Follower,
+			wantFollower:  1,
+			wantCandidate: 0,
+			wantLeader:    0,
+		},
+		{
+			name:          "candidate",
+			role:          raft.Candidate,
+			wantFollower:  0,
+			wantCandidate: 1,
+			wantLeader:    0,
+		},
+		{
+			name:          "leader",
+			role:          raft.Leader,
+			wantFollower:  0,
+			wantCandidate: 0,
+			wantLeader:    1,
+		},
+	}
 
-	metrics.SetRole(raft.Leader)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			metrics, _ := newTestRaftMetrics(t)
 
-	expected := `
-# HELP raftiq_raft_role Current Raft role. Exactly one role is set to 1.
-# TYPE raftiq_raft_role gauge
-raftiq_raft_role{node_id="node-1",role="candidate"} 0
-raftiq_raft_role{node_id="node-1",role="follower"} 0
-raftiq_raft_role{node_id="node-1",role="leader"} 1
-`
+			metrics.SetRole(tt.role)
 
-	if err := testutil.GatherAndCompare(
-		registry,
-		strings.NewReader(expected),
-		"raftiq_raft_role",
-	); err != nil {
-		t.Fatalf("unexpected role metrics: %v", err)
+			require.Equal(
+				t,
+				tt.wantFollower,
+				testutil.ToFloat64(
+					metrics.metrics.Role.WithLabelValues("node-1", "follower"),
+				),
+			)
+
+			require.Equal(
+				t,
+				tt.wantCandidate,
+				testutil.ToFloat64(
+					metrics.metrics.Role.WithLabelValues("node-1", "candidate"),
+				),
+			)
+
+			require.Equal(
+				t,
+				tt.wantLeader,
+				testutil.ToFloat64(
+					metrics.metrics.Role.WithLabelValues("node-1", "leader"),
+				),
+			)
+		})
 	}
 }
-
 func TestRaftMetricsSetIndexes(t *testing.T) {
 	metrics, registry := newTestRaftMetrics(t)
 

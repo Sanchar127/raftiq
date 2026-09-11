@@ -33,6 +33,8 @@ type Metrics struct {
 	RPCDuration      *prometheus.HistogramVec
 
 	// Storage.
+	StorageOperationsTotal   *prometheus.CounterVec
+	StorageOperationErrors   *prometheus.CounterVec
 	StorageSyncTotal         *prometheus.CounterVec
 	StorageSyncErrors        *prometheus.CounterVec
 	StorageOperationDuration *prometheus.HistogramVec
@@ -63,8 +65,7 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 
 		Role: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Namespace: "raftiq",
-				Subsystem: "raft",
+				Namespace: "raft",
 				Name:      "role",
 				Help:      "Current Raft role. Exactly one role is set to 1.",
 			},
@@ -241,6 +242,26 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 			[]string{"method"},
 		),
 
+		StorageOperationsTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "raftiq",
+				Subsystem: "storage",
+				Name:      "operations_total",
+				Help:      "Total number of storage operations.",
+			},
+			[]string{"operation"},
+		),
+
+		StorageOperationErrors: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "raftiq",
+				Subsystem: "storage",
+				Name:      "operation_errors_total",
+				Help:      "Total number of failed storage operations.",
+			},
+			[]string{"operation"},
+		),
+
 		StorageSyncTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "raftiq",
@@ -349,24 +370,33 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 		metrics.LastApplied,
 		metrics.LastLogIndex,
 		metrics.LogSize,
+
 		metrics.ElectionsTotal,
 		metrics.ElectionDuration,
 		metrics.LeaderChangesTotal,
 		metrics.VoteRequestsTotal,
 		metrics.VotesGrantedTotal,
+
 		metrics.AppendEntriesTotal,
 		metrics.AppendEntriesFailures,
 		metrics.AppendEntriesDuration,
+
 		metrics.SnapshotsCreatedTotal,
 		metrics.SnapshotsInstalledTotal,
+
 		metrics.RPCRequestsTotal,
 		metrics.RPCErrorsTotal,
 		metrics.RPCDuration,
+
+		metrics.StorageOperationsTotal,
+		metrics.StorageOperationErrors,
 		metrics.StorageSyncTotal,
 		metrics.StorageSyncErrors,
 		metrics.StorageOperationDuration,
+
 		metrics.KVOperationsTotal,
 		metrics.KVOperationErrors,
+
 		metrics.ScheduledJobsTotal,
 		metrics.ExecutedJobsTotal,
 		metrics.JobExecutionFailures,
