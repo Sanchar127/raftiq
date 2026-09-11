@@ -12,15 +12,24 @@ var (
 	ErrPeerNotFound    = errors.New("raft peer not found")
 )
 
+type transportLink struct {
+	from NodeID
+	to   NodeID
+}
+
 type LocalTransport struct {
-	mu     sync.RWMutex
-	peers  map[NodeID]Peer
+	mu sync.RWMutex
+
+	peers   map[NodeID]Peer
+	blocked map[transportLink]struct{}
+
 	closed bool
 }
 
 func NewLocalTransport() *LocalTransport {
 	return &LocalTransport{
-		peers: make(map[NodeID]Peer),
+		peers:   make(map[NodeID]Peer),
+		blocked: make(map[transportLink]struct{}),
 	}
 }
 
@@ -62,12 +71,83 @@ func (t *LocalTransport) RemoveNode(id NodeID) {
 	delete(t.peers, id)
 }
 
+func (t *LocalTransport) Block(from, to NodeID) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.closed {
+		return
+	}
+
+	t.blocked[transportLink{
+		from: from,
+		to:   to,
+	}] = struct{}{}
+}
+
+func (t *LocalTransport) Unblock(from, to NodeID) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	delete(t.blocked, transportLink{
+		from: from,
+		to:   to,
+	})
+}
+
+func (t *LocalTransport) IsBlocked(from, to NodeID) bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	_, blocked := t.blocked[transportLink{
+		from: from,
+		to:   to,
+	}]
+
+	return blocked
+}
+
+func (t *LocalTransport) BlockBidirectional(a, b NodeID) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.closed {
+		return
+	}
+
+	t.blocked[transportLink{
+		from: a,
+		to:   b,
+	}] = struct{}{}
+
+	t.blocked[transportLink{
+		from: b,
+		to:   a,
+	}] = struct{}{}
+}
+
+func (t *LocalTransport) UnblockBidirectional(a, b NodeID) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	delete(t.blocked, transportLink{
+		from: a,
+		to:   b,
+	})
+
+	delete(t.blocked, transportLink{
+		from: b,
+		to:   a,
+	})
+}
+
 func (t *LocalTransport) Close() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	t.closed = true
 	t.peers = make(map[NodeID]Peer)
+	t.blocked = make(map[transportLink]struct{})
 }
 
 func (t *LocalTransport) peer(target NodeID) (Peer, error) {
@@ -90,12 +170,38 @@ func (t *LocalTransport) peer(target NodeID) (Peer, error) {
 	return peer, nil
 }
 
+func (t *LocalTransport) checkBlocked(from, to NodeID) error {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	if t.closed {
+		return ErrTransportClosed
+	}
+
+	if _, blocked := t.blocked[transportLink{
+		from: from,
+		to:   to,
+	}]; blocked {
+		return fmt.Errorf(
+			"raft transport link %s -> %s is blocked",
+			from,
+			to,
+		)
+	}
+
+	return nil
+}
+
 func (t *LocalTransport) RequestVote(
 	ctx context.Context,
 	target NodeID,
 	args RequestVoteArgs,
 ) (RequestVoteReply, error) {
 	if err := contextError(ctx); err != nil {
+		return RequestVoteReply{}, err
+	}
+
+	if err := t.checkBlocked(args.CandidateID, target); err != nil {
 		return RequestVoteReply{}, err
 	}
 
@@ -127,6 +233,10 @@ func (t *LocalTransport) AppendEntries(
 		return AppendEntriesReply{}, err
 	}
 
+	if err := t.checkBlocked(args.LeaderID, target); err != nil {
+		return AppendEntriesReply{}, err
+	}
+
 	peer, err := t.peer(target)
 	if err != nil {
 		return AppendEntriesReply{}, err
@@ -152,6 +262,10 @@ func (t *LocalTransport) InstallSnapshot(
 	args InstallSnapshotArgs,
 ) (InstallSnapshotReply, error) {
 	if err := contextError(ctx); err != nil {
+		return InstallSnapshotReply{}, err
+	}
+
+	if err := t.checkBlocked(args.LeaderID, target); err != nil {
 		return InstallSnapshotReply{}, err
 	}
 
