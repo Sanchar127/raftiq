@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/sanchar127/raftiq/internal/kv"
@@ -61,6 +64,9 @@ type Worker struct {
 	raft     *raft.RaftNode
 	applier  *kv.Applier
 	metrics  WorkerMetrics
+
+	loggerMu sync.RWMutex
+	logger   *slog.Logger
 }
 
 // Config controls worker execution-loop behavior.
@@ -91,12 +97,42 @@ func New(id string, handler JobHandler) (*Worker, error) {
 		id:      id,
 		handler: handler,
 		metrics: NoopWorkerMetrics{},
+		logger:  discardWorkerLogger(),
 	}, nil
 }
 
 // ID returns the worker's stable identity.
 func (w *Worker) ID() string {
 	return w.id
+}
+
+// SetLogger configures the worker's structured logger.
+//
+// A nil logger disables worker logging safely.
+func (w *Worker) SetLogger(logger *slog.Logger) {
+	if logger == nil {
+		logger = discardWorkerLogger()
+	}
+
+	w.loggerMu.Lock()
+	w.logger = logger
+	w.loggerMu.Unlock()
+}
+
+func (w *Worker) getLogger() *slog.Logger {
+	w.loggerMu.RLock()
+	logger := w.logger
+	w.loggerMu.RUnlock()
+
+	if logger == nil {
+		return discardWorkerLogger()
+	}
+
+	return logger
+}
+
+func discardWorkerLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 // Execute runs the configured handler for a job.
@@ -207,6 +243,14 @@ func (w *Worker) Run(ctx context.Context) error {
 		)
 	}
 
+	logger := w.getLogger().With(
+		"component", "worker",
+		"worker_id", w.id,
+		"interval", w.interval.String(),
+	)
+
+	logger.Info("worker execution loop started")
+
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 
@@ -214,12 +258,25 @@ func (w *Worker) Run(ctx context.Context) error {
 		if err := w.executeAssignedJobs(ctx); err != nil {
 			if errors.Is(err, context.Canceled) ||
 				errors.Is(err, context.DeadlineExceeded) {
+				logger.Debug(
+					"worker execution loop stopped",
+					"error", err,
+				)
 				return err
 			}
+
+			logger.Error(
+				"worker execution iteration failed",
+				"error", err,
+			)
 		}
 
 		select {
 		case <-ctx.Done():
+			logger.Debug(
+				"worker execution loop stopped",
+				"error", ctx.Err(),
+			)
 			return ctx.Err()
 
 		case <-ticker.C:
@@ -238,6 +295,11 @@ func (w *Worker) executeAssignedJobs(
 ) error {
 	jobs := w.source.ListAssignedJobs(w.id)
 
+	logger := w.getLogger().With(
+		"component", "worker",
+		"worker_id", w.id,
+	)
+
 	for _, job := range jobs {
 		if !w.source.ValidateJobOwnership(
 			job.ID,
@@ -246,6 +308,13 @@ func (w *Worker) executeAssignedJobs(
 			time.Now().UnixNano(),
 		) {
 			w.metrics.IncLeaseLosses()
+
+			logger.Debug(
+				"job ownership lost before execution",
+				"job_id", job.ID,
+				"fencing_token", job.FencingToken,
+			)
+
 			continue
 		}
 
@@ -260,10 +329,22 @@ func (w *Worker) executeAssignedJobs(
 			if errors.Is(err, kv.ErrJobOwnershipLost) ||
 				errors.Is(err, ErrOwnershipLost) {
 				w.metrics.IncLeaseLosses()
+
+				logger.Debug(
+					"job ownership lost during start transition",
+					"job_id", job.ID,
+					"fencing_token", job.FencingToken,
+				)
+
 				continue
 			}
 
 			if errors.Is(err, kv.ErrInvalidJobState) {
+				logger.Debug(
+					"job skipped because state changed before start",
+					"job_id", job.ID,
+				)
+
 				continue
 			}
 
@@ -273,10 +354,27 @@ func (w *Worker) executeAssignedJobs(
 			}
 
 			w.metrics.IncJobExecutionFailures()
+
+			logger.Error(
+				"job start transition failed",
+				"job_id", job.ID,
+				"fencing_token", job.FencingToken,
+				"error", err,
+			)
+
 			continue
 		}
 
+		logger.Debug(
+			"job execution started",
+			"job_id", runningJob.ID,
+			"execution_id", runningJob.ExecutionID,
+			"fencing_token", runningJob.FencingToken,
+		)
+
+		executionStarted := time.Now()
 		executionErr := w.Execute(ctx, runningJob)
+		executionDuration := time.Since(executionStarted)
 
 		if executionErr == nil {
 			_, transitionErr := w.transitionJob(
@@ -295,6 +393,15 @@ func (w *Worker) executeAssignedJobs(
 				ErrOwnershipLost,
 			) {
 				w.metrics.IncLeaseLosses()
+
+				logger.Warn(
+					"job ownership lost before success transition",
+					"job_id", runningJob.ID,
+					"execution_id", runningJob.ExecutionID,
+					"fencing_token", runningJob.FencingToken,
+					"execution_duration", executionDuration.String(),
+				)
+
 				continue
 			}
 
@@ -310,12 +417,40 @@ func (w *Worker) executeAssignedJobs(
 				}
 
 				w.metrics.IncJobExecutionFailures()
+
+				logger.Error(
+					"job success transition failed",
+					"job_id", runningJob.ID,
+					"execution_id", runningJob.ExecutionID,
+					"fencing_token", runningJob.FencingToken,
+					"execution_duration", executionDuration.String(),
+					"error", transitionErr,
+				)
+
 				continue
 			}
 
 			w.metrics.IncExecutedJobs()
+
+			logger.Info(
+				"job execution completed",
+				"job_id", runningJob.ID,
+				"execution_id", runningJob.ExecutionID,
+				"fencing_token", runningJob.FencingToken,
+				"execution_duration", executionDuration.String(),
+			)
+
 			continue
 		}
+
+		logger.Error(
+			"job execution failed",
+			"job_id", runningJob.ID,
+			"execution_id", runningJob.ExecutionID,
+			"fencing_token", runningJob.FencingToken,
+			"execution_duration", executionDuration.String(),
+			"error", executionErr,
+		)
 
 		_, transitionErr := w.transitionJob(
 			ctx,
@@ -333,6 +468,14 @@ func (w *Worker) executeAssignedJobs(
 			ErrOwnershipLost,
 		) {
 			w.metrics.IncLeaseLosses()
+
+			logger.Warn(
+				"job ownership lost before failure transition",
+				"job_id", runningJob.ID,
+				"execution_id", runningJob.ExecutionID,
+				"fencing_token", runningJob.FencingToken,
+			)
+
 			continue
 		}
 
@@ -346,6 +489,16 @@ func (w *Worker) executeAssignedJobs(
 					context.DeadlineExceeded,
 				)) {
 			return transitionErr
+		}
+
+		if transitionErr != nil {
+			logger.Error(
+				"job failure transition failed",
+				"job_id", runningJob.ID,
+				"execution_id", runningJob.ExecutionID,
+				"fencing_token", runningJob.FencingToken,
+				"error", transitionErr,
+			)
 		}
 
 		w.metrics.IncJobExecutionFailures()
@@ -363,6 +516,15 @@ func (w *Worker) transitionJob(
 	expectedState model.JobState,
 	nextState model.JobState,
 ) (model.Job, error) {
+	logger := w.getLogger().With(
+		"component", "worker",
+		"worker_id", w.id,
+		"job_id", job.ID,
+		"execution_id", job.ExecutionID,
+		"fencing_token", job.FencingToken,
+		"command_type", commandType,
+	)
+
 	commandData, err := kv.EncodeCommand(kv.Command{
 		Type:          commandType,
 		JobID:         string(job.ID),
@@ -373,6 +535,11 @@ func (w *Worker) transitionJob(
 		At:            time.Now().UnixNano(),
 	})
 	if err != nil {
+		logger.Error(
+			"failed to encode job transition",
+			"error", err,
+		)
+
 		return model.Job{}, fmt.Errorf(
 			"encode job transition: %w",
 			err,
@@ -381,6 +548,11 @@ func (w *Worker) transitionJob(
 
 	index, err := w.raft.Propose(commandData)
 	if err != nil {
+		logger.Error(
+			"failed to propose job transition",
+			"error", err,
+		)
+
 		return model.Job{}, fmt.Errorf(
 			"propose job transition: %w",
 			err,
@@ -389,6 +561,12 @@ func (w *Worker) transitionJob(
 
 	result, err := w.applier.WaitResult(ctx, index)
 	if err != nil {
+		logger.Error(
+			"failed waiting for job transition result",
+			"raft_index", index,
+			"error", err,
+		)
+
 		return model.Job{}, fmt.Errorf(
 			"wait for job transition at index %d: %w",
 			index,
@@ -401,18 +579,41 @@ func (w *Worker) transitionJob(
 	}
 
 	if result.Job == nil {
-		return model.Job{}, errors.New(
+		err := errors.New("job transition returned no job")
+
+		logger.Error(
 			"job transition returned no job",
+			"raft_index", index,
+			"error", err,
 		)
+
+		return model.Job{}, err
 	}
 
 	if result.Job.State != nextState {
-		return model.Job{}, fmt.Errorf(
+		err := fmt.Errorf(
 			"job transition produced state %s, want %s",
 			result.Job.State,
 			nextState,
 		)
+
+		logger.Error(
+			"job transition produced unexpected state",
+			"raft_index", index,
+			"actual_state", result.Job.State,
+			"expected_state", nextState,
+			"error", err,
+		)
+
+		return model.Job{}, err
 	}
+
+	logger.Debug(
+		"job state transition committed",
+		"raft_index", index,
+		"from_state", expectedState,
+		"to_state", nextState,
+	)
 
 	return *result.Job, nil
 }

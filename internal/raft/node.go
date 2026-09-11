@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
-	"log/slog"
-	"time"
 	"io"
+	"log/slog"
+	"sync"
+	"time"
 
 	"github.com/sanchar127/raftiq/internal/model"
 	"github.com/sanchar127/raftiq/internal/storage"
@@ -24,9 +24,9 @@ type RaftNode struct {
 	stopCh  chan struct{}
 	doneCh  chan struct{}
 
-	id    NodeID
-	state State
-	log   *Log
+	id     NodeID
+	state  State
+	log    *Log
 	logger *slog.Logger
 
 	transport Transport
@@ -86,6 +86,11 @@ func (n *RaftNode) SetPeers(peers []Peer) {
 	n.transport = transport
 	n.peerIDs = peerIDs
 	n.mu.Unlock()
+
+	n.getLogger().Debug(
+		"raft peers configured",
+		"peer_count", len(peerIDs),
+	)
 }
 
 func (n *RaftNode) SetTransport(
@@ -102,6 +107,11 @@ func (n *RaftNode) SetTransport(
 	n.transport = transport
 	n.peerIDs = ids
 	n.mu.Unlock()
+
+	n.getLogger().Debug(
+		"raft transport configured",
+		"peer_count", len(ids),
+	)
 
 	return nil
 }
@@ -165,22 +175,49 @@ func (n *RaftNode) becomeLeaderLocked() {
 		n.state.Leader.MatchIndex[peerID] = 0
 	}
 }
+
 func (n *RaftNode) becomeLeader() {
+	logger := n.getLogger()
+
 	n.mu.Lock()
-	defer n.mu.Unlock()
 
 	n.becomeLeaderLocked()
+
+	term := n.state.Persistent.CurrentTerm
+	peerCount := len(n.peerIDs)
+
+	n.mu.Unlock()
+
+	logger.Info(
+		"raft node became leader",
+		"term", term,
+		"peer_count", peerCount,
+	)
 }
 
 func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 	n.mu.Lock()
 
 	if n.state.Role != Leader {
+		role := n.state.Role
+		term := n.state.Persistent.CurrentTerm
+		nodeID := n.id
+
 		n.mu.Unlock()
-		return 0, fmt.Errorf(
+
+		err := fmt.Errorf(
 			"node %s is not the leader",
-			n.id,
+			nodeID,
 		)
+
+		n.getLogger().Debug(
+			"raft proposal rejected",
+			"role", role,
+			"term", term,
+			"error", err,
+		)
+
+		return 0, err
 	}
 
 	index := n.log.LastIndex() + 1
@@ -191,11 +228,16 @@ func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 		Data:  append([]byte(nil), data...),
 	}
 
-	// Persist the entry before making it visible in the in-memory
-	// Raft log. This keeps the persistent log as the durability
-	// boundary for newly proposed entries.
 	if err := n.storage.AppendEntries([]LogEntry{entry}); err != nil {
 		n.mu.Unlock()
+
+		n.getLogger().Error(
+			"failed to persist proposed raft entry",
+			"index", index,
+			"term", entry.Term,
+			"error", err,
+		)
+
 		return 0, fmt.Errorf(
 			"persist proposed entry: %w",
 			err,
@@ -204,6 +246,14 @@ func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 
 	if err := n.storage.Sync(); err != nil {
 		n.mu.Unlock()
+
+		n.getLogger().Error(
+			"failed to sync proposed raft entry",
+			"index", index,
+			"term", entry.Term,
+			"error", err,
+		)
+
 		return 0, fmt.Errorf(
 			"sync proposed entry: %w",
 			err,
@@ -212,26 +262,37 @@ func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 
 	if err := n.log.Append(entry); err != nil {
 		n.mu.Unlock()
+
+		n.getLogger().Error(
+			"failed to append proposed entry to raft log",
+			"index", index,
+			"term", entry.Term,
+			"error", err,
+		)
+
 		return 0, fmt.Errorf(
 			"append proposed entry to raft log: %w",
 			err,
 		)
 	}
 
-	// The leader itself counts toward the replication majority.
-	//
-	// This is especially important for a single-node cluster, where
-	// the leader is already the complete majority and therefore the
-	// newly appended entry can be committed immediately.
 	advanced := n.advanceCommitIndexLocked()
 
 	transport := n.transport
 	peerIDs := append([]NodeID(nil), n.peerIDs...)
+	term := n.state.Persistent.CurrentTerm
 
 	n.mu.Unlock()
 
-	// Apply outside the Raft lock because applying may block on the
-	// apply channel and must never hold the Raft mutex.
+	n.getLogger().Debug(
+		"raft proposal accepted",
+		"index", index,
+		"term", term,
+		"data_size", len(data),
+		"peer_count", len(peerIDs),
+		"commit_advanced", advanced,
+	)
+
 	if advanced {
 		n.applyCommitted()
 	}
@@ -248,6 +309,8 @@ func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 }
 
 func (n *RaftNode) RequestVote(args RequestVoteArgs) (reply RequestVoteReply) {
+	logger := n.getLogger()
+
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
@@ -265,6 +328,14 @@ func (n *RaftNode) RequestVote(args RequestVoteArgs) (reply RequestVoteReply) {
 	}
 
 	if args.Term < n.state.Persistent.CurrentTerm {
+		logger.Debug(
+			"vote denied",
+			"candidate_id", args.CandidateID,
+			"request_term", args.Term,
+			"current_term", n.state.Persistent.CurrentTerm,
+			"reason", "stale_term",
+		)
+
 		return reply
 	}
 
@@ -276,6 +347,14 @@ func (n *RaftNode) RequestVote(args RequestVoteArgs) (reply RequestVoteReply) {
 
 		if err := n.persistStateLocked(); err != nil {
 			reply.Term = n.state.Persistent.CurrentTerm
+
+			logger.Error(
+				"failed to persist higher-term vote state",
+				"candidate_id", args.CandidateID,
+				"term", args.Term,
+				"error", err,
+			)
+
 			return reply
 		}
 	}
@@ -284,6 +363,13 @@ func (n *RaftNode) RequestVote(args RequestVoteArgs) (reply RequestVoteReply) {
 
 	if n.state.Persistent.VotedFor != "" &&
 		n.state.Persistent.VotedFor != args.CandidateID {
+		logger.Debug(
+			"vote denied",
+			"candidate_id", args.CandidateID,
+			"term", reply.Term,
+			"reason", "already_voted",
+		)
+
 		return reply
 	}
 
@@ -291,6 +377,15 @@ func (n *RaftNode) RequestVote(args RequestVoteArgs) (reply RequestVoteReply) {
 		args.LastLogIndex,
 		args.LastLogTerm,
 	) {
+		logger.Debug(
+			"vote denied",
+			"candidate_id", args.CandidateID,
+			"term", reply.Term,
+			"reason", "candidate_log_outdated",
+			"candidate_last_log_index", args.LastLogIndex,
+			"candidate_last_log_term", args.LastLogTerm,
+		)
+
 		return reply
 	}
 
@@ -298,12 +393,26 @@ func (n *RaftNode) RequestVote(args RequestVoteArgs) (reply RequestVoteReply) {
 
 	if err := n.persistStateLocked(); err != nil {
 		reply.Term = n.state.Persistent.CurrentTerm
+
+		logger.Error(
+			"failed to persist granted vote",
+			"candidate_id", args.CandidateID,
+			"term", reply.Term,
+			"error", err,
+		)
+
 		return reply
 	}
 
 	reply.Term = n.state.Persistent.CurrentTerm
 	reply.VoteGranted = true
 	n.electionElapsed = 0
+
+	logger.Debug(
+		"vote granted",
+		"candidate_id", args.CandidateID,
+		"term", reply.Term,
+	)
 
 	return reply
 }
@@ -363,10 +472,12 @@ func (n *RaftNode) hasElectionMajority(clusterSize int) bool {
 }
 
 func (n *RaftNode) tryBecomeLeader() bool {
+	logger := n.getLogger()
+
 	n.mu.Lock()
-	defer n.mu.Unlock()
 
 	if n.state.Role != Candidate {
+		n.mu.Unlock()
 		return false
 	}
 
@@ -374,10 +485,23 @@ func (n *RaftNode) tryBecomeLeader() bool {
 	requiredVotes := clusterSize/2 + 1
 
 	if len(n.state.Election.VotesReceived) < requiredVotes {
+		n.mu.Unlock()
 		return false
 	}
 
 	n.becomeLeaderLocked()
+
+	term := n.state.Persistent.CurrentTerm
+	votes := len(n.state.Election.VotesReceived)
+
+	n.mu.Unlock()
+
+	logger.Info(
+		"raft election won",
+		"term", term,
+		"votes", votes,
+		"required_votes", requiredVotes,
+	)
 
 	return true
 }
@@ -393,8 +517,9 @@ type Peer interface {
 }
 
 func (n *RaftNode) startElection() (Term, error) {
+	logger := n.getLogger()
+
 	n.mu.Lock()
-	defer n.mu.Unlock()
 
 	n.state.Role = Candidate
 	n.state.Persistent.CurrentTerm++
@@ -410,10 +535,33 @@ func (n *RaftNode) startElection() (Term, error) {
 
 	if err := n.persistStateLocked(); err != nil {
 		n.finishElectionLocked("failed")
+
+		term := n.state.Persistent.CurrentTerm
+
+		n.mu.Unlock()
+
+		logger.Error(
+			"failed to persist election state",
+			"term", term,
+			"error", err,
+		)
+
 		return 0, err
 	}
 
-	return n.state.Persistent.CurrentTerm, nil
+	term := n.state.Persistent.CurrentTerm
+	peerCount := len(n.peerIDs)
+
+	n.mu.Unlock()
+
+	logger.Info(
+		"raft election started",
+		"term", term,
+		"peer_count", peerCount,
+		"required_votes", majority(peerCount+1),
+	)
+
+	return term, nil
 }
 
 func (n *RaftNode) requestVotes() {
@@ -429,6 +577,12 @@ func (n *RaftNode) requestVotes() {
 	n.mu.RUnlock()
 
 	if transport == nil {
+		n.getLogger().Debug(
+			"raft vote requests skipped",
+			"term", term,
+			"reason", "transport_unavailable",
+		)
+
 		return
 	}
 
@@ -451,6 +605,13 @@ func (n *RaftNode) requestVotes() {
 		cancel()
 
 		if err != nil {
+			n.getLogger().Debug(
+				"vote request failed",
+				"peer_id", peerID,
+				"term", term,
+				"error", err,
+			)
+
 			continue
 		}
 
@@ -462,8 +623,9 @@ func (n *RaftNode) handleVoteReply(
 	electionTerm Term,
 	reply RequestVoteReply,
 ) {
+	logger := n.getLogger()
+
 	n.mu.Lock()
-	defer n.mu.Unlock()
 
 	if reply.Term > n.state.Persistent.CurrentTerm {
 		n.finishElectionLocked("lost")
@@ -475,29 +637,67 @@ func (n *RaftNode) handleVoteReply(
 		n.state.Election.VotesReceived = make(map[NodeID]struct{})
 
 		if err := n.persistStateLocked(); err != nil {
+			n.mu.Unlock()
+
+			logger.Error(
+				"failed to persist higher-term follower transition",
+				"higher_term", reply.Term,
+				"error", err,
+			)
+
 			return
 		}
+
+		n.mu.Unlock()
+
+		logger.Info(
+			"raft election stepped down due to higher term",
+			"election_term", electionTerm,
+			"higher_term", reply.Term,
+		)
 
 		return
 	}
 
 	if n.state.Role != Candidate {
+		n.mu.Unlock()
 		return
 	}
 
 	if electionTerm != n.state.Persistent.CurrentTerm {
+		n.mu.Unlock()
 		return
 	}
 
 	if reply.Term != electionTerm {
+		n.mu.Unlock()
 		return
 	}
 
 	if !reply.VoteGranted {
+		n.mu.Unlock()
+
+		logger.Debug(
+			"vote request rejected",
+			"voter_id", reply.VoterID,
+			"term", electionTerm,
+		)
+
 		return
 	}
 
 	n.state.Election.VotesReceived[reply.VoterID] = struct{}{}
+
+	votes := len(n.state.Election.VotesReceived)
+
+	n.mu.Unlock()
+
+	logger.Debug(
+		"vote received",
+		"voter_id", reply.VoterID,
+		"term", electionTerm,
+		"votes", votes,
+	)
 }
 
 func (n *RaftNode) runElection() {
@@ -532,6 +732,12 @@ func (n *RaftNode) onElectionTimeout() {
 	if state.Role == Leader {
 		return
 	}
+
+	n.getLogger().Debug(
+		"raft election timeout reached",
+		"term", state.Persistent.CurrentTerm,
+		"role", state.Role,
+	)
 
 	if _, err := n.startElection(); err != nil {
 		return
@@ -579,6 +785,16 @@ func (n *RaftNode) AppendEntries(
 
 	if args.Term < n.state.Persistent.CurrentTerm {
 		n.mu.Unlock()
+
+		n.getLogger().Debug(
+			"append entries rejected",
+			"leader_id", args.LeaderID,
+			"request_term", args.Term,
+			"current_term", reply.Term,
+			"entry_count", len(args.Entries),
+			"reason", "stale_term",
+		)
+
 		return reply
 	}
 
@@ -590,6 +806,14 @@ func (n *RaftNode) AppendEntries(
 
 		if err := n.persistStateLocked(); err != nil {
 			n.mu.Unlock()
+
+			n.getLogger().Error(
+				"failed to persist higher-term append entries state",
+				"leader_id", args.LeaderID,
+				"term", args.Term,
+				"error", err,
+			)
+
 			return reply
 		}
 	}
@@ -598,6 +822,17 @@ func (n *RaftNode) AppendEntries(
 		prevEntry, ok := n.log.Get(args.PrevLogIndex)
 		if !ok || prevEntry.Term != args.PrevLogTerm {
 			n.mu.Unlock()
+
+			n.getLogger().Debug(
+				"append entries rejected",
+				"leader_id", args.LeaderID,
+				"request_term", args.Term,
+				"entry_count", len(args.Entries),
+				"reason", "log_mismatch",
+				"prev_log_index", args.PrevLogIndex,
+				"prev_log_term", args.PrevLogTerm,
+			)
+
 			return reply
 		}
 	}
@@ -632,11 +867,28 @@ func (n *RaftNode) AppendEntries(
 				newEntries,
 			); err != nil {
 				n.mu.Unlock()
+
+				n.getLogger().Error(
+					"failed to replace raft log suffix",
+					"leader_id", args.LeaderID,
+					"replace_from", replaceFrom,
+					"entry_count", len(newEntries),
+					"error", err,
+				)
+
 				return reply
 			}
 
 			if err := n.storage.Sync(); err != nil {
 				n.mu.Unlock()
+
+				n.getLogger().Error(
+					"failed to sync replaced raft log suffix",
+					"leader_id", args.LeaderID,
+					"replace_from", replaceFrom,
+					"error", err,
+				)
+
 				return reply
 			}
 
@@ -645,23 +897,55 @@ func (n *RaftNode) AppendEntries(
 			for _, entry := range newEntries {
 				if err := n.log.Append(entry); err != nil {
 					n.mu.Unlock()
+
+					n.getLogger().Error(
+						"failed to append replicated raft entry",
+						"leader_id", args.LeaderID,
+						"index", entry.Index,
+						"error", err,
+					)
+
 					return reply
 				}
 			}
 		} else {
 			if err := n.storage.AppendEntries(newEntries); err != nil {
 				n.mu.Unlock()
+
+				n.getLogger().Error(
+					"failed to persist replicated raft entries",
+					"leader_id", args.LeaderID,
+					"entry_count", len(newEntries),
+					"error", err,
+				)
+
 				return reply
 			}
 
 			if err := n.storage.Sync(); err != nil {
 				n.mu.Unlock()
+
+				n.getLogger().Error(
+					"failed to sync replicated raft entries",
+					"leader_id", args.LeaderID,
+					"entry_count", len(newEntries),
+					"error", err,
+				)
+
 				return reply
 			}
 
 			for _, entry := range newEntries {
 				if err := n.log.Append(entry); err != nil {
 					n.mu.Unlock()
+
+					n.getLogger().Error(
+						"failed to append replicated raft entry",
+						"leader_id", args.LeaderID,
+						"index", entry.Index,
+						"error", err,
+					)
+
 					return reply
 				}
 			}
@@ -687,7 +971,21 @@ func (n *RaftNode) AppendEntries(
 	reply.Term = n.state.Persistent.CurrentTerm
 	reply.Success = true
 
+	entryCount := len(args.Entries)
+	commitIndex := n.state.Volatile.CommitIndex
+
 	n.mu.Unlock()
+
+	if entryCount > 0 {
+		n.getLogger().Debug(
+			"append entries accepted",
+			"leader_id", args.LeaderID,
+			"term", reply.Term,
+			"entry_count", entryCount,
+			"commit_index", commitIndex,
+			"commit_advanced", commitAdvanced,
+		)
+	}
 
 	if commitAdvanced {
 		n.applyCommitted()
@@ -811,6 +1109,14 @@ func (n *RaftNode) replicateTo(peerID NodeID) {
 		cancel()
 
 		if err != nil {
+			n.getLogger().Debug(
+				"append entries transport failure",
+				"peer_id", peerID,
+				"term", args.Term,
+				"entry_count", len(args.Entries),
+				"error", err,
+			)
+
 			return
 		}
 
@@ -821,6 +1127,16 @@ func (n *RaftNode) replicateTo(peerID NodeID) {
 		)
 
 		if reply.Success {
+			if len(args.Entries) > 0 {
+				n.getLogger().Debug(
+					"raft entries replicated",
+					"peer_id", peerID,
+					"term", args.Term,
+					"entry_count", len(args.Entries),
+					"last_entry_index", args.Entries[len(args.Entries)-1].Index,
+				)
+			}
+
 			return
 		}
 
@@ -849,10 +1165,25 @@ func (n *RaftNode) handleAppendEntriesReply(
 
 		if err := n.persistStateLocked(); err != nil {
 			n.mu.Unlock()
+
+			n.getLogger().Error(
+				"failed to persist higher-term follower transition",
+				"peer_id", peerID,
+				"higher_term", reply.Term,
+				"error", err,
+			)
+
 			return
 		}
 
 		n.mu.Unlock()
+
+		n.getLogger().Info(
+			"raft leader stepped down after higher term",
+			"peer_id", peerID,
+			"higher_term", reply.Term,
+		)
+
 		return
 	}
 
@@ -871,7 +1202,17 @@ func (n *RaftNode) handleAppendEntriesReply(
 			n.state.Leader.NextIndex[peerID]--
 		}
 
+		nextIndex := n.state.Leader.NextIndex[peerID]
+
 		n.mu.Unlock()
+
+		n.getLogger().Debug(
+			"raft log replication rejected",
+			"peer_id", peerID,
+			"term", args.Term,
+			"next_index", nextIndex,
+		)
+
 		return
 	}
 
@@ -889,10 +1230,17 @@ func (n *RaftNode) handleAppendEntriesReply(
 	}
 
 	advanced := n.advanceCommitIndexLocked()
+	commitIndex := n.state.Volatile.CommitIndex
 
 	n.mu.Unlock()
 
 	if advanced {
+		n.getLogger().Debug(
+			"raft commit index advanced",
+			"commit_index", commitIndex,
+			"peer_id", peerID,
+		)
+
 		n.applyCommitted()
 	}
 }
@@ -945,6 +1293,11 @@ func (n *RaftNode) advanceCommitIndex() {
 	n.mu.Unlock()
 
 	if advanced {
+		n.getLogger().Debug(
+			"raft commit index advanced",
+			"commit_index", n.State().Volatile.CommitIndex,
+		)
+
 		n.applyCommitted()
 	}
 }
@@ -1013,6 +1366,13 @@ func (n *RaftNode) sendHeartbeat(peerID NodeID) {
 	cancel()
 
 	if err != nil {
+		n.getLogger().Debug(
+			"heartbeat transport failure",
+			"peer_id", peerID,
+			"term", args.Term,
+			"error", err,
+		)
+
 		return
 	}
 
@@ -1039,6 +1399,7 @@ func (n *RaftNode) heartbeat() {
 		n.replicateTo(peerID)
 	}
 }
+
 func NewRaftNodeWithStorage(
 	id NodeID,
 	store storage.Storage,
@@ -1105,6 +1466,7 @@ func NewRaftNodeWithStorage(
 		peerIDs:   make([]NodeID, 0),
 		applyCh:   make(chan LogEntry, 100),
 		metrics:   NoopMetrics{},
+		logger:    discardRaftLogger(),
 
 		state: State{
 			Persistent: persistentState,
@@ -1134,6 +1496,7 @@ func NewRaftNodeWithStorage(
 		rpcTimeout:       DefaultRPCTimeout,
 	}, nil
 }
+
 func (n *RaftNode) Storage() storage.Storage {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
@@ -1191,10 +1554,17 @@ func (n *RaftNode) Start() error {
 	defer n.runMu.Unlock()
 
 	if n.running {
-		return fmt.Errorf(
+		err := fmt.Errorf(
 			"raft node %s is already running",
 			n.id,
 		)
+
+		n.getLogger().Warn(
+			"raft node start rejected",
+			"error", err,
+		)
+
+		return err
 	}
 
 	n.stopCh = make(chan struct{})
@@ -1202,6 +1572,13 @@ func (n *RaftNode) Start() error {
 	n.running = true
 
 	go n.run()
+
+	n.getLogger().Info(
+		"raft node started",
+		"tick_interval", n.tickInterval.String(),
+		"election_timeout", n.electionTimeout,
+		"heartbeat_timeout", n.heartbeatTimeout,
+	)
 
 	return nil
 }
@@ -1273,6 +1650,10 @@ func (n *RaftNode) Stop() {
 	n.runMu.Unlock()
 
 	<-doneCh
+
+	n.getLogger().Info(
+		"raft node stopped",
+	)
 }
 
 func (n *RaftNode) tick() (
@@ -1330,35 +1711,82 @@ func (n *RaftNode) CreateSnapshot(
 	index LogIndex,
 	data []byte,
 ) error {
+	logger := n.getLogger()
+
 	n.mu.Lock()
-	defer n.mu.Unlock()
 
 	if index > n.state.Volatile.LastApplied {
-		return fmt.Errorf(
+		err := fmt.Errorf(
 			"cannot snapshot unapplied index %d: last applied %d",
 			index,
 			n.state.Volatile.LastApplied,
 		)
+
+		lastApplied := n.state.Volatile.LastApplied
+
+		n.mu.Unlock()
+
+		logger.Warn(
+			"snapshot creation rejected",
+			"index", index,
+			"last_applied", lastApplied,
+			"error", err,
+		)
+
+		return err
 	}
 
 	if index > n.state.Volatile.CommitIndex {
-		return fmt.Errorf(
+		err := fmt.Errorf(
 			"cannot snapshot uncommitted index %d: commit index %d",
 			index,
 			n.state.Volatile.CommitIndex,
 		)
+
+		commitIndex := n.state.Volatile.CommitIndex
+
+		n.mu.Unlock()
+
+		logger.Warn(
+			"snapshot creation rejected",
+			"index", index,
+			"commit_index", commitIndex,
+			"error", err,
+		)
+
+		return err
 	}
 
 	if index == 0 {
-		return fmt.Errorf("cannot snapshot index 0")
+		err := fmt.Errorf("cannot snapshot index 0")
+
+		n.mu.Unlock()
+
+		logger.Warn(
+			"snapshot creation rejected",
+			"index", index,
+			"error", err,
+		)
+
+		return err
 	}
 
 	entry, ok := n.log.Get(index)
 	if !ok {
-		return fmt.Errorf(
+		err := fmt.Errorf(
 			"cannot snapshot missing log index %d",
 			index,
 		)
+
+		n.mu.Unlock()
+
+		logger.Warn(
+			"snapshot creation rejected",
+			"index", index,
+			"error", err,
+		)
+
+		return err
 	}
 
 	snapshot := model.Snapshot{
@@ -1368,25 +1796,67 @@ func (n *RaftNode) CreateSnapshot(
 	}
 
 	if err := n.storage.SaveSnapshot(snapshot); err != nil {
-		return fmt.Errorf(
+		wrappedErr := fmt.Errorf(
 			"save snapshot: %w",
 			err,
 		)
+
+		n.mu.Unlock()
+
+		logger.Error(
+			"failed to persist snapshot",
+			"last_included_index", index,
+			"last_included_term", entry.Term,
+			"error", wrappedErr,
+		)
+
+		return wrappedErr
 	}
 
 	if err := n.storage.Sync(); err != nil {
-		return fmt.Errorf(
+		wrappedErr := fmt.Errorf(
 			"sync snapshot: %w",
 			err,
 		)
+
+		n.mu.Unlock()
+
+		logger.Error(
+			"failed to sync snapshot",
+			"last_included_index", index,
+			"last_included_term", entry.Term,
+			"error", wrappedErr,
+		)
+
+		return wrappedErr
 	}
 
 	if err := n.log.Compact(snapshot); err != nil {
-		return fmt.Errorf(
+		wrappedErr := fmt.Errorf(
 			"compact log after snapshot: %w",
 			err,
 		)
+
+		n.mu.Unlock()
+
+		logger.Error(
+			"failed to compact raft log after snapshot",
+			"last_included_index", index,
+			"last_included_term", entry.Term,
+			"error", wrappedErr,
+		)
+
+		return wrappedErr
 	}
+
+	n.mu.Unlock()
+
+	logger.Info(
+		"raft snapshot created",
+		"last_included_index", index,
+		"last_included_term", entry.Term,
+		"snapshot_size", len(data),
+	)
 
 	return nil
 }
@@ -1420,6 +1890,8 @@ func (n *RaftNode) SetSnapshotRestore(
 func (n *RaftNode) InstallSnapshot(
 	args InstallSnapshotArgs,
 ) InstallSnapshotReply {
+	logger := n.getLogger()
+
 	n.mu.Lock()
 
 	reply := InstallSnapshotReply{
@@ -1427,35 +1899,54 @@ func (n *RaftNode) InstallSnapshot(
 		FollowerID: n.id,
 	}
 
-	// 1. Reject snapshots from an older term.
 	if args.Term < n.state.Persistent.CurrentTerm {
 		n.mu.Unlock()
+
+		logger.Debug(
+			"snapshot rejected",
+			"leader_id", args.LeaderID,
+			"request_term", args.Term,
+			"current_term", reply.Term,
+			"reason", "stale_term",
+		)
+
 		return reply
 	}
 
-	// 2. Adopt the newer term.
 	if args.Term > n.state.Persistent.CurrentTerm {
 		n.state.Persistent.CurrentTerm = args.Term
 		n.state.Persistent.VotedFor = ""
 
 		if err := n.persistStateLocked(); err != nil {
 			n.mu.Unlock()
+
+			logger.Error(
+				"failed to persist term from snapshot",
+				"leader_id", args.LeaderID,
+				"term", args.Term,
+				"error", err,
+			)
+
 			return reply
 		}
 	}
 
-	// 3. This node is now following the snapshot sender.
 	n.state.Role = Follower
 	n.state.LeaderID = args.LeaderID
 	n.electionElapsed = 0
 
 	reply.Term = n.state.Persistent.CurrentTerm
 
-	// 4. Ignore a snapshot that is already covered by our
-	// current snapshot boundary.
 	if args.LastIncludedIndex <= n.log.LastIncludedIndex() {
 		reply.Success = true
 		n.mu.Unlock()
+
+		logger.Debug(
+			"snapshot already installed",
+			"leader_id", args.LeaderID,
+			"last_included_index", args.LastIncludedIndex,
+		)
+
 		return reply
 	}
 
@@ -1465,38 +1956,63 @@ func (n *RaftNode) InstallSnapshot(
 		Data:              append([]byte(nil), args.Data...),
 	}
 
-	// 5. Persist the snapshot before modifying the logical log.
 	if err := n.storage.SaveSnapshot(snapshot); err != nil {
 		n.mu.Unlock()
+
+		logger.Error(
+			"failed to persist installed snapshot",
+			"leader_id", args.LeaderID,
+			"last_included_index", args.LastIncludedIndex,
+			"error", err,
+		)
+
 		return reply
 	}
 
 	if err := n.storage.Sync(); err != nil {
 		n.mu.Unlock()
+
+		logger.Error(
+			"failed to sync installed snapshot",
+			"leader_id", args.LeaderID,
+			"last_included_index", args.LastIncludedIndex,
+			"error", err,
+		)
+
 		return reply
 	}
 
-	// 6. Restore the state machine before declaring the snapshot
-	// installed in Raft state.
 	restore := n.snapshotRestore
 
 	n.mu.Unlock()
 
 	if restore != nil {
 		if err := restore(snapshot); err != nil {
+			logger.Error(
+				"failed to restore state machine from snapshot",
+				"leader_id", args.LeaderID,
+				"last_included_index", args.LastIncludedIndex,
+				"error", err,
+			)
+
 			return reply
 		}
 	}
 
 	n.mu.Lock()
-	defer n.mu.Unlock()
 
-	// 7. Establish the new snapshot boundary.
 	if err := n.log.RestoreSnapshot(snapshot); err != nil {
+		n.mu.Unlock()
+
+		logger.Error(
+			"failed to restore raft log snapshot boundary",
+			"last_included_index", args.LastIncludedIndex,
+			"error", err,
+		)
+
 		return reply
 	}
 
-	// 8. The snapshot represents committed/applied state.
 	if n.state.Volatile.CommitIndex <
 		snapshot.LastIncludedIndex {
 		n.state.Volatile.CommitIndex =
@@ -1511,6 +2027,17 @@ func (n *RaftNode) InstallSnapshot(
 
 	reply.Term = n.state.Persistent.CurrentTerm
 	reply.Success = true
+
+	n.mu.Unlock()
+
+	logger.Info(
+		"raft snapshot installed",
+		"leader_id", args.LeaderID,
+		"term", args.Term,
+		"last_included_index", args.LastIncludedIndex,
+		"last_included_term", args.LastIncludedTerm,
+		"snapshot_size", len(args.Data),
+	)
 
 	return reply
 }
@@ -1567,10 +2094,25 @@ func (n *RaftNode) handleInstallSnapshotReply(
 
 		if err := n.persistStateLocked(); err != nil {
 			n.mu.Unlock()
+
+			n.getLogger().Error(
+				"failed to persist higher-term follower transition",
+				"peer_id", peerID,
+				"higher_term", reply.Term,
+				"error", err,
+			)
+
 			return
 		}
 
 		n.mu.Unlock()
+
+		n.getLogger().Info(
+			"raft leader stepped down after higher-term snapshot reply",
+			"peer_id", peerID,
+			"higher_term", reply.Term,
+		)
+
 		return
 	}
 
@@ -1586,6 +2128,14 @@ func (n *RaftNode) handleInstallSnapshotReply(
 
 	if !reply.Success {
 		n.mu.Unlock()
+
+		n.getLogger().Debug(
+			"snapshot replication rejected",
+			"peer_id", peerID,
+			"term", args.Term,
+			"last_included_index", args.LastIncludedIndex,
+		)
+
 		return
 	}
 
@@ -1604,6 +2154,13 @@ func (n *RaftNode) handleInstallSnapshotReply(
 	advanced := n.advanceCommitIndexLocked()
 
 	n.mu.Unlock()
+
+	n.getLogger().Info(
+		"raft snapshot replicated",
+		"peer_id", peerID,
+		"term", args.Term,
+		"last_included_index", args.LastIncludedIndex,
+	)
 
 	if advanced {
 		n.applyCommitted()
@@ -1637,6 +2194,14 @@ func (n *RaftNode) sendInstallSnapshot(
 	cancel()
 
 	if err != nil {
+		n.getLogger().Debug(
+			"snapshot replication transport failure",
+			"peer_id", peerID,
+			"term", args.Term,
+			"last_included_index", args.LastIncludedIndex,
+			"error", err,
+		)
+
 		return false
 	}
 
@@ -1648,6 +2213,7 @@ func (n *RaftNode) sendInstallSnapshot(
 
 	return reply.Success
 }
+
 func cloneEntries(entries []LogEntry) []LogEntry {
 	cloned := make([]LogEntry, len(entries))
 
@@ -1658,6 +2224,7 @@ func cloneEntries(entries []LogEntry) []LogEntry {
 
 	return cloned
 }
+
 func (n *RaftNode) SetMetrics(metrics Metrics) {
 	if metrics == nil {
 		metrics = NoopMetrics{}
@@ -1708,18 +2275,36 @@ func (n *RaftNode) finishElectionLocked(result string) {
 
 	n.electionStartedAt = time.Time{}
 }
-func (n *RaftNode) SetLogger(logger *slog.Logger) {
+
+func discardRaftLogger() *slog.Logger {
+	return slog.New(
+		slog.NewTextHandler(io.Discard, nil),
+	)
+}
+
+func (n *RaftNode) getLogger() *slog.Logger {
+	n.mu.RLock()
+	logger := n.logger
+	n.mu.RUnlock()
+
 	if logger == nil {
-		logger = slog.New(
-			slog.NewTextHandler(io.Discard, nil),
-		)
+		return discardRaftLogger()
 	}
 
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	return logger
+}
 
-	n.logger = logger.With(
+func (n *RaftNode) SetLogger(logger *slog.Logger) {
+	if logger == nil {
+		logger = discardRaftLogger()
+	}
+
+	logger = logger.With(
 		slog.String("component", "raft"),
 		slog.String("node_id", string(n.id)),
 	)
+
+	n.mu.Lock()
+	n.logger = logger
+	n.mu.Unlock()
 }
