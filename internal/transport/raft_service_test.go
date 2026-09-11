@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	raftiqv1 "github.com/sanchar127/raftiq/api/proto"
 	"github.com/sanchar127/raftiq/internal/raft"
@@ -261,3 +262,174 @@ func TestRaftServicePreservesRequestDataIndependently(t *testing.T) {
 var _ raftRPC = (*fakeRaftNode)(nil)
 
 var _ = errors.New
+
+type fakeRPCMetrics struct {
+	requests  map[string]int
+	errors    map[string]int
+	durations map[string]int
+}
+
+func newFakeRPCMetrics() *fakeRPCMetrics {
+	return &fakeRPCMetrics{
+		requests:  make(map[string]int),
+		errors:    make(map[string]int),
+		durations: make(map[string]int),
+	}
+}
+
+func (m *fakeRPCMetrics) IncRPCRequest(method string) {
+	m.requests[method]++
+}
+
+func (m *fakeRPCMetrics) IncRPCError(method string) {
+	m.errors[method]++
+}
+
+func (m *fakeRPCMetrics) ObserveRPCDuration(method string, _ time.Duration) {
+	m.durations[method]++
+}
+
+var _ RPCMetrics = (*fakeRPCMetrics)(nil)
+
+func TestRaftServiceMetricsRequestVoteSuccess(t *testing.T) {
+	fakeNode := &fakeRaftNode{
+		requestVoteReply: raft.RequestVoteReply{
+			Term:        5,
+			VoterID:     "node-2",
+			VoteGranted: true,
+		},
+	}
+
+	service, err := NewRaftService(fakeNode)
+	require.NoError(t, err)
+
+	metrics := newFakeRPCMetrics()
+	service.SetMetrics(metrics)
+
+	_, err = service.RequestVote(context.Background(), &raftiqv1.RequestVoteRequest{
+		Term:         5,
+		CandidateId:  "node-1",
+		LastLogIndex: 10,
+		LastLogTerm:  5,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 1, metrics.requests[rpcMethodRequestVote])
+	require.Equal(t, 0, metrics.errors[rpcMethodRequestVote])
+	require.Equal(t, 1, metrics.durations[rpcMethodRequestVote])
+}
+
+func TestRaftServiceMetricsRequestVoteError(t *testing.T) {
+	fakeNode := &fakeRaftNode{}
+
+	service, err := NewRaftService(fakeNode)
+	require.NoError(t, err)
+
+	metrics := newFakeRPCMetrics()
+	service.SetMetrics(metrics)
+
+	_, err = service.RequestVote(context.Background(), nil)
+
+	require.Error(t, err)
+	require.Equal(t, 1, metrics.requests[rpcMethodRequestVote])
+	require.Equal(t, 1, metrics.errors[rpcMethodRequestVote])
+	require.Equal(t, 1, metrics.durations[rpcMethodRequestVote])
+}
+
+func TestRaftServiceMetricsAppendEntriesSuccess(t *testing.T) {
+	fakeNode := &fakeRaftNode{
+		appendEntriesReply: raft.AppendEntriesReply{
+			Term:       5,
+			FollowerID: "node-2",
+			Success:    true,
+		},
+	}
+
+	service, err := NewRaftService(fakeNode)
+	require.NoError(t, err)
+
+	metrics := newFakeRPCMetrics()
+	service.SetMetrics(metrics)
+
+	_, err = service.AppendEntries(
+		context.Background(),
+		&raftiqv1.AppendEntriesRequest{
+			Term:         5,
+			LeaderId:     "node-1",
+			PrevLogIndex: 9,
+			PrevLogTerm:  5,
+			LeaderCommit: 9,
+		},
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, 1, metrics.requests[rpcMethodAppendEntries])
+	require.Equal(t, 0, metrics.errors[rpcMethodAppendEntries])
+	require.Equal(t, 1, metrics.durations[rpcMethodAppendEntries])
+}
+
+func TestRaftServiceMetricsAppendEntriesError(t *testing.T) {
+	fakeNode := &fakeRaftNode{}
+
+	service, err := NewRaftService(fakeNode)
+	require.NoError(t, err)
+
+	metrics := newFakeRPCMetrics()
+	service.SetMetrics(metrics)
+
+	_, err = service.AppendEntries(context.Background(), nil)
+
+	require.Error(t, err)
+	require.Equal(t, 1, metrics.requests[rpcMethodAppendEntries])
+	require.Equal(t, 1, metrics.errors[rpcMethodAppendEntries])
+	require.Equal(t, 1, metrics.durations[rpcMethodAppendEntries])
+}
+
+func TestRaftServiceMetricsInstallSnapshotSuccess(t *testing.T) {
+	fakeNode := &fakeRaftNode{
+		installSnapshotReply: raft.InstallSnapshotReply{
+			Term:       5,
+			FollowerID: "node-2",
+			Success:    true,
+		},
+	}
+
+	service, err := NewRaftService(fakeNode)
+	require.NoError(t, err)
+
+	metrics := newFakeRPCMetrics()
+	service.SetMetrics(metrics)
+
+	_, err = service.InstallSnapshot(
+		context.Background(),
+		&raftiqv1.InstallSnapshotRequest{
+			Term:              5,
+			LeaderId:          "node-1",
+			LastIncludedIndex: 100,
+			LastIncludedTerm:  5,
+			Data:              []byte("snapshot"),
+		},
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, 1, metrics.requests[rpcMethodInstallSnapshot])
+	require.Equal(t, 0, metrics.errors[rpcMethodInstallSnapshot])
+	require.Equal(t, 1, metrics.durations[rpcMethodInstallSnapshot])
+}
+
+func TestRaftServiceMetricsInstallSnapshotError(t *testing.T) {
+	fakeNode := &fakeRaftNode{}
+
+	service, err := NewRaftService(fakeNode)
+	require.NoError(t, err)
+
+	metrics := newFakeRPCMetrics()
+	service.SetMetrics(metrics)
+
+	_, err = service.InstallSnapshot(context.Background(), nil)
+
+	require.Error(t, err)
+	require.Equal(t, 1, metrics.requests[rpcMethodInstallSnapshot])
+	require.Equal(t, 1, metrics.errors[rpcMethodInstallSnapshot])
+	require.Equal(t, 1, metrics.durations[rpcMethodInstallSnapshot])
+}

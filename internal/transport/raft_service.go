@@ -3,14 +3,23 @@ package transport
 import (
 	"context"
 	"errors"
+	"time"
 
 	raftiqv1 "github.com/sanchar127/raftiq/api/proto"
 	"github.com/sanchar127/raftiq/internal/raft"
 )
 
+const (
+	rpcMethodRequestVote     = "RequestVote"
+	rpcMethodAppendEntries   = "AppendEntries"
+	rpcMethodInstallSnapshot = "InstallSnapshot"
+)
+
 type RaftService struct {
 	raftiqv1.UnimplementedRaftServiceServer
-	node raftRPC
+
+	node    raftRPC
+	metrics RPCMetrics
 }
 
 type raftRPC interface {
@@ -25,14 +34,50 @@ func NewRaftService(node raftRPC) (*RaftService, error) {
 	}
 
 	return &RaftService{
-		node: node,
+		node:    node,
+		metrics: NoopRPCMetrics{},
 	}, nil
+}
+
+func (s *RaftService) SetMetrics(metrics RPCMetrics) {
+	if metrics == nil {
+		metrics = NoopRPCMetrics{}
+	}
+
+	s.metrics = metrics
+}
+
+func (s *RaftService) observeRPC(
+	method string,
+	startedAt time.Time,
+	err error,
+) {
+	s.metrics.IncRPCRequest(method)
+
+	if err != nil {
+		s.metrics.IncRPCError(method)
+	}
+
+	s.metrics.ObserveRPCDuration(
+		method,
+		time.Since(startedAt),
+	)
 }
 
 func (s *RaftService) RequestVote(
 	_ context.Context,
 	req *raftiqv1.RequestVoteRequest,
-) (*raftiqv1.RequestVoteResponse, error) {
+) (_ *raftiqv1.RequestVoteResponse, err error) {
+	startedAt := time.Now()
+
+	defer func() {
+		s.observeRPC(
+			rpcMethodRequestVote,
+			startedAt,
+			err,
+		)
+	}()
+
 	if req == nil {
 		return nil, errors.New("request vote request is required")
 	}
@@ -54,7 +99,17 @@ func (s *RaftService) RequestVote(
 func (s *RaftService) AppendEntries(
 	_ context.Context,
 	req *raftiqv1.AppendEntriesRequest,
-) (*raftiqv1.AppendEntriesResponse, error) {
+) (_ *raftiqv1.AppendEntriesResponse, err error) {
+	startedAt := time.Now()
+
+	defer func() {
+		s.observeRPC(
+			rpcMethodAppendEntries,
+			startedAt,
+			err,
+		)
+	}()
+
 	if req == nil {
 		return nil, errors.New("append entries request is required")
 	}
@@ -92,7 +147,17 @@ func (s *RaftService) AppendEntries(
 func (s *RaftService) InstallSnapshot(
 	_ context.Context,
 	req *raftiqv1.InstallSnapshotRequest,
-) (*raftiqv1.InstallSnapshotResponse, error) {
+) (_ *raftiqv1.InstallSnapshotResponse, err error) {
+	startedAt := time.Now()
+
+	defer func() {
+		s.observeRPC(
+			rpcMethodInstallSnapshot,
+			startedAt,
+			err,
+		)
+	}()
+
 	if req == nil {
 		return nil, errors.New("install snapshot request is required")
 	}

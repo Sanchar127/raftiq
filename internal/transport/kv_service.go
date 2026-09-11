@@ -3,163 +3,80 @@ package transport
 import (
 	"context"
 	"errors"
-	"time"
 
 	raftiqv1 "github.com/sanchar127/raftiq/api/proto"
-	"github.com/sanchar127/raftiq/internal/raft"
-	"github.com/sanchar127/raftiq/internal/observability"
 )
 
-const (
-	rpcMethodRequestVote      = "RequestVote"
-	rpcMethodAppendEntries    = "AppendEntries"
-	rpcMethodInstallSnapshot  = "InstallSnapshot"
-)
-
-type RaftService struct {
-	raftiqv1.UnimplementedRaftServiceServer
-
-	node    raftRPC
-	metrics *observability.Metrics
+type KVService struct {
+	raftiqv1.UnimplementedKVServiceServer
+	store kvRPC
 }
 
-type raftRPC interface {
-	RequestVote(args raft.RequestVoteArgs) raft.RequestVoteReply
-	AppendEntries(args raft.AppendEntriesArgs) raft.AppendEntriesReply
-	InstallSnapshot(args raft.InstallSnapshotArgs) raft.InstallSnapshotReply
+type kvRPC interface {
+	Get(ctx context.Context, key string) ([]byte, bool, error)
+	Put(ctx context.Context, key string, value []byte) error
+	Delete(ctx context.Context, key string) error
 }
 
-func NewRaftService(node raftRPC) (*RaftService, error) {
-	if node == nil {
-		return nil, errors.New("raft node is required")
+func NewKVService(store kvRPC) (*KVService, error) {
+	if store == nil {
+		return nil, errors.New("kv store is required")
 	}
 
-	return &RaftService{
-		node: node,
+	return &KVService{
+		store: store,
 	}, nil
 }
 
-func (s *RaftService) SetMetrics(metrics *observability.Metrics) {
-	s.metrics = metrics
-}
-
-func (s *RaftService) observeRPC(
-	method string,
-	startedAt time.Time,
-	err error,
-) {
-	if s.metrics == nil {
-		return
+func (s *KVService) Get(
+	ctx context.Context,
+	req *raftiqv1.GetRequest,
+) (*raftiqv1.GetResponse, error) {
+	if req == nil {
+		return nil, errors.New("get request is required")
 	}
 
-	s.metrics.RPCRequestsTotal.WithLabelValues(method).Inc()
-
+	value, found, err := s.store.Get(ctx, req.GetKey())
 	if err != nil {
-		s.metrics.RPCErrorsTotal.WithLabelValues(method).Inc()
+		return nil, err
 	}
 
-	s.metrics.RPCDuration.WithLabelValues(method).Observe(
-		time.Since(startedAt).Seconds(),
-	)
-}
-
-func (s *RaftService) RequestVote(
-	_ context.Context,
-	req *raftiqv1.RequestVoteRequest,
-) (_ *raftiqv1.RequestVoteResponse, err error) {
-	startedAt := time.Now()
-
-	defer func() {
-		s.observeRPC(rpcMethodRequestVote, startedAt, err)
-	}()
-
-	if req == nil {
-		return nil, errors.New("request vote request is required")
-	}
-
-	reply := s.node.RequestVote(raft.RequestVoteArgs{
-		Term:         raft.Term(req.GetTerm()),
-		CandidateID:  raft.NodeID(req.GetCandidateId()),
-		LastLogIndex: raft.LogIndex(req.GetLastLogIndex()),
-		LastLogTerm:  raft.Term(req.GetLastLogTerm()),
-	})
-
-	return &raftiqv1.RequestVoteResponse{
-		Term:        uint64(reply.Term),
-		VoterId:     string(reply.VoterID),
-		VoteGranted: reply.VoteGranted,
+	return &raftiqv1.GetResponse{
+		Value: append([]byte(nil), value...),
+		Found: found,
 	}, nil
 }
 
-func (s *RaftService) AppendEntries(
-	_ context.Context,
-	req *raftiqv1.AppendEntriesRequest,
-) (_ *raftiqv1.AppendEntriesResponse, err error) {
-	startedAt := time.Now()
-
-	defer func() {
-		s.observeRPC(rpcMethodAppendEntries, startedAt, err)
-	}()
-
+func (s *KVService) Put(
+	ctx context.Context,
+	req *raftiqv1.PutRequest,
+) (*raftiqv1.PutResponse, error) {
 	if req == nil {
-		return nil, errors.New("append entries request is required")
+		return nil, errors.New("put request is required")
 	}
 
-	entries := make([]raft.LogEntry, len(req.GetEntries()))
-
-	for i, entry := range req.GetEntries() {
-		if entry == nil {
-			return nil, errors.New("append entries contains nil log entry")
-		}
-
-		entries[i] = raft.LogEntry{
-			Index: raft.LogIndex(entry.GetIndex()),
-			Term:  raft.Term(entry.GetTerm()),
-			Data:  append([]byte(nil), entry.GetData()...),
-		}
+	if err := s.store.Put(
+		ctx,
+		req.GetKey(),
+		append([]byte(nil), req.GetValue()...),
+	); err != nil {
+		return nil, err
 	}
 
-	reply := s.node.AppendEntries(raft.AppendEntriesArgs{
-		Term:         raft.Term(req.GetTerm()),
-		LeaderID:     raft.NodeID(req.GetLeaderId()),
-		PrevLogIndex: raft.LogIndex(req.GetPrevLogIndex()),
-		PrevLogTerm:  raft.Term(req.GetPrevLogTerm()),
-		Entries:      entries,
-		LeaderCommit: raft.LogIndex(req.GetLeaderCommit()),
-	})
-
-	return &raftiqv1.AppendEntriesResponse{
-		Term:       uint64(reply.Term),
-		FollowerId: string(reply.FollowerID),
-		Success:    reply.Success,
-	}, nil
+	return &raftiqv1.PutResponse{}, nil
 }
 
-func (s *RaftService) InstallSnapshot(
-	_ context.Context,
-	req *raftiqv1.InstallSnapshotRequest,
-) (_ *raftiqv1.InstallSnapshotResponse, err error) {
-	startedAt := time.Now()
-
-	defer func() {
-		s.observeRPC(rpcMethodInstallSnapshot, startedAt, err)
-	}()
-
+func (s *KVService) Delete(
+	ctx context.Context,
+	req *raftiqv1.DeleteRequest,
+) (*raftiqv1.DeleteResponse, error) {
 	if req == nil {
-		return nil, errors.New("install snapshot request is required")
+		return nil, errors.New("delete request is required")
 	}
 
-	reply := s.node.InstallSnapshot(raft.InstallSnapshotArgs{
-		Term:              raft.Term(req.GetTerm()),
-		LeaderID:          raft.NodeID(req.GetLeaderId()),
-		LastIncludedIndex: raft.LogIndex(req.GetLastIncludedIndex()),
-		LastIncludedTerm:  raft.Term(req.GetLastIncludedTerm()),
-		Data:              append([]byte(nil), req.GetData()...),
-	})
+	if err := s.store.Delete(ctx, req.GetKey()); err != nil {
+		return nil, err
+	}
 
-	return &raftiqv1.InstallSnapshotResponse{
-		Term:       uint64(reply.Term),
-		FollowerId: string(reply.FollowerID),
-		Success:    reply.Success,
-	}, nil
+	return &raftiqv1.DeleteResponse{}, nil
 }
