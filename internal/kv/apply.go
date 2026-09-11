@@ -9,9 +9,29 @@ import (
 	"github.com/sanchar127/raftiq/internal/raft"
 )
 
+const (
+	KVOperationDecode  = "decode"
+	KVOperationUnknown = "unknown"
+)
+
 func Apply(store *Store, entry raft.LogEntry) ApplyResult {
+	return ApplyWithMetrics(store, entry, NoopKVMetrics{})
+}
+
+func ApplyWithMetrics(
+	store *Store,
+	entry raft.LogEntry,
+	metrics KVMetrics,
+) (result ApplyResult) {
+	if metrics == nil {
+		metrics = NoopKVMetrics{}
+	}
+
 	command, err := DecodeCommand(entry.Data)
 	if err != nil {
+		metrics.IncOperation(KVOperationDecode)
+		metrics.IncOperationError(KVOperationDecode)
+
 		return ApplyResult{
 			Err: fmt.Errorf(
 				"decode raft command at index %d: %w",
@@ -20,6 +40,15 @@ func Apply(store *Store, entry raft.LogEntry) ApplyResult {
 			),
 		}
 	}
+
+	operation := string(command.Type)
+	metrics.IncOperation(operation)
+
+	defer func() {
+		if result.Err != nil {
+			metrics.IncOperationError(operation)
+		}
+	}()
 
 	switch command.Type {
 	case CommandPut:
@@ -163,7 +192,10 @@ func Apply(store *Store, entry raft.LogEntry) ApplyResult {
 			Job: &job,
 			Err: err,
 		}
+
 	default:
+		metrics.IncOperationError(KVOperationUnknown)
+
 		return ApplyResult{
 			Err: fmt.Errorf(
 				"unknown command type %q",
