@@ -533,7 +533,7 @@ func (s *Server) proposeLockExpiration(
 
 	commandData, err := kv.EncodeCommand(kv.Command{
 		Type:         kv.CommandLockExpire,
-		Key:           key,
+		Key:          key,
 		FencingToken: token,
 	})
 	if err != nil {
@@ -673,4 +673,3 @@ func (s *Server) FencedPut(
 
 	return nil
 }
-

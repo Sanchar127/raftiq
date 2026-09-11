@@ -1,4 +1,5 @@
 package observability
+
 import (
 	"strings"
 	"testing"
