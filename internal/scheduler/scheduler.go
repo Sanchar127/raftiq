@@ -468,4 +468,3 @@ func discardSchedulerLogger() *slog.Logger {
 		slog.NewTextHandler(io.Discard, nil),
 	)
 }
-
