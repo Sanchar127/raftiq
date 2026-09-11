@@ -7,6 +7,7 @@ import (
 	"sync"
 	"log/slog"
 	"time"
+	"io"
 
 	"github.com/sanchar127/raftiq/internal/model"
 	"github.com/sanchar127/raftiq/internal/storage"
@@ -26,6 +27,7 @@ type RaftNode struct {
 	id    NodeID
 	state State
 	log   *Log
+	logger *slog.Logger
 
 	transport Transport
 	peerIDs   []NodeID
