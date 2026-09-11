@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"log/slog"
 	"time"
 
 	"github.com/sanchar127/raftiq/internal/model"
@@ -1704,4 +1705,19 @@ func (n *RaftNode) finishElectionLocked(result string) {
 	)
 
 	n.electionStartedAt = time.Time{}
+}
+func (n *RaftNode) SetLogger(logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		)
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.logger = logger.With(
+		slog.String("component", "raft"),
+		slog.String("node_id", string(n.id)),
+	)
 }
