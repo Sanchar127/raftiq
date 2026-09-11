@@ -2,9 +2,10 @@ package raft
 
 import (
 	"fmt"
+	"testing"
+
 	"github.com/sanchar127/raftiq/internal/model"
 	"github.com/stretchr/testify/require"
-	"testing"
 )
 
 func TestNewLog(t *testing.T) {

@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/sanchar127/raftiq/internal/model"
-	"github.com/sanchar127/raftiq/internal/storage"
 	"testing"
 	"time"
+
+	"github.com/sanchar127/raftiq/internal/model"
+	"github.com/sanchar127/raftiq/internal/storage"
 
 	"github.com/stretchr/testify/require"
 )

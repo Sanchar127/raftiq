@@ -2,6 +2,7 @@ package kv
 
 import (
 	"encoding/json"
+
 	"github.com/sanchar127/raftiq/internal/model"
 )
 

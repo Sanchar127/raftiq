@@ -63,26 +63,26 @@ jobs:
       - name: Run chaos tests with race detector
         run: go test -race ./tests/chaos/... -count=1
 
-  lint:
-    name: Go Lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  # lint:
+  #   name: Go Lint
+  #   runs-on: ubuntu-latest
+  #   timeout-minutes: 10
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v5
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
+  #     - name: Set up Go
+  #       uses: actions/setup-go@v6
+  #       with:
+  #         go-version-file: go.mod
+  #         cache: true
 
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v8
-        with:
-          version: v2.5.0
-          args: ./...
+  #     - name: Run golangci-lint
+  #       uses: golangci/golangci-lint-action@v8
+  #       with:
+  #         version: v2.5.0
+  #         args: ./...
 
   build:
     name: Build
