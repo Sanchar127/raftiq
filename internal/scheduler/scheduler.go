@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/sanchar127/raftiq/internal/kv"
@@ -77,14 +78,15 @@ func (s *HashWorkerSelector) SelectWorker(job model.Job) (string, error) {
 }
 
 type Scheduler struct {
-	raft    *raft.RaftNode
-	store   *kv.Store
-	applier *kv.Applier
-
+	raft     *raft.RaftNode
+	store    *kv.Store
+	applier  *kv.Applier
 	selector WorkerSelector
-
 	interval time.Duration
 	lease    time.Duration
+
+	metricsMu sync.RWMutex
+	metrics   SchedulerMetrics
 }
 
 type Config struct {
@@ -130,7 +132,27 @@ func New(
 		selector: selector,
 		interval: config.Interval,
 		lease:    config.Lease,
+		metrics:  NoopSchedulerMetrics{},
 	}, nil
+}
+
+func (s *Scheduler) SetMetrics(metrics SchedulerMetrics) {
+	s.metricsMu.Lock()
+	defer s.metricsMu.Unlock()
+
+	if metrics == nil {
+		s.metrics = NoopSchedulerMetrics{}
+		return
+	}
+
+	s.metrics = metrics
+}
+
+func (s *Scheduler) getMetrics() SchedulerMetrics {
+	s.metricsMu.RLock()
+	defer s.metricsMu.RUnlock()
+
+	return s.metrics
 }
 
 func (s *Scheduler) Run(ctx context.Context) error {
@@ -242,6 +264,8 @@ func (s *Scheduler) reclaimExpiredJob(
 		return result.Err
 	}
 
+	s.getMetrics().IncLeaseLosses()
+
 	return nil
 }
 
@@ -283,6 +307,10 @@ func (s *Scheduler) scheduleJob(
 
 		return result.Err
 	}
+
+	metrics := s.getMetrics()
+	metrics.IncScheduledJobs()
+	metrics.IncLeaseAcquisitions()
 
 	return nil
 }
