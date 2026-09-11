@@ -19,7 +19,8 @@ type ApplyResult struct {
 }
 
 type Applier struct {
-	store *Store
+	store   *Store
+	metrics KVMetrics
 
 	mu          sync.Mutex
 	lastApplied model.LogIndex
@@ -32,10 +33,23 @@ type Applier struct {
 func NewApplier(store *Store) *Applier {
 	applier := &Applier{
 		store:   store,
+		metrics: NoopKVMetrics{},
 		results: make(map[model.LogIndex]ApplyResult),
 	}
 
 	return applier
+}
+
+func (a *Applier) SetMetrics(metrics KVMetrics) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if metrics == nil {
+		a.metrics = NoopKVMetrics{}
+		return
+	}
+
+	a.metrics = metrics
 }
 
 func (a *Applier) Run(
@@ -52,7 +66,14 @@ func (a *Applier) Run(
 				return nil
 			}
 
-			result := Apply(a.store, entry)
+			a.mu.Lock()
+			metrics := a.metrics
+			if metrics == nil {
+				metrics = NoopKVMetrics{}
+			}
+			a.mu.Unlock()
+
+			result := ApplyWithMetrics(a.store, entry, metrics)
 
 			a.mu.Lock()
 
