@@ -243,11 +243,20 @@ func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 
 	return index, nil
 }
-func (n *RaftNode) RequestVote(args RequestVoteArgs) RequestVoteReply {
+
+func (n *RaftNode) RequestVote(args RequestVoteArgs) (reply RequestVoteReply) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	reply := RequestVoteReply{
+	defer func() {
+		n.metrics.IncVoteRequests()
+
+		if reply.VoteGranted {
+			n.metrics.IncVotesGranted()
+		}
+	}()
+
+	reply = RequestVoteReply{
 		Term:    n.state.Persistent.CurrentTerm,
 		VoterID: n.id,
 	}
@@ -275,7 +284,10 @@ func (n *RaftNode) RequestVote(args RequestVoteArgs) RequestVoteReply {
 		return reply
 	}
 
-	if !n.isCandidateLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
+	if !n.isCandidateLogUpToDate(
+		args.LastLogIndex,
+		args.LastLogTerm,
+	) {
 		return reply
 	}
 
@@ -534,21 +546,39 @@ func (n *RaftNode) resetElectionTimer() {
 
 func (n *RaftNode) AppendEntries(
 	args AppendEntriesArgs,
-) AppendEntriesReply {
+) (reply AppendEntriesReply) {
+	startedAt := time.Now()
+
 	n.mu.Lock()
 
-	reply := AppendEntriesReply{
+	defer func() {
+		result := "failure"
+		if reply.Success {
+			result = "success"
+		}
+
+		n.metrics.IncAppendEntries(args.LeaderID, result)
+
+		if !reply.Success {
+			n.metrics.IncAppendEntriesFailures(args.LeaderID)
+		}
+
+		n.metrics.ObserveAppendEntriesDuration(
+			args.LeaderID,
+			time.Since(startedAt),
+		)
+	}()
+
+	reply = AppendEntriesReply{
 		Term:       n.state.Persistent.CurrentTerm,
 		FollowerID: n.id,
 	}
 
-	// 1. Reject stale leaders.
 	if args.Term < n.state.Persistent.CurrentTerm {
 		n.mu.Unlock()
 		return reply
 	}
 
-	// 2. Update term if the leader is newer.
 	if args.Term > n.state.Persistent.CurrentTerm {
 		n.state.Persistent.CurrentTerm = args.Term
 		n.state.Role = Follower
@@ -561,7 +591,6 @@ func (n *RaftNode) AppendEntries(
 		}
 	}
 
-	// 3. Verify the previous log entry.
 	if args.PrevLogIndex > 0 {
 		prevEntry, ok := n.log.Get(args.PrevLogIndex)
 		if !ok || prevEntry.Term != args.PrevLogTerm {
@@ -570,24 +599,15 @@ func (n *RaftNode) AppendEntries(
 		}
 	}
 
-	// 4. Become follower and reset the election timer.
 	n.state.Role = Follower
 	n.state.LeaderID = args.LeaderID
 	n.electionElapsed = 0
 
-	// 5. Find the first entry that must be written.
-	//
-	// Entries that already exist with the same term are already
-	// consistent and do not need to be persisted again.
-	//
-	// If an existing entry has a different term, Raft requires the
-	// conflicting suffix to be replaced.
 	firstNew := -1
 	replaceFrom := model.LogIndex(0)
 
 	for i, entry := range args.Entries {
 		existing, ok := n.log.Get(entry.Index)
-
 		if !ok {
 			firstNew = i
 			break
@@ -600,8 +620,6 @@ func (n *RaftNode) AppendEntries(
 		}
 	}
 
-	// 6. Persist new or conflicting entries before updating the
-	// in-memory Raft log.
 	if firstNew >= 0 {
 		newEntries := cloneEntries(args.Entries[firstNew:])
 
@@ -647,7 +665,6 @@ func (n *RaftNode) AppendEntries(
 		}
 	}
 
-	// 7. Advance commit index.
 	commitAdvanced := false
 
 	if args.LeaderCommit > n.state.Volatile.CommitIndex {
@@ -669,7 +686,6 @@ func (n *RaftNode) AppendEntries(
 
 	n.mu.Unlock()
 
-	// 8. Apply committed entries outside the Raft lock.
 	if commitAdvanced {
 		n.applyCommitted()
 	}
