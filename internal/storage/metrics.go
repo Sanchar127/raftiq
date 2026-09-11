@@ -2,6 +2,16 @@ package storage
 
 import "time"
 
+const (
+	StorageOperationSaveState     = "SaveState"
+	StorageOperationLoadState     = "LoadState"
+	StorageOperationAppendEntries = "AppendEntries"
+	StorageOperationReplaceSuffix = "ReplaceSuffix"
+	StorageOperationLoadEntries   = "LoadEntries"
+	StorageOperationSaveSnapshot  = "SaveSnapshot"
+	StorageOperationLoadSnapshot  = "LoadSnapshot"
+)
+
 type StorageMetrics interface {
 	IncOperation(operation string)
 	IncOperationError(operation string)
@@ -14,10 +24,10 @@ type StorageMetrics interface {
 
 type NoopStorageMetrics struct{}
 
-func (NoopStorageMetrics) IncOperation(string) {}
-func (NoopStorageMetrics) IncOperationError(string) {}
+func (NoopStorageMetrics) IncOperation(string)                            {}
+func (NoopStorageMetrics) IncOperationError(string)                       {}
 func (NoopStorageMetrics) ObserveOperationDuration(string, time.Duration) {}
 
-func (NoopStorageMetrics) IncSync() {}
-func (NoopStorageMetrics) IncSyncError() {}
+func (NoopStorageMetrics) IncSync()                          {}
+func (NoopStorageMetrics) IncSyncError()                     {}
 func (NoopStorageMetrics) ObserveSyncDuration(time.Duration) {}
