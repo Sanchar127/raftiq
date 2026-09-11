@@ -1,4 +1,3 @@
-
 package storage
 
 import (
@@ -261,4 +260,3 @@ func (s *MemoryStorage) ReplaceSuffix(
 
 	return nil
 }
-
