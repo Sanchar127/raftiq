@@ -11,7 +11,7 @@ import (
 
 func TestMetrics_ElectionsTotal(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	metrics := NewMetrics(registry)
+	metrics := NewMetrics(registry, "test-node")
 
 	metrics.ElectionsTotal.WithLabelValues("node-1").Inc()
 	metrics.ElectionsTotal.WithLabelValues("node-1").Inc()

@@ -1,8 +1,16 @@
 package observability
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/sanchar127/raftiq/internal/raft"
+)
 
 type Metrics struct {
+	nodeID string
+
 	// Raft state.
 	CurrentTerm  *prometheus.GaugeVec
 	Role         *prometheus.GaugeVec
@@ -52,8 +60,21 @@ type Metrics struct {
 	LeaseLossesTotal       *prometheus.CounterVec
 }
 
-func NewMetrics(registerer prometheus.Registerer) *Metrics {
+// Compile-time verification that Metrics satisfies the Raft metrics
+// interface.
+//
+// RPC metrics are implemented below as well. The transport package owns
+// the RPCMetrics interface, so we intentionally avoid importing transport
+// here to keep the dependency direction simple.
+var _ raft.Metrics = (*Metrics)(nil)
+
+func NewMetrics(
+	registerer prometheus.Registerer,
+	nodeID string,
+) *Metrics {
 	metrics := &Metrics{
+		nodeID: nodeID,
+
 		// -----------------------------------------------------------------
 		// Raft state.
 		// -----------------------------------------------------------------
@@ -458,4 +479,166 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 	)
 
 	return metrics
+}
+
+// -----------------------------------------------------------------------------
+// Raft metrics implementation.
+// -----------------------------------------------------------------------------
+
+func (m *Metrics) SetCurrentTerm(term raft.Term) {
+	m.CurrentTerm.
+		WithLabelValues(m.nodeID).
+		Set(float64(term))
+}
+
+func (m *Metrics) SetRole(role raft.Role) {
+	roles := []raft.Role{
+		raft.Follower,
+		raft.Candidate,
+		raft.Leader,
+	}
+
+	for _, candidate := range roles {
+		value := float64(0)
+
+		if candidate == role {
+			value = 1
+		}
+
+		m.Role.
+			WithLabelValues(m.nodeID, string(candidate)).
+			Set(value)
+	}
+}
+
+func (m *Metrics) SetCommitIndex(index raft.LogIndex) {
+	m.CommitIndex.
+		WithLabelValues(m.nodeID).
+		Set(float64(index))
+}
+
+func (m *Metrics) SetLastApplied(index raft.LogIndex) {
+	m.LastApplied.
+		WithLabelValues(m.nodeID).
+		Set(float64(index))
+}
+
+func (m *Metrics) SetLastLogIndex(index raft.LogIndex) {
+	m.LastLogIndex.
+		WithLabelValues(m.nodeID).
+		Set(float64(index))
+}
+
+func (m *Metrics) SetLogSize(size int) {
+	m.LogSize.
+		WithLabelValues(m.nodeID).
+		Set(float64(size))
+}
+
+func (m *Metrics) IncElections() {
+	m.ElectionsTotal.
+		WithLabelValues(m.nodeID).
+		Inc()
+}
+
+func (m *Metrics) ObserveElectionDuration(
+	duration time.Duration,
+	result string,
+) {
+	m.ElectionDuration.
+		WithLabelValues(m.nodeID, result).
+		Observe(duration.Seconds())
+}
+
+func (m *Metrics) IncLeaderChanges() {
+	m.LeaderChangesTotal.
+		WithLabelValues(m.nodeID).
+		Inc()
+}
+
+func (m *Metrics) IncVoteRequests() {
+	m.VoteRequestsTotal.
+		WithLabelValues(m.nodeID).
+		Inc()
+}
+
+func (m *Metrics) IncVotesGranted() {
+	m.VotesGrantedTotal.
+		WithLabelValues(m.nodeID).
+		Inc()
+}
+
+func (m *Metrics) IncAppendEntries(
+	peerID raft.NodeID,
+	result string,
+) {
+	m.AppendEntriesTotal.
+		WithLabelValues(
+			m.nodeID,
+			string(peerID),
+			result,
+		).
+		Inc()
+}
+
+func (m *Metrics) IncAppendEntriesFailures(peerID raft.NodeID) {
+	m.AppendEntriesFailures.
+		WithLabelValues(
+			m.nodeID,
+			string(peerID),
+		).
+		Inc()
+}
+
+func (m *Metrics) ObserveAppendEntriesDuration(
+	peerID raft.NodeID,
+	duration time.Duration,
+) {
+	m.AppendEntriesDuration.
+		WithLabelValues(
+			m.nodeID,
+			string(peerID),
+		).
+		Observe(duration.Seconds())
+}
+
+func (m *Metrics) IncSnapshotsCreated() {
+	m.SnapshotsCreatedTotal.
+		WithLabelValues(m.nodeID).
+		Inc()
+}
+
+func (m *Metrics) IncSnapshotsInstalled() {
+	m.SnapshotsInstalledTotal.
+		WithLabelValues(m.nodeID).
+		Inc()
+}
+
+// -----------------------------------------------------------------------------
+// RPC metrics implementation.
+//
+// The transport package defines RPCMetrics with the same three methods.
+// We intentionally do not import transport here; Go interfaces are satisfied
+// structurally.
+// -----------------------------------------------------------------------------
+
+func (m *Metrics) IncRPCRequest(method string) {
+	m.RPCRequestsTotal.
+		WithLabelValues(method).
+		Inc()
+}
+
+func (m *Metrics) IncRPCError(method string) {
+	m.RPCErrorsTotal.
+		WithLabelValues(method).
+		Inc()
+}
+
+func (m *Metrics) ObserveRPCDuration(
+	method string,
+	duration time.Duration,
+) {
+	m.RPCDuration.
+		WithLabelValues(method).
+		Observe(duration.Seconds())
 }

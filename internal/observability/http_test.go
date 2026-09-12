@@ -14,7 +14,7 @@ import (
 
 func TestMetricsServer_ExposesMetrics(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	metrics := NewMetrics(registry)
+	metrics := NewMetrics(registry, "test-node")
 
 	metrics.ElectionsTotal.WithLabelValues("node-1").Add(3)
 
@@ -92,7 +92,7 @@ func TestMetricsServer_NilServe(t *testing.T) {
 
 func TestMetricsServer_Lifecycle(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	metrics := NewMetrics(registry)
+	metrics := NewMetrics(registry, "test-node")
 
 	metrics.ElectionsTotal.WithLabelValues("node-1").Add(3)
 

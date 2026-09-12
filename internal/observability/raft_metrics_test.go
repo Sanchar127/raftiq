@@ -15,7 +15,7 @@ func newTestRaftMetrics(t *testing.T) (*RaftMetrics, *prometheus.Registry) {
 	t.Helper()
 
 	registry := prometheus.NewRegistry()
-	metrics := NewMetrics(registry)
+	metrics := NewMetrics(registry, "test-node")
 	raftMetrics := NewRaftMetrics("node-1", metrics)
 
 	return raftMetrics, registry
@@ -490,7 +490,7 @@ func assertHistogramObserved(
 
 func TestNewRaftMetricsValidation(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	metrics := NewMetrics(registry)
+	metrics := NewMetrics(registry, "test-node")
 
 	t.Run("empty node ID", func(t *testing.T) {
 		require.PanicsWithValue(

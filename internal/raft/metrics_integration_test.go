@@ -12,7 +12,7 @@ import (
 
 func TestRequestVoteMetrics(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	metrics := observability.NewMetrics(registry)
+	metrics := observability.NewMetrics(registry, "test-node")
 
 	node := raft.NewRaftNode("node-1")
 	node.SetMetrics(observability.NewRaftMetrics("node-1", metrics))
@@ -59,7 +59,7 @@ raftiq_raft_votes_granted_total{node_id="node-1"} 1
 
 func TestRequestVoteMetricsRejectedVote(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	metrics := observability.NewMetrics(registry)
+	metrics := observability.NewMetrics(registry, "test-node")
 
 	node := raft.NewRaftNode("node-1")
 	node.SetMetrics(observability.NewRaftMetrics("node-1", metrics))
@@ -113,7 +113,7 @@ raftiq_raft_votes_granted_total{node_id="node-1"} 1
 
 func TestAppendEntriesMetricsSuccess(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	metrics := observability.NewMetrics(registry)
+	metrics := observability.NewMetrics(registry, "test-node")
 
 	node := raft.NewRaftNode("node-1")
 	node.SetMetrics(observability.NewRaftMetrics("node-1", metrics))
@@ -170,7 +170,7 @@ raftiq_raft_append_entries_total{node_id="node-1",peer_id="leader-1",result="suc
 
 func TestAppendEntriesMetricsFailure(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	metrics := observability.NewMetrics(registry)
+	metrics := observability.NewMetrics(registry, "test-node")
 
 	node := raft.NewRaftNode("node-1")
 	node.SetMetrics(observability.NewRaftMetrics("node-1", metrics))

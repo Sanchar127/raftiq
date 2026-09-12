@@ -9,7 +9,7 @@ import (
 
 func TestKVMetricsIncOperation(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	metrics := NewMetrics(registry)
+	metrics := NewMetrics(registry, "test-node")
 	kvMetrics := NewKVMetrics(metrics)
 
 	kvMetrics.IncOperation("put")
@@ -33,7 +33,7 @@ func TestKVMetricsIncOperation(t *testing.T) {
 
 func TestKVMetricsIncOperationError(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	metrics := NewMetrics(registry)
+	metrics := NewMetrics(registry, "test-node")
 	kvMetrics := NewKVMetrics(metrics)
 
 	kvMetrics.IncOperationError("put")
@@ -57,7 +57,7 @@ func TestKVMetricsIncOperationError(t *testing.T) {
 
 func TestKVMetricsOperationAndErrorAreIndependent(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	metrics := NewMetrics(registry)
+	metrics := NewMetrics(registry, "test-node")
 	kvMetrics := NewKVMetrics(metrics)
 
 	kvMetrics.IncOperation("put")
@@ -92,7 +92,7 @@ func TestNewKVMetricsPanicsWithNilMetrics(t *testing.T) {
 
 func TestKVMetricsConcurrent(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	metrics := NewMetrics(registry)
+	metrics := NewMetrics(registry, "test-node")
 	kvMetrics := NewKVMetrics(metrics)
 
 	const workers = 10
