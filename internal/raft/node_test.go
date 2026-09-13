@@ -2774,3 +2774,52 @@ func TestPreVoteGrantsAfterElectionTimeout(t *testing.T) {
 		t.Fatalf("expected leader ID to remain node-1, got %q", state.LeaderID)
 	}
 }
+
+func TestReadIndexSingleNode(t *testing.T) {
+	node := NewRaftNode("A")
+
+	if err := node.Log().Append(LogEntry{
+		Index: 1,
+		Term:  1,
+		Data:  []byte("committed"),
+	}); err != nil {
+		t.Fatalf("append log entry: %v", err)
+	}
+
+	node.mu.Lock()
+	node.state.Persistent.CurrentTerm = 1
+	node.mu.Unlock()
+
+	node.becomeLeader()
+
+	node.mu.Lock()
+	node.state.Volatile.CommitIndex = 1
+	node.mu.Unlock()
+
+	state := node.State()
+
+	entry, ok := node.Log().Get(1)
+	if !ok {
+		t.Fatal("expected log entry at index 1")
+	}
+
+	t.Logf(
+		"role=%v term=%d commitIndex=%d logTerm=%d",
+		state.Role,
+		state.Persistent.CurrentTerm,
+		state.Volatile.CommitIndex,
+		entry.Term,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	index, err := node.ReadIndex(ctx)
+	if err != nil {
+		t.Fatalf("ReadIndex: %v", err)
+	}
+
+	if index != 1 {
+		t.Fatalf("expected ReadIndex=1, got %d", index)
+	}
+}
