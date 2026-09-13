@@ -165,36 +165,24 @@ func (s *Server) Get(
 	logger := s.getLogger()
 	start := time.Now()
 
-	commandData, err := kv.EncodeCommand(kv.Command{
-		Type: kv.CommandReadBarrier,
-	})
+	index, err := s.raft.ReadIndex(ctx)
 	if err != nil {
 		logger.Error(
-			"failed to encode read barrier",
+			"failed to establish read index",
 			"error", err,
 		)
 
-		return nil, false, fmt.Errorf("encode read barrier: %w", err)
-	}
-
-	index, err := s.raft.Propose(commandData)
-	if err != nil {
-		logger.Error(
-			"failed to propose read barrier",
-			"error", err,
-		)
-
-		return nil, false, err
+		return nil, false, fmt.Errorf("read index: %w", err)
 	}
 
 	if err := s.applier.WaitApplied(ctx, index); err != nil {
 		logger.Error(
-			"failed waiting for read barrier",
+			"failed waiting for read index",
 			"index", index,
 			"error", err,
 		)
 
-		return nil, false, fmt.Errorf("wait for read barrier: %w", err)
+		return nil, false, fmt.Errorf("wait for read index: %w", err)
 	}
 
 	value, ok := s.store.Get(key)
