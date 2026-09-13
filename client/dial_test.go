@@ -133,4 +133,3 @@ func TestDialCloseMakesClientUnavailable(t *testing.T) {
 	err = cl.Delete(context.Background(), "name")
 	require.ErrorIs(t, err, ErrClientClosed)
 }
-
