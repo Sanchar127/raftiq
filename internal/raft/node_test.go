@@ -2581,3 +2581,56 @@ func TestPreVoteRejectsStaleCandidateLog(t *testing.T) {
 		t.Fatal("expected stale candidate log to be rejected")
 	}
 }
+func TestPreVoteRejectsWhenRecentLeaderExists(t *testing.T) {
+	node := NewRaftNode("node-2")
+	node.SetElectionTimeout(10)
+
+	// Simulate a recent heartbeat from the current leader.
+	appendReply := node.AppendEntries(AppendEntriesArgs{
+		Term:     1,
+		LeaderID: "node-1",
+	})
+
+	if !appendReply.Success {
+		t.Fatal("expected AppendEntries to succeed")
+	}
+
+	state := node.State()
+
+	if state.Role != Follower {
+		t.Fatalf("expected Follower, got %v", state.Role)
+	}
+
+	if state.LeaderID != "node-1" {
+		t.Fatalf("expected leader node-1, got %q", state.LeaderID)
+	}
+
+	preVoteReply := node.PreVote(PreVoteArgs{
+		Term:         2,
+		CandidateID:  "node-3",
+		LastLogIndex: 0,
+		LastLogTerm:  0,
+	})
+
+	if preVoteReply.VoteGranted {
+		t.Fatal("expected PreVote to be rejected while recent leader is known")
+	}
+
+	after := node.State()
+
+	if after.Persistent.CurrentTerm != 1 {
+		t.Fatalf("expected term to remain 1, got %d", after.Persistent.CurrentTerm)
+	}
+
+	if after.LeaderID != "node-1" {
+		t.Fatalf("expected leader node-1 to remain, got %q", after.LeaderID)
+	}
+
+	node.mu.RLock()
+	elapsed := node.electionElapsed
+	node.mu.RUnlock()
+
+	if elapsed != 0 {
+		t.Fatalf("expected PreVote not to reset election timer, got %d", elapsed)
+	}
+}

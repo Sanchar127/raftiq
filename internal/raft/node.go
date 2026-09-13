@@ -2320,16 +2320,28 @@ func (n *RaftNode) PreVote(args PreVoteArgs) PreVoteReply {
 		VoteGranted: false,
 	}
 
-	// A PreVote does not modify persistent term/vote state.
+	// A leader must never grant a PreVote.
+	if n.state.Role == Leader {
+		return reply
+	}
+
+	// A PreVote never changes persistent term/vote state.
 	if args.Term < n.state.Persistent.CurrentTerm {
 		return reply
 	}
 
+	// If we recently heard from a valid leader, do not allow an
+	// isolated/stale candidate to start another election.
+	if n.state.LeaderID != "" &&
+		n.electionElapsed < n.electionTimeout {
+		return reply
+	}
+
+	// Candidate's log must be at least as up-to-date as ours.
 	if !n.isCandidateLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
 		return reply
 	}
 
 	reply.VoteGranted = true
-
 	return reply
 }
