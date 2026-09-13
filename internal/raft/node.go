@@ -2243,7 +2243,7 @@ func (n *RaftNode) handleInstallSnapshotReply(
 
 			return
 		}
-
+		n.updateStateMetricsLocked()
 		n.mu.Unlock()
 
 		n.getLogger().Info(
