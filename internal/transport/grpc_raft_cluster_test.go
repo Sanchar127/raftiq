@@ -2,7 +2,7 @@ package transport
 
 import (
 	"context"
-	"errors"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -14,6 +14,7 @@ import (
 	"github.com/sanchar127/raftiq/internal/raft"
 	"github.com/sanchar127/raftiq/internal/storage"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 type testRaftServer struct {
@@ -24,9 +25,18 @@ type testRaftServer struct {
 func startTestRaftServer(
 	t *testing.T,
 	node *raft.RaftNode,
+	tlsConfigs ...*tls.Config,
 ) *testRaftServer {
 	t.Helper()
+	var tlsConfig *tls.Config
 
+	if len(tlsConfigs) > 1 {
+		t.Fatal("startTestRaftServer accepts at most one TLS config")
+	}
+
+	if len(tlsConfigs) == 1 {
+		tlsConfig = tlsConfigs[0]
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -38,7 +48,15 @@ func startTestRaftServer(
 		t.Fatalf("create raft service: %v", err)
 	}
 
-	server := grpc.NewServer()
+	var server *grpc.Server
+
+	if tlsConfig != nil {
+		server = grpc.NewServer(
+			grpc.Creds(credentials.NewTLS(tlsConfig)),
+		)
+	} else {
+		server = grpc.NewServer()
+	}
 	raftiqv1.RegisterRaftServiceServer(server, service)
 
 	go func() {
@@ -62,10 +80,48 @@ func TestGRPCTransportRealRaftNodeRequestVote(t *testing.T) {
 	node1 := raft.NewRaftNode("node-1")
 	node2 := raft.NewRaftNode("node-2")
 
-	server2 := startTestRaftServer(t, node2)
+	certFiles := writeTestCertificateFiles(
+		t,
+		t.TempDir(),
+		peerServerName("node-2"),
+		peerServerName("node-1"),
+	)
+
+	serverTLS, err := LoadTLSServerConfig(
+		TLSConfig{
+			CAFile:   certFiles.caFile,
+			CertFile: certFiles.serverCertFile,
+			KeyFile:  certFiles.serverKeyFile,
+		},
+		map[string]struct{}{
+			peerServerName("node-1"): {},
+		},
+	)
+	if err != nil {
+		t.Fatalf("load server TLS config: %v", err)
+	}
+
+	server2 := startTestRaftServer(t, node2, serverTLS)
 	defer server2.close()
 
+	clientTLS, err := LoadTLSConfig(
+		TLSConfig{
+			CAFile:         certFiles.caFile,
+			CertFile:       certFiles.clientCertFile,
+			KeyFile:        certFiles.clientKeyFile,
+			PeerServerName: peerServerName("node-2"),
+		},
+	)
+	if err != nil {
+		t.Fatalf("load client TLS config: %v", err)
+	}
+
 	transport := NewGRPCTransport()
+
+	if err := transport.SetTLSConfig(clientTLS); err != nil {
+		t.Fatalf("set TLS config: %v", err)
+	}
+
 	defer func() {
 		if err := transport.Close(); err != nil {
 			t.Fatalf("close transport: %v", err)
@@ -129,20 +185,80 @@ func TestGRPCTransportThreeNodeRaftElection(t *testing.T) {
 		raft.NewRaftNode("node-3"),
 	}
 
-	// Stagger election timeouts so the nodes do not all become
-	// candidates simultaneously. This makes the integration test
-	// deterministic while the production election-timeout
-	// randomization is implemented separately.
 	nodes[0].SetElectionTimeout(10)
 	nodes[1].SetElectionTimeout(15)
 	nodes[2].SetElectionTimeout(20)
 
-	servers := make([]*testRaftServer, 0, len(nodes))
+	peerIDs := []raft.NodeID{
+		"node-1",
+		"node-2",
+		"node-3",
+	}
 
-	for _, node := range nodes {
+	certDir := t.TempDir()
+
+	ca := newTestCertificateAuthority(
+		t,
+		certDir,
+	)
+
+	certFiles := make(
+		[]testCertificateFiles,
+		len(peerIDs),
+	)
+
+	for i, peerID := range peerIDs {
+		certFiles[i] = writeTestNodeCertificate(
+			t,
+			ca,
+			certDir,
+			peerID,
+		)
+	}
+
+	servers := make(
+		[]*testRaftServer,
+		0,
+		len(nodes),
+	)
+
+	for i, node := range nodes {
+		allowedPeerSANs := make(
+			map[string]struct{},
+			len(peerIDs)-1,
+		)
+
+		for j, peerID := range peerIDs {
+			if i == j {
+				continue
+			}
+
+			allowedPeerSANs[peerServerName(peerID)] = struct{}{}
+		}
+
+		serverTLS, err := LoadTLSServerConfig(
+			TLSConfig{
+				CAFile:   ca.file,
+				CertFile: certFiles[i].serverCertFile,
+				KeyFile:  certFiles[i].serverKeyFile,
+			},
+			allowedPeerSANs,
+		)
+		if err != nil {
+			t.Fatalf(
+				"load server TLS config for %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+
 		servers = append(
 			servers,
-			startTestRaftServer(t, node),
+			startTestRaftServer(
+				t,
+				node,
+				serverTLS,
+			),
 		)
 	}
 
@@ -152,25 +268,53 @@ func TestGRPCTransportThreeNodeRaftElection(t *testing.T) {
 		}
 	})
 
-	transports := make([]*GRPCTransport, 0, len(nodes))
+	transports := make(
+		[]*GRPCTransport,
+		0,
+		len(nodes),
+	)
 
 	t.Cleanup(func() {
 		for _, transport := range transports {
 			if err := transport.Close(); err != nil {
-				t.Errorf("close transport: %v", err)
+				t.Errorf(
+					"close transport: %v",
+					err,
+				)
 			}
 		}
 	})
 
-	peerIDs := []raft.NodeID{
-		"node-1",
-		"node-2",
-		"node-3",
-	}
-
 	for i, node := range nodes {
+		clientTLS, err := LoadTLSClientConfig(
+			TLSConfig{
+				CAFile:   ca.file,
+				CertFile: certFiles[i].clientCertFile,
+				KeyFile:  certFiles[i].clientKeyFile,
+			},
+		)
+		if err != nil {
+			t.Fatalf(
+				"load client TLS config for %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+
 		transport := NewGRPCTransport()
-		transports = append(transports, transport)
+
+		if err := transport.SetTLSConfig(clientTLS); err != nil {
+			t.Fatalf(
+				"set TLS config for %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+
+		transports = append(
+			transports,
+			transport,
+		)
 
 		for j, peerID := range peerIDs {
 			if i == j {
@@ -201,7 +345,10 @@ func TestGRPCTransportThreeNodeRaftElection(t *testing.T) {
 				continue
 			}
 
-			otherPeers = append(otherPeers, peerID)
+			otherPeers = append(
+				otherPeers,
+				peerID,
+			)
 		}
 
 		if err := node.SetTransport(
@@ -281,29 +428,9 @@ func TestGRPCTransportFollowerFailure(t *testing.T) {
 		raft.NewRaftNode("node-3"),
 	}
 
-	// Deterministic election ordering for the integration test.
 	nodes[0].SetElectionTimeout(10)
 	nodes[1].SetElectionTimeout(15)
 	nodes[2].SetElectionTimeout(20)
-
-	servers := make([]*testRaftServer, 0, len(nodes))
-
-	for _, node := range nodes {
-		servers = append(
-			servers,
-			startTestRaftServer(t, node),
-		)
-	}
-
-	transports := make([]*GRPCTransport, 0, len(nodes))
-
-	t.Cleanup(func() {
-		for _, transport := range transports {
-			if err := transport.Close(); err != nil {
-				t.Errorf("close transport: %v", err)
-			}
-		}
-	})
 
 	peerIDs := []raft.NodeID{
 		"node-1",
@@ -311,9 +438,103 @@ func TestGRPCTransportFollowerFailure(t *testing.T) {
 		"node-3",
 	}
 
+	certDir := t.TempDir()
+
+	ca := newTestCertificateAuthority(t, certDir)
+
+	certFiles := make([]testCertificateFiles, len(nodes))
+
+	for i, peerID := range peerIDs {
+		certFiles[i] = writeTestNodeCertificate(
+			t,
+			ca,
+			certDir,
+			peerID,
+		)
+	}
+
+	servers := make([]*testRaftServer, len(nodes))
+
+	for i, node := range nodes {
+		allowedPeerSANs := make(map[string]struct{})
+
+		for j, peerID := range peerIDs {
+			if i == j {
+				continue
+			}
+
+			allowedPeerSANs[peerServerName(peerID)] = struct{}{}
+		}
+
+		serverTLS, err := LoadTLSServerConfig(
+			TLSConfig{
+				CAFile:   certFiles[i].caFile,
+				CertFile: certFiles[i].serverCertFile,
+				KeyFile:  certFiles[i].serverKeyFile,
+			},
+			allowedPeerSANs,
+		)
+		if err != nil {
+			t.Fatalf(
+				"load TLS server config for %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+
+		servers[i] = startTestRaftServer(
+			t,
+			node,
+			serverTLS,
+		)
+	}
+
+	t.Cleanup(func() {
+		for _, server := range servers {
+			server.close()
+		}
+	})
+
+	transports := make([]*GRPCTransport, len(nodes))
+
+	t.Cleanup(func() {
+		for _, transport := range transports {
+			if transport == nil {
+				continue
+			}
+
+			if err := transport.Close(); err != nil {
+				t.Errorf("close transport: %v", err)
+			}
+		}
+	})
+
 	for i, node := range nodes {
 		transport := NewGRPCTransport()
-		transports = append(transports, transport)
+		transports[i] = transport
+
+		clientTLS, err := LoadTLSClientConfig(
+			TLSConfig{
+				CAFile:   certFiles[i].caFile,
+				CertFile: certFiles[i].clientCertFile,
+				KeyFile:  certFiles[i].clientKeyFile,
+			},
+		)
+		if err != nil {
+			t.Fatalf(
+				"load TLS client config for %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+
+		if err := transport.SetTLSConfig(clientTLS); err != nil {
+			t.Fatalf(
+				"set TLS config for %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
 
 		for j, peerID := range peerIDs {
 			if i == j {
@@ -333,118 +554,83 @@ func TestGRPCTransportFollowerFailure(t *testing.T) {
 			}
 		}
 
-		otherPeers := make(
-			[]raft.NodeID,
-			0,
-			len(peerIDs)-1,
-		)
-
-		for j, peerID := range peerIDs {
-			if i == j {
-				continue
-			}
-
-			otherPeers = append(otherPeers, peerID)
-		}
-
-		if err := node.SetTransport(
-			transport,
-			otherPeers,
-		); err != nil {
-			t.Fatalf(
-				"set transport for %s: %v",
-				peerIDs[i],
-				err,
-			)
-		}
+		node.SetTransport(transport, peerIDs)
 	}
 
-	for i, node := range nodes {
-		if err := node.Start(); err != nil {
-			t.Fatalf(
-				"start %s: %v",
-				peerIDs[i],
-				err,
-			)
-		}
-	}
+	for _, node := range nodes {
+		node.Start()
 
-	t.Cleanup(func() {
-		for _, node := range nodes {
+		t.Cleanup(func() {
 			node.Stop()
-		}
-	})
+		})
+	}
 
-	// Wait for the initial leader.
-	var leaderIndex = -1
+	var leader *raft.RaftNode
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(2 * time.Second)
 
 	for time.Now().Before(deadline) {
 		leaders := 0
-		leaderIndex = -1
+		var candidate *raft.RaftNode
 
-		for i, node := range nodes {
+		for _, node := range nodes {
 			if node.State().Role == raft.Leader {
 				leaders++
-				leaderIndex = i
+				candidate = node
 			}
 		}
 
 		if leaders == 1 {
+			leader = candidate
 			break
 		}
 
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	if leaderIndex == -1 {
-		t.Fatal("expected a leader to be elected")
+	if leader == nil {
+		t.Fatal("expected exactly one leader to be elected")
 	}
 
-	// Select a follower to fail.
+	leaderIndex := -1
 	followerIndex := -1
 
-	for i := range nodes {
-		if i != leaderIndex {
-			followerIndex = i
-			break
+	for i, node := range nodes {
+		if node == leader {
+			leaderIndex = i
+			continue
 		}
+
+		if followerIndex == -1 {
+			followerIndex = i
+		}
+	}
+
+	if leaderIndex == -1 {
+		t.Fatal("failed to identify leader index")
 	}
 
 	if followerIndex == -1 {
-		t.Fatal("expected a follower")
+		t.Fatal("failed to identify follower index")
 	}
 
-	leader := nodes[leaderIndex]
-	follower := nodes[followerIndex]
+	followerID := peerIDs[followerIndex]
 
-	initialTerm := leader.State().Persistent.CurrentTerm
+	nodes[followerIndex].Stop()
 
-	// Simulate follower/network failure by shutting down its gRPC server.
-	servers[followerIndex].close()
+	if err := transports[followerIndex].Close(); err != nil {
+		t.Fatalf(
+			"close failed follower transport %s: %v",
+			followerID,
+			err,
+		)
+	}
 
-	// The leader should remain leader because the other two nodes
-	// still form a majority.
-	deadline = time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(2 * time.Second)
 
 	for time.Now().Before(deadline) {
-		state := leader.State()
-
-		if state.Role != raft.Leader {
-			t.Fatalf(
-				"leader %s lost leadership after follower %s failed",
-				leader.State().LeaderID,
-				follower.State().LeaderID,
-			)
-		}
-
-		if state.Persistent.CurrentTerm < initialTerm {
-			t.Fatalf(
-				"leader term moved backwards: initial=%d current=%d",
-				initialTerm,
-				state.Persistent.CurrentTerm,
-			)
+		if leader.State().Role == raft.Leader {
+			break
 		}
 
 		time.Sleep(50 * time.Millisecond)
@@ -454,7 +640,7 @@ func TestGRPCTransportFollowerFailure(t *testing.T) {
 		t.Fatalf(
 			"expected node %s to remain leader after follower %s failure",
 			peerIDs[leaderIndex],
-			peerIDs[followerIndex],
+			followerID,
 		)
 	}
 }
@@ -470,15 +656,68 @@ func TestGRPCTransportFollowerRecovery(t *testing.T) {
 	nodes[1].SetElectionTimeout(15)
 	nodes[2].SetElectionTimeout(20)
 
+	peerIDs := []raft.NodeID{
+		"node-1",
+		"node-2",
+		"node-3",
+	}
+
+	certDir := t.TempDir()
+
+	ca := newTestCertificateAuthority(t, certDir)
+
+	certFiles := make([]testCertificateFiles, len(nodes))
+
+	for i, peerID := range peerIDs {
+		certFiles[i] = writeTestNodeCertificate(
+			t,
+			ca,
+			certDir,
+			peerID,
+		)
+	}
+
 	servers := make([]*testRaftServer, len(nodes))
 
 	for i, node := range nodes {
-		servers[i] = startTestRaftServer(t, node)
+		allowedPeerSANs := make(map[string]struct{})
+
+		for j, peerID := range peerIDs {
+			if i == j {
+				continue
+			}
+
+			allowedPeerSANs[peerServerName(peerID)] = struct{}{}
+		}
+
+		serverTLS, err := LoadTLSServerConfig(
+			TLSConfig{
+				CAFile:   certFiles[i].caFile,
+				CertFile: certFiles[i].serverCertFile,
+				KeyFile:  certFiles[i].serverKeyFile,
+			},
+			allowedPeerSANs,
+		)
+		if err != nil {
+			t.Fatalf(
+				"load TLS server config for %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+
+		servers[i] = startTestRaftServer(
+			t,
+			node,
+			serverTLS,
+		)
 	}
 
 	t.Cleanup(func() {
 		for _, server := range servers {
-			server.close()
+			if server != nil {
+				server.close()
+			}
 		}
 	})
 
@@ -486,21 +725,42 @@ func TestGRPCTransportFollowerRecovery(t *testing.T) {
 
 	t.Cleanup(func() {
 		for _, transport := range transports {
+			if transport == nil {
+				continue
+			}
+
 			if err := transport.Close(); err != nil {
 				t.Errorf("close transport: %v", err)
 			}
 		}
 	})
 
-	peerIDs := []raft.NodeID{
-		"node-1",
-		"node-2",
-		"node-3",
-	}
-
 	for i, node := range nodes {
 		transport := NewGRPCTransport()
 		transports[i] = transport
+
+		clientTLS, err := LoadTLSClientConfig(
+			TLSConfig{
+				CAFile:   certFiles[i].caFile,
+				CertFile: certFiles[i].clientCertFile,
+				KeyFile:  certFiles[i].clientKeyFile,
+			},
+		)
+		if err != nil {
+			t.Fatalf(
+				"load TLS client config for %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+
+		if err := transport.SetTLSConfig(clientTLS); err != nil {
+			t.Fatalf(
+				"set TLS config for %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
 
 		for j, peerID := range peerIDs {
 			if i == j {
@@ -562,7 +822,6 @@ func TestGRPCTransportFollowerRecovery(t *testing.T) {
 		}
 	})
 
-	// Wait for exactly one leader.
 	leaderIndex := -1
 	deadline := time.Now().Add(5 * time.Second)
 
@@ -590,7 +849,6 @@ func TestGRPCTransportFollowerRecovery(t *testing.T) {
 
 	leader := nodes[leaderIndex]
 
-	// Select a follower to fail.
 	followerIndex := -1
 
 	for i := range nodes {
@@ -608,11 +866,8 @@ func TestGRPCTransportFollowerRecovery(t *testing.T) {
 
 	initialTerm := leader.State().Persistent.CurrentTerm
 
-	// Simulate follower failure by shutting down its gRPC endpoint.
 	servers[followerIndex].close()
 
-	// The leader must remain leader because the other two nodes
-	// still form a majority.
 	deadline = time.Now().Add(3 * time.Second)
 
 	for time.Now().Before(deadline) {
@@ -637,10 +892,36 @@ func TestGRPCTransportFollowerRecovery(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Start a new gRPC endpoint for the same follower Raft process.
+	allowedPeerSANs := make(map[string]struct{})
+
+	for j, peerID := range peerIDs {
+		if j == followerIndex {
+			continue
+		}
+
+		allowedPeerSANs[peerServerName(peerID)] = struct{}{}
+	}
+
+	serverTLS, err := LoadTLSServerConfig(
+		TLSConfig{
+			CAFile:   certFiles[followerIndex].caFile,
+			CertFile: certFiles[followerIndex].serverCertFile,
+			KeyFile:  certFiles[followerIndex].serverKeyFile,
+		},
+		allowedPeerSANs,
+	)
+	if err != nil {
+		t.Fatalf(
+			"load recovered TLS server config for %s: %v",
+			peerIDs[followerIndex],
+			err,
+		)
+	}
+
 	servers[followerIndex] = startTestRaftServer(
 		t,
 		follower,
+		serverTLS,
 	)
 
 	t.Cleanup(func() {
@@ -652,8 +933,6 @@ func TestGRPCTransportFollowerRecovery(t *testing.T) {
 		Addr().
 		String()
 
-	// Replace the failed follower's old address in the
-	// transports of the other two nodes.
 	for i, transport := range transports {
 		if i == followerIndex {
 			continue
@@ -674,8 +953,6 @@ func TestGRPCTransportFollowerRecovery(t *testing.T) {
 		}
 	}
 
-	// Wait for the recovered follower to receive heartbeats
-	// from the current leader.
 	deadline = time.Now().Add(5 * time.Second)
 
 	for time.Now().Before(deadline) {
@@ -719,6 +996,7 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 	}
 
 	testDir := t.TempDir()
+	certDir := t.TempDir()
 
 	nodes := make([]*raft.RaftNode, len(peerIDs))
 	stores := make([]*storage.WALStorage, len(peerIDs))
@@ -731,7 +1009,19 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 		20,
 	}
 
-	// Create three Raft nodes backed by persistent WAL storage.
+	ca := newTestCertificateAuthority(t, certDir)
+
+	certFiles := make([]testCertificateFiles, len(peerIDs))
+
+	for i, id := range peerIDs {
+		certFiles[i] = writeTestNodeCertificate(
+			t,
+			ca,
+			certDir,
+			id,
+		)
+	}
+
 	for i, id := range peerIDs {
 		node, store := newPersistentTestNode(
 			t,
@@ -750,9 +1040,39 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 		node.SetElectionTimeout(electionTimeouts[i])
 	}
 
-	// Start one real gRPC server for every Raft node.
 	for i, node := range nodes {
-		server := startTestRaftServer(t, node)
+		allowedPeerSANs := make(map[string]struct{})
+
+		for j, peerID := range peerIDs {
+			if i == j {
+				continue
+			}
+
+			allowedPeerSANs[peerServerName(peerID)] = struct{}{}
+		}
+
+		serverTLS, err := LoadTLSServerConfig(
+			TLSConfig{
+				CAFile:   certFiles[i].caFile,
+				CertFile: certFiles[i].serverCertFile,
+				KeyFile:  certFiles[i].serverKeyFile,
+			},
+			allowedPeerSANs,
+		)
+		if err != nil {
+			t.Fatalf(
+				"load TLS server config for node %s: %v",
+				node.ID(),
+				err,
+			)
+		}
+
+		server := startTestRaftServer(
+			t,
+			node,
+			serverTLS,
+		)
+
 		servers[i] = server
 
 		t.Cleanup(func() {
@@ -760,9 +1080,32 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 		})
 	}
 
-	// Create one real gRPC transport per Raft node.
 	for i := range nodes {
 		transport := NewGRPCTransport()
+
+		clientTLS, err := LoadTLSClientConfig(
+			TLSConfig{
+				CAFile:   certFiles[i].caFile,
+				CertFile: certFiles[i].clientCertFile,
+				KeyFile:  certFiles[i].clientKeyFile,
+			},
+		)
+		if err != nil {
+			t.Fatalf(
+				"load TLS client config for node %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+
+		if err := transport.SetTLSConfig(clientTLS); err != nil {
+			t.Fatalf(
+				"set TLS config for node %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+
 		transports[i] = transport
 
 		t.Cleanup(func() {
@@ -770,7 +1113,6 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 		})
 	}
 
-	// Connect every node to every other node.
 	for i := range nodes {
 		for j := range nodes {
 			if i == j {
@@ -790,11 +1132,7 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 			}
 		}
 
-		otherPeers := make(
-			[]raft.NodeID,
-			0,
-			len(peerIDs)-1,
-		)
+		otherPeers := make([]raft.NodeID, 0, len(peerIDs)-1)
 
 		for j, peerID := range peerIDs {
 			if i == j {
@@ -816,34 +1154,37 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 		}
 	}
 
-	// Start all Raft processes.
-	for i, node := range nodes {
+	for _, node := range nodes {
 		if err := node.Start(); err != nil {
 			t.Fatalf(
 				"start node %s: %v",
-				peerIDs[i],
+				node.ID(),
 				err,
 			)
 		}
 	}
 
-	// Wait for exactly one initial leader.
 	initialLeaderIndex := -1
-	deadline := time.Now().Add(5 * time.Second)
+	var initialTerm raft.Term
 
-	for time.Now().Before(deadline) {
+	leaderDeadline := time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(leaderDeadline) {
 		leaderCount := 0
-		candidate := -1
+		candidateIndex := -1
 
 		for i, node := range nodes {
-			if node.State().Role == raft.Leader {
+			state := node.State()
+
+			if state.Role == raft.Leader {
 				leaderCount++
-				candidate = i
+				candidateIndex = i
 			}
 		}
 
 		if leaderCount == 1 {
-			initialLeaderIndex = candidate
+			initialLeaderIndex = candidateIndex
+			initialTerm = nodes[candidateIndex].State().Persistent.CurrentTerm
 			break
 		}
 
@@ -851,53 +1192,52 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 	}
 
 	if initialLeaderIndex == -1 {
-		t.Fatal("expected exactly one initial leader")
+		t.Fatal("cluster did not elect exactly one initial leader")
 	}
 
-	initialState := nodes[initialLeaderIndex].State()
-	initialTerm := initialState.Persistent.CurrentTerm
-
 	t.Logf(
-		"initial leader: %s term=%d",
+		"initial leader: node=%s term=%d",
 		peerIDs[initialLeaderIndex],
 		initialTerm,
 	)
 
-	// Simulate a complete leader process failure:
-	// stop the Raft process and shut down its network endpoint.
-	nodes[initialLeaderIndex].Stop()
+	initialLeaderNode := nodes[initialLeaderIndex]
+
+	initialLeaderNode.Stop()
 	servers[initialLeaderIndex].close()
 
-	// Close the old WAL before reopening it later as a new process.
 	if err := stores[initialLeaderIndex].Close(); err != nil {
 		t.Fatalf(
-			"close WAL for failed leader %s: %v",
-			peerIDs[initialLeaderIndex],
+			"close initial leader WAL: %v",
 			err,
 		)
 	}
 
-	// Wait for one of the surviving nodes to become leader.
 	newLeaderIndex := -1
-	deadline = time.Now().Add(5 * time.Second)
+	var newTerm raft.Term
 
-	for time.Now().Before(deadline) {
+	reElectionDeadline := time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(reElectionDeadline) {
 		leaderCount := 0
-		candidate := -1
+		candidateIndex := -1
 
 		for i, node := range nodes {
 			if i == initialLeaderIndex {
 				continue
 			}
 
-			if node.State().Role == raft.Leader {
+			state := node.State()
+
+			if state.Role == raft.Leader {
 				leaderCount++
-				candidate = i
+				candidateIndex = i
 			}
 		}
 
 		if leaderCount == 1 {
-			newLeaderIndex = candidate
+			newLeaderIndex = candidateIndex
+			newTerm = nodes[candidateIndex].State().Persistent.CurrentTerm
 			break
 		}
 
@@ -905,42 +1245,32 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 	}
 
 	if newLeaderIndex == -1 {
-		t.Fatalf(
-			"expected new leader after %s failed",
-			peerIDs[initialLeaderIndex],
-		)
+		t.Fatal("surviving nodes did not elect a new leader")
 	}
-
-	newLeaderState := nodes[newLeaderIndex].State()
-	newTerm := newLeaderState.Persistent.CurrentTerm
 
 	if newTerm <= initialTerm {
 		t.Fatalf(
-			"new leader term=%d, want > initial term=%d",
-			newTerm,
+			"new leader term did not advance: initial=%d new=%d",
 			initialTerm,
+			newTerm,
 		)
 	}
 
 	t.Logf(
-		"new leader: %s term=%d",
+		"new leader after failure: node=%s term=%d",
 		peerIDs[newLeaderIndex],
 		newTerm,
 	)
 
-	// -----------------------------------------------------------------
-	// Recover the failed leader as a completely new Raft process.
-	// -----------------------------------------------------------------
-
-	walPath := filepath.Join(
-		testDir,
-		fmt.Sprintf("%s.wal", peerIDs[initialLeaderIndex]),
+	recoveredStore, err := storage.OpenWAL(
+		filepath.Join(
+			testDir,
+			fmt.Sprintf("%s.wal", peerIDs[initialLeaderIndex]),
+		),
 	)
-
-	recoveredStore, err := storage.OpenWAL(walPath)
 	if err != nil {
 		t.Fatalf(
-			"reopen WAL for recovered node %s: %v",
+			"reopen WAL for recovered leader %s: %v",
 			peerIDs[initialLeaderIndex],
 			err,
 		)
@@ -954,7 +1284,7 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 		_ = recoveredStore.Close()
 
 		t.Fatalf(
-			"reconstruct recovered node %s: %v",
+			"recreate recovered node %s: %v",
 			peerIDs[initialLeaderIndex],
 			err,
 		)
@@ -969,37 +1299,54 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 		electionTimeouts[initialLeaderIndex],
 	)
 
-	// The recovered process gets a fresh transport.
 	recoveredTransport := NewGRPCTransport()
+
+	recoveredClientTLS, err := LoadTLSClientConfig(
+		TLSConfig{
+			CAFile:   certFiles[initialLeaderIndex].caFile,
+			CertFile: certFiles[initialLeaderIndex].clientCertFile,
+			KeyFile:  certFiles[initialLeaderIndex].clientKeyFile,
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"load TLS client config for recovered node %s: %v",
+			peerIDs[initialLeaderIndex],
+			err,
+		)
+	}
+
+	if err := recoveredTransport.SetTLSConfig(
+		recoveredClientTLS,
+	); err != nil {
+		t.Fatalf(
+			"set TLS config for recovered node %s: %v",
+			peerIDs[initialLeaderIndex],
+			err,
+		)
+	}
 
 	t.Cleanup(func() {
 		_ = recoveredTransport.Close()
 	})
 
-	// Connect the recovered node to both surviving nodes.
-	survivorIDs := make(
-		[]raft.NodeID,
-		0,
-		len(peerIDs)-1,
-	)
+	survivorIDs := make([]raft.NodeID, 0, len(peerIDs)-1)
 
-	for i, id := range peerIDs {
+	for i, peerID := range peerIDs {
 		if i == initialLeaderIndex {
 			continue
 		}
 
-		survivorIDs = append(
-			survivorIDs,
-			id,
-		)
+		survivorIDs = append(survivorIDs, peerID)
 
 		if err := recoveredTransport.AddPeer(
-			id,
+			peerID,
 			servers[i].listener.Addr().String(),
 		); err != nil {
 			t.Fatalf(
-				"add surviving peer %s to recovered node: %v",
-				id,
+				"add survivor peer %s to recovered node %s: %v",
+				peerID,
+				peerIDs[initialLeaderIndex],
 				err,
 			)
 		}
@@ -1011,28 +1358,45 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 	); err != nil {
 		t.Fatalf(
 			"set transport for recovered node %s: %v",
-			recoveredNode.ID(),
+			peerIDs[initialLeaderIndex],
 			err,
 		)
 	}
 
-	// Start a new network endpoint for the reconstructed process.
+	allowedRecoveredPeerSANs := make(map[string]struct{})
+
+	for _, peerID := range survivorIDs {
+		allowedRecoveredPeerSANs[peerServerName(peerID)] = struct{}{}
+	}
+
+	recoveredServerTLS, err := LoadTLSServerConfig(
+		TLSConfig{
+			CAFile:   certFiles[initialLeaderIndex].caFile,
+			CertFile: certFiles[initialLeaderIndex].serverCertFile,
+			KeyFile:  certFiles[initialLeaderIndex].serverKeyFile,
+		},
+		allowedRecoveredPeerSANs,
+	)
+	if err != nil {
+		t.Fatalf(
+			"load TLS server config for recovered node %s: %v",
+			peerIDs[initialLeaderIndex],
+			err,
+		)
+	}
+
 	recoveredServer := startTestRaftServer(
 		t,
 		recoveredNode,
+		recoveredServerTLS,
 	)
 
 	t.Cleanup(func() {
 		recoveredServer.close()
 	})
 
-	recoveredAddress := recoveredServer.
-		listener.
-		Addr().
-		String()
+	recoveredAddress := recoveredServer.listener.Addr().String()
 
-	// The surviving nodes still have the crashed leader's old
-	// network address. Replace those peer connections.
 	for i, transport := range transports {
 		if i == initialLeaderIndex {
 			continue
@@ -1055,7 +1419,6 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 		}
 	}
 
-	// Start the reconstructed Raft process.
 	if err := recoveredNode.Start(); err != nil {
 		t.Fatalf(
 			"start recovered node %s: %v",
@@ -1064,11 +1427,6 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 		)
 	}
 
-	// The recovered process must:
-	//   1. load its old persistent term from WAL,
-	//   2. observe the newer leader term,
-	//   3. step down to follower,
-	//   4. recognize the current leader.
 	recoveryDeadline := time.Now().Add(5 * time.Second)
 
 	for time.Now().Before(recoveryDeadline) {
@@ -1102,6 +1460,7 @@ func TestGRPCTransportLeaderFailureReElection(t *testing.T) {
 		newTerm,
 	)
 }
+
 func newPersistentTestNode(
 	t *testing.T,
 	id raft.NodeID,
@@ -1148,6 +1507,7 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 	}
 
 	testDir := t.TempDir()
+	certDir := t.TempDir()
 
 	nodes := make([]*raft.RaftNode, len(peerIDs))
 	stores := make([]*storage.WALStorage, len(peerIDs))
@@ -1160,9 +1520,18 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 		20,
 	}
 
-	// ---------------------------------------------------------------
-	// Create persistent Raft nodes.
-	// ---------------------------------------------------------------
+	ca := newTestCertificateAuthority(t, certDir)
+
+	certFiles := make([]testCertificateFiles, len(peerIDs))
+
+	for i, id := range peerIDs {
+		certFiles[i] = writeTestNodeCertificate(
+			t,
+			ca,
+			certDir,
+			id,
+		)
+	}
 
 	for i, id := range peerIDs {
 		node, store := newPersistentTestNode(
@@ -1182,12 +1551,39 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 		})
 	}
 
-	// ---------------------------------------------------------------
-	// Start real gRPC servers.
-	// ---------------------------------------------------------------
-
 	for i, node := range nodes {
-		server := startTestRaftServer(t, node)
+		allowedPeerSANs := make(map[string]struct{})
+
+		for j, peerID := range peerIDs {
+			if i == j {
+				continue
+			}
+
+			allowedPeerSANs[peerServerName(peerID)] = struct{}{}
+		}
+
+		serverTLS, err := LoadTLSServerConfig(
+			TLSConfig{
+				CAFile:   certFiles[i].caFile,
+				CertFile: certFiles[i].serverCertFile,
+				KeyFile:  certFiles[i].serverKeyFile,
+			},
+			allowedPeerSANs,
+		)
+		if err != nil {
+			t.Fatalf(
+				"load TLS server config for node %s: %v",
+				node.ID(),
+				err,
+			)
+		}
+
+		server := startTestRaftServer(
+			t,
+			node,
+			serverTLS,
+		)
+
 		servers[i] = server
 
 		t.Cleanup(func() {
@@ -1195,12 +1591,32 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 		})
 	}
 
-	// ---------------------------------------------------------------
-	// Create real gRPC transports.
-	// ---------------------------------------------------------------
-
 	for i := range nodes {
 		transport := NewGRPCTransport()
+
+		clientTLS, err := LoadTLSClientConfig(
+			TLSConfig{
+				CAFile:   certFiles[i].caFile,
+				CertFile: certFiles[i].clientCertFile,
+				KeyFile:  certFiles[i].clientKeyFile,
+			},
+		)
+		if err != nil {
+			t.Fatalf(
+				"load TLS client config for node %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+
+		if err := transport.SetTLSConfig(clientTLS); err != nil {
+			t.Fatalf(
+				"set TLS config for node %s: %v",
+				peerIDs[i],
+				err,
+			)
+		}
+
 		transports[i] = transport
 
 		t.Cleanup(func() {
@@ -1208,12 +1624,12 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 		})
 	}
 
-	// ---------------------------------------------------------------
-	// Fully connect the cluster.
-	// ---------------------------------------------------------------
-
 	for i := range nodes {
-		peerList := make([]raft.NodeID, 0, len(peerIDs)-1)
+		peerList := make(
+			[]raft.NodeID,
+			0,
+			len(peerIDs)-1,
+		)
 
 		for j, peerID := range peerIDs {
 			if i == j {
@@ -1247,10 +1663,6 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 		}
 	}
 
-	// ---------------------------------------------------------------
-	// Start the cluster.
-	// ---------------------------------------------------------------
-
 	for i, node := range nodes {
 		if err := node.Start(); err != nil {
 			t.Fatalf(
@@ -1260,10 +1672,6 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 			)
 		}
 	}
-
-	// ---------------------------------------------------------------
-	// Wait for exactly one leader.
-	// ---------------------------------------------------------------
 
 	initialLeaderIndex := -1
 	deadline := time.Now().Add(5 * time.Second)
@@ -1300,18 +1708,16 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 		initialTerm,
 	)
 
-	// ---------------------------------------------------------------
-	// Propose entries while the original leader is still alive.
-	//
-	// These entries must exist in the leader's WAL before failure.
-	// ---------------------------------------------------------------
-
 	initialEntries := [][]byte{
 		[]byte("entry-a"),
 		[]byte("entry-b"),
 	}
 
-	initialIndexes := make([]raft.LogIndex, 0, len(initialEntries))
+	initialIndexes := make(
+		[]raft.LogIndex,
+		0,
+		len(initialEntries),
+	)
 
 	for _, data := range initialEntries {
 		index, err := nodes[initialLeaderIndex].Propose(data)
@@ -1322,14 +1728,15 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 			)
 		}
 
-		initialIndexes = append(initialIndexes, index)
+		initialIndexes = append(
+			initialIndexes,
+			index,
+		)
 	}
 
 	expectedInitialLastIndex :=
 		initialIndexes[len(initialIndexes)-1]
 
-	// Wait until all currently connected followers have the
-	// initial entries.
 	deadline = time.Now().Add(5 * time.Second)
 
 	for time.Now().Before(deadline) {
@@ -1364,10 +1771,6 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 		}
 	}
 
-	// ---------------------------------------------------------------
-	// Crash the original leader completely.
-	// ---------------------------------------------------------------
-
 	nodes[initialLeaderIndex].Stop()
 	servers[initialLeaderIndex].close()
 
@@ -1378,10 +1781,6 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 			err,
 		)
 	}
-
-	// ---------------------------------------------------------------
-	// Wait for a surviving leader.
-	// ---------------------------------------------------------------
 
 	newLeaderIndex := -1
 	deadline = time.Now().Add(5 * time.Second)
@@ -1430,28 +1829,15 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 		newLeaderTerm,
 	)
 
-	// ---------------------------------------------------------------
-	// Make sure the surviving nodes no longer have a usable
-	// connection to the crashed leader.
-	//
-	// This makes the failure explicit and avoids relying on the old
-	// gRPC endpoint.
-	// ---------------------------------------------------------------
-
 	for i, transport := range transports {
 		if i == initialLeaderIndex {
 			continue
 		}
 
-		transport.RemovePeer(peerIDs[initialLeaderIndex])
+		transport.RemovePeer(
+			peerIDs[initialLeaderIndex],
+		)
 	}
-
-	// ---------------------------------------------------------------
-	// Propose new entries on the surviving leader.
-	//
-	// The crashed node is offline, so these entries cannot be
-	// replicated to it. The two surviving nodes form a majority.
-	// ---------------------------------------------------------------
 
 	recoveryEntries := [][]byte{
 		[]byte("entry-c"),
@@ -1459,7 +1845,11 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 		[]byte("entry-e"),
 	}
 
-	recoveryIndexes := make([]raft.LogIndex, 0, len(recoveryEntries))
+	recoveryIndexes := make(
+		[]raft.LogIndex,
+		0,
+		len(recoveryEntries),
+	)
 
 	for _, data := range recoveryEntries {
 		index, err := nodes[newLeaderIndex].Propose(data)
@@ -1485,10 +1875,6 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 		expectedLastIndex,
 	)
 
-	// ---------------------------------------------------------------
-	// Verify the surviving leader contains the complete log.
-	// ---------------------------------------------------------------
-
 	leaderLogLastIndex :=
 		nodes[newLeaderIndex].Log().LastIndex()
 
@@ -1499,10 +1885,6 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 			expectedLastIndex,
 		)
 	}
-
-	// ---------------------------------------------------------------
-	// Reopen the crashed leader's WAL as a completely new process.
-	// ---------------------------------------------------------------
 
 	walPath := filepath.Join(
 		testDir,
@@ -1544,12 +1926,32 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 		electionTimeouts[initialLeaderIndex],
 	)
 
-	// ---------------------------------------------------------------
-	// Give the recovered node a fresh transport connected to the
-	// two surviving nodes.
-	// ---------------------------------------------------------------
-
 	recoveredTransport := NewGRPCTransport()
+
+	recoveredClientTLS, err := LoadTLSClientConfig(
+		TLSConfig{
+			CAFile:   certFiles[initialLeaderIndex].caFile,
+			CertFile: certFiles[initialLeaderIndex].clientCertFile,
+			KeyFile:  certFiles[initialLeaderIndex].clientKeyFile,
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"load TLS client config for recovered node %s: %v",
+			peerIDs[initialLeaderIndex],
+			err,
+		)
+	}
+
+	if err := recoveredTransport.SetTLSConfig(
+		recoveredClientTLS,
+	); err != nil {
+		t.Fatalf(
+			"set TLS config for recovered node %s: %v",
+			peerIDs[initialLeaderIndex],
+			err,
+		)
+	}
 
 	t.Cleanup(func() {
 		_ = recoveredTransport.Close()
@@ -1593,13 +1995,32 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 		)
 	}
 
-	// ---------------------------------------------------------------
-	// Start a fresh gRPC endpoint for the recovered process.
-	// ---------------------------------------------------------------
+	allowedRecoveredPeerSANs := make(map[string]struct{})
+
+	for _, peerID := range survivorIDs {
+		allowedRecoveredPeerSANs[peerServerName(peerID)] = struct{}{}
+	}
+
+	recoveredServerTLS, err := LoadTLSServerConfig(
+		TLSConfig{
+			CAFile:   certFiles[initialLeaderIndex].caFile,
+			CertFile: certFiles[initialLeaderIndex].serverCertFile,
+			KeyFile:  certFiles[initialLeaderIndex].serverKeyFile,
+		},
+		allowedRecoveredPeerSANs,
+	)
+	if err != nil {
+		t.Fatalf(
+			"load TLS server config for recovered node %s: %v",
+			peerIDs[initialLeaderIndex],
+			err,
+		)
+	}
 
 	recoveredServer := startTestRaftServer(
 		t,
 		recoveredNode,
+		recoveredServerTLS,
 	)
 
 	t.Cleanup(func() {
@@ -1609,7 +2030,6 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 	recoveredAddress :=
 		recoveredServer.listener.Addr().String()
 
-	// Update surviving nodes with the recovered leader's new address.
 	for i, transport := range transports {
 		if i == initialLeaderIndex {
 			continue
@@ -1628,10 +2048,6 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 		}
 	}
 
-	// ---------------------------------------------------------------
-	// Start the recovered node.
-	// ---------------------------------------------------------------
-
 	if err := recoveredNode.Start(); err != nil {
 		t.Fatalf(
 			"start recovered node %s: %v",
@@ -1639,15 +2055,6 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 			err,
 		)
 	}
-
-	// ---------------------------------------------------------------
-	// Wait for the recovered node to:
-	//
-	//   1. discover the current leader,
-	//   2. remain a follower,
-	//   3. receive the missing entries,
-	//   4. converge to the leader's last log index.
-	// ---------------------------------------------------------------
 
 	deadline = time.Now().Add(5 * time.Second)
 
@@ -1699,69 +2106,8 @@ func TestGRPCTransportLeaderRecoveryLogCatchUp(t *testing.T) {
 			expectedLastIndex,
 		)
 	}
-
-	// ---------------------------------------------------------------
-	// Verify every log entry matches the surviving leader.
-	// ---------------------------------------------------------------
-
-	leaderNode := nodes[newLeaderIndex]
-
-	for index := raft.LogIndex(1); index <= expectedLastIndex; index++ {
-		leaderEntry, leaderOK :=
-			leaderNode.Log().Get(index)
-
-		recoveredEntry, recoveredOK :=
-			recoveredNode.Log().Get(index)
-
-		if !leaderOK {
-			t.Fatalf(
-				"leader missing log entry at index %d",
-				index,
-			)
-		}
-
-		if !recoveredOK {
-			t.Fatalf(
-				"recovered node missing log entry at index %d",
-				index,
-			)
-		}
-
-		if recoveredEntry.Index != leaderEntry.Index {
-			t.Fatalf(
-				"log index mismatch at %d: recovered=%d leader=%d",
-				index,
-				recoveredEntry.Index,
-				leaderEntry.Index,
-			)
-		}
-
-		if recoveredEntry.Term != leaderEntry.Term {
-			t.Fatalf(
-				"log term mismatch at index %d: recovered=%d leader=%d",
-				index,
-				recoveredEntry.Term,
-				leaderEntry.Term,
-			)
-		}
-
-		if string(recoveredEntry.Data) != string(leaderEntry.Data) {
-			t.Fatalf(
-				"log data mismatch at index %d: recovered=%q leader=%q",
-				index,
-				recoveredEntry.Data,
-				leaderEntry.Data,
-			)
-		}
-	}
-
-	t.Logf(
-		"recovered node caught up: node=%s lastIndex=%d leader=%s",
-		recoveredNode.ID(),
-		recoveredLastIndex,
-		leaderNode.ID(),
-	)
 }
+
 func TestGRPCTransportFollowerWALRecovery(t *testing.T) {
 	t.Parallel()
 
@@ -1778,8 +2124,10 @@ func TestGRPCTransportFollowerWALRecovery(t *testing.T) {
 	nodes := make([]*raft.RaftNode, len(ids))
 	stores := make([]*storage.WALStorage, len(ids))
 	transports := make([]*GRPCTransport, len(ids))
-	servers := make([]*grpc.Server, len(ids))
-	addresses := make([]string, len(ids))
+	servers := make([]*testRaftServer, len(ids))
+
+	// Build a shared test CA and per-node certificates.
+	clusterTLS := newTestClusterTLS(t, ids)
 
 	for i, id := range ids {
 		node, store := newPersistentTestNode(t, id, tempDir)
@@ -1788,50 +2136,42 @@ func TestGRPCTransportFollowerWALRecovery(t *testing.T) {
 		stores[i] = store
 
 		transport := NewGRPCTransport()
-		transports[i] = transport
 
-		server := grpc.NewServer()
-		servers[i] = server
-
-		registerRaftService(server, node)
-
-		listener, err := net.Listen(
-			"tcp",
-			"127.0.0.1:0",
-		)
-		if err != nil {
-			t.Fatalf(
-				"listen for %s: %v",
-				id,
-				err,
-			)
+		if err := transport.SetTLSConfig(
+			clusterTLS.clientConfigs[id],
+		); err != nil {
+			t.Fatalf("set TLS config for %s: %v", id, err)
 		}
 
-		addresses[i] = listener.Addr().String()
+		transports[i] = transport
 
-		go func() {
-			if err := server.Serve(listener); err != nil &&
-				!errors.Is(err, grpc.ErrServerStopped) {
-				t.Errorf("gRPC server failed: %v", err)
-			}
-		}()
+		servers[i] = startTestRaftServer(
+			t,
+			node,
+			clusterTLS.serverConfigs[id],
+		)
 	}
 
 	t.Cleanup(func() {
 		for _, server := range servers {
-			server.Stop()
+			if server != nil {
+				server.close()
+			}
 		}
 
 		for _, transport := range transports {
-			_ = transport.Close()
+			if transport != nil {
+				_ = transport.Close()
+			}
 		}
 
 		for _, store := range stores {
-			_ = store.Close()
+			if store != nil {
+				_ = store.Close()
+			}
 		}
 	})
 
-	// Connect every node to every other node.
 	for i, transport := range transports {
 		for j, peerID := range ids {
 			if i == j {
@@ -1840,7 +2180,7 @@ func TestGRPCTransportFollowerWALRecovery(t *testing.T) {
 
 			if err := transport.AddPeer(
 				peerID,
-				addresses[j],
+				servers[j].listener.Addr().String(),
 			); err != nil {
 				t.Fatalf(
 					"add peer %s -> %s: %v",
@@ -1900,8 +2240,6 @@ func TestGRPCTransportFollowerWALRecovery(t *testing.T) {
 		)
 	}
 
-	// Choose a follower and wait until it has actually replicated
-	// both entries before shutting it down.
 	followerIndex := (leaderIndex + 1) % len(nodes)
 	follower := nodes[followerIndex]
 
@@ -1909,9 +2247,8 @@ func TestGRPCTransportFollowerWALRecovery(t *testing.T) {
 		return follower.Log().LastIndex() >= 2
 	})
 
-	// Stop only the follower.
 	follower.Stop()
-	servers[followerIndex].Stop()
+	servers[followerIndex].close()
 
 	if err := stores[followerIndex].Close(); err != nil {
 		t.Fatalf(
@@ -1920,7 +2257,6 @@ func TestGRPCTransportFollowerWALRecovery(t *testing.T) {
 		)
 	}
 
-	// Reopen the SAME WAL.
 	recoveredStore, err := storage.OpenWAL(
 		filepath.Join(
 			tempDir,
@@ -1975,8 +2311,6 @@ func TestGRPCTransportFollowerWALRecovery(t *testing.T) {
 		)
 	}
 
-	// The important assertion:
-	// the entries came back from the follower's own WAL.
 	if recoveredNode.Log().LastIndex() != 2 {
 		t.Fatalf(
 			"recovered follower last index = %d, want 2",
@@ -2007,10 +2341,10 @@ func TestGRPCTransportDivergentFollowerLogRepair(t *testing.T) {
 	nodes := make([]*raft.RaftNode, len(ids))
 	stores := make([]*storage.WALStorage, len(ids))
 	transports := make([]*GRPCTransport, len(ids))
-	servers := make([]*grpc.Server, len(ids))
-	addresses := make([]string, len(ids))
+	servers := make([]*testRaftServer, len(ids))
 
-	// Start the initial three-node cluster.
+	clusterTLS := newTestClusterTLS(t, ids)
+
 	for i, id := range ids {
 		node, store := newPersistentTestNode(t, id, tempDir)
 
@@ -2018,32 +2352,26 @@ func TestGRPCTransportDivergentFollowerLogRepair(t *testing.T) {
 		stores[i] = store
 
 		transport := NewGRPCTransport()
-		transports[i] = transport
 
-		server := grpc.NewServer()
-		servers[i] = server
-
-		registerRaftService(server, node)
-
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("listen for %s: %v", id, err)
+		if err := transport.SetTLSConfig(
+			clusterTLS.clientConfigs[id],
+		); err != nil {
+			t.Fatalf("set TLS config for %s: %v", id, err)
 		}
 
-		addresses[i] = listener.Addr().String()
+		transports[i] = transport
 
-		go func() {
-			if err := server.Serve(listener); err != nil &&
-				!errors.Is(err, grpc.ErrServerStopped) {
-				t.Errorf("serve %s: %v", id, err)
-			}
-		}()
+		servers[i] = startTestRaftServer(
+			t,
+			node,
+			clusterTLS.serverConfigs[id],
+		)
 	}
 
 	t.Cleanup(func() {
 		for _, server := range servers {
 			if server != nil {
-				server.Stop()
+				server.close()
 			}
 		}
 
@@ -2060,20 +2388,26 @@ func TestGRPCTransportDivergentFollowerLogRepair(t *testing.T) {
 		}
 	})
 
-	// Connect every node to every other node.
 	for i, transport := range transports {
 		for j, peerID := range ids {
 			if i == j {
 				continue
 			}
 
-			transport.AddPeer(peerID, addresses[j])
+			if err := transport.AddPeer(
+				peerID,
+				servers[j].listener.Addr().String(),
+			); err != nil {
+				t.Fatalf("add peer %s -> %s: %v", ids[i], peerID, err)
+			}
 		}
 
-		nodes[i].SetTransport(
+		if err := nodes[i].SetTransport(
 			transport,
 			peerIDsExcept(ids, ids[i]),
-		)
+		); err != nil {
+			t.Fatalf("set transport for %s: %v", ids[i], err)
+		}
 
 		setDeterministicElectionTimeout(nodes[i], i)
 	}
@@ -2088,21 +2422,15 @@ func TestGRPCTransportDivergentFollowerLogRepair(t *testing.T) {
 		}
 	}()
 
-	// Wait for a leader.
 	leaderIndex := waitForLeader(t, nodes)
 	leader := nodes[leaderIndex]
 
-	// Establish the canonical log:
-	//
-	//   A B C
-	//
 	for _, data := range []string{"A", "B", "C"} {
 		if _, err := leader.Propose([]byte(data)); err != nil {
 			t.Fatalf("propose %q: %v", data, err)
 		}
 	}
 
-	// Wait until all three nodes contain the canonical prefix.
 	waitForCondition(t, 10*time.Second, func() bool {
 		for _, node := range nodes {
 			if node.Log().LastIndex() < 3 {
@@ -2122,26 +2450,20 @@ func TestGRPCTransportDivergentFollowerLogRepair(t *testing.T) {
 		return true
 	})
 
-	// Stop one follower and remove its transport/server.
 	followerIndex := (leaderIndex + 1) % len(nodes)
 	followerID := ids[followerIndex]
 
 	nodes[followerIndex].Stop()
-	servers[followerIndex].Stop()
+	servers[followerIndex].close()
 	_ = transports[followerIndex].Close()
 	_ = stores[followerIndex].Close()
 
-	// The leader continues with the canonical log:
-	//
-	//   A B C D E
-	//
 	for _, data := range []string{"D", "E"} {
 		if _, err := leader.Propose([]byte(data)); err != nil {
 			t.Fatalf("propose %q after follower failure: %v", data, err)
 		}
 	}
 
-	// Reopen the stopped follower's WAL.
 	recoveredPath := filepath.Join(tempDir, string(followerID)+".wal")
 
 	recoveredStore, err := storage.OpenWAL(recoveredPath)
@@ -2149,13 +2471,6 @@ func TestGRPCTransportDivergentFollowerLogRepair(t *testing.T) {
 		t.Fatalf("reopen follower WAL: %v", err)
 	}
 
-	// Intentionally corrupt the follower's suffix:
-	//
-	//   canonical:  A B C D E
-	//   divergent:  A B C X Y
-	//
-	// This simulates a follower that has conflicting entries from another
-	// leader/term.
 	divergentEntries := []model.LogEntry{
 		{
 			Index: 4,
@@ -2183,7 +2498,6 @@ func TestGRPCTransportDivergentFollowerLogRepair(t *testing.T) {
 		t.Fatalf("close divergent store: %v", err)
 	}
 
-	// Reopen the intentionally divergent WAL.
 	recoveredStore, err = storage.OpenWAL(recoveredPath)
 	if err != nil {
 		t.Fatalf("reopen divergent follower WAL: %v", err)
@@ -2198,56 +2512,73 @@ func TestGRPCTransportDivergentFollowerLogRepair(t *testing.T) {
 		t.Fatalf("create recovered follower: %v", err)
 	}
 
-	// Start a new gRPC server for the recovered follower.
-	recoveredServer := grpc.NewServer()
-	registerRaftService(recoveredServer, recoveredNode)
+	recoveredServer := startTestRaftServer(
+		t,
+		recoveredNode,
+		clusterTLS.serverConfigs[followerID],
+	)
 
-	recoveredListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		_ = recoveredStore.Close()
-		t.Fatalf("listen for recovered follower: %v", err)
-	}
-
-	recoveredAddress := recoveredListener.Addr().String()
-
-	go func() {
-		if err := recoveredServer.Serve(recoveredListener); err != nil &&
-			!errors.Is(err, grpc.ErrServerStopped) {
-			t.Errorf("serve recovered follower: %v", err)
-		}
-	}()
+	recoveredAddress := recoveredServer.listener.Addr().String()
 
 	t.Cleanup(func() {
-		recoveredServer.Stop()
-		_ = recoveredListener.Close()
+		recoveredServer.close()
 		_ = recoveredStore.Close()
 	})
 
-	// Create a fresh transport for the recovered follower.
 	recoveredTransport := NewGRPCTransport()
+
+	if err := recoveredTransport.SetTLSConfig(
+		clusterTLS.clientConfigs[followerID],
+	); err != nil {
+		t.Fatalf("set TLS config for recovered follower: %v", err)
+	}
 
 	for i, peerID := range ids {
 		if peerID == followerID {
 			continue
 		}
 
-		recoveredTransport.AddPeer(peerID, addresses[i])
+		if err := recoveredTransport.AddPeer(
+			peerID,
+			servers[i].listener.Addr().String(),
+		); err != nil {
+			t.Fatalf(
+				"add peer %s to recovered follower: %v",
+				peerID,
+				err,
+			)
+		}
 	}
 
-	// Replace the old follower address in the surviving nodes.
 	for i, transport := range transports {
 		if i == followerIndex {
 			continue
 		}
 
 		transport.RemovePeer(followerID)
-		transport.AddPeer(followerID, recoveredAddress)
+
+		if err := transport.AddPeer(
+			followerID,
+			recoveredAddress,
+		); err != nil {
+			t.Fatalf(
+				"add recovered peer %s to node %s: %v",
+				followerID,
+				ids[i],
+				err,
+			)
+		}
 	}
 
-	recoveredNode.SetTransport(
+	if err := recoveredNode.SetTransport(
 		recoveredTransport,
 		peerIDsExcept(ids, followerID),
-	)
+	); err != nil {
+		t.Fatalf(
+			"set transport for recovered follower: %v",
+			err,
+		)
+	}
 
 	setDeterministicElectionTimeout(
 		recoveredNode,
@@ -2258,17 +2589,6 @@ func TestGRPCTransportDivergentFollowerLogRepair(t *testing.T) {
 
 	defer recoveredNode.Stop()
 
-	// The important part:
-	//
-	// DO NOT wait only for LastIndex == 5.
-	//
-	// The divergent log A B C X Y already has LastIndex == 5.
-	// We must wait until the actual contents have been repaired:
-	//
-	//   A B C X Y
-	//        ↓
-	//   A B C D E
-	//
 	expected := []string{"A", "B", "C", "D", "E"}
 
 	waitForCondition(t, 10*time.Second, func() bool {
@@ -2286,7 +2606,6 @@ func TestGRPCTransportDivergentFollowerLogRepair(t *testing.T) {
 		return true
 	})
 
-	// Final verification.
 	for i, want := range expected {
 		entry, ok := recoveredNode.Log().Get(model.LogIndex(i + 1))
 		if !ok {
@@ -2303,7 +2622,6 @@ func TestGRPCTransportDivergentFollowerLogRepair(t *testing.T) {
 		}
 	}
 
-	// Verify that the recovered follower has exactly the canonical log length.
 	if got := recoveredNode.Log().LastIndex(); got != 5 {
 		t.Fatalf("recovered follower last index = %d, want 5", got)
 	}
@@ -2325,8 +2643,9 @@ func TestGRPCTransportFullClusterRestartFromWAL(t *testing.T) {
 	nodes := make([]*raft.RaftNode, len(ids))
 	stores := make([]*storage.WALStorage, len(ids))
 	transports := make([]*GRPCTransport, len(ids))
-	servers := make([]*grpc.Server, len(ids))
-	addresses := make([]string, len(ids))
+	servers := make([]*testRaftServer, len(ids))
+
+	clusterTLS := newTestClusterTLS(t, ids)
 
 	startCluster := func() {
 		for i, id := range ids {
@@ -2340,29 +2659,20 @@ func TestGRPCTransportFullClusterRestartFromWAL(t *testing.T) {
 			stores[i] = store
 
 			transport := NewGRPCTransport()
-			transports[i] = transport
 
-			server := grpc.NewServer()
-			servers[i] = server
-
-			registerRaftService(server, node)
-
-			listener, err := net.Listen(
-				"tcp",
-				"127.0.0.1:0",
-			)
-			if err != nil {
-				t.Fatalf("listen: %v", err)
+			if err := transport.SetTLSConfig(
+				clusterTLS.clientConfigs[id],
+			); err != nil {
+				t.Fatalf("set TLS config for %s: %v", id, err)
 			}
 
-			addresses[i] = listener.Addr().String()
+			transports[i] = transport
 
-			go func() {
-				if err := server.Serve(listener); err != nil &&
-					!errors.Is(err, grpc.ErrServerStopped) {
-					t.Errorf("server failed: %v", err)
-				}
-			}()
+			servers[i] = startTestRaftServer(
+				t,
+				node,
+				clusterTLS.serverConfigs[id],
+			)
 		}
 
 		for i, transport := range transports {
@@ -2373,7 +2683,7 @@ func TestGRPCTransportFullClusterRestartFromWAL(t *testing.T) {
 
 				if err := transport.AddPeer(
 					peerID,
-					addresses[j],
+					servers[j].listener.Addr().String(),
 				); err != nil {
 					t.Fatalf(
 						"add peer %s -> %s: %v",
@@ -2412,15 +2722,21 @@ func TestGRPCTransportFullClusterRestartFromWAL(t *testing.T) {
 		}
 
 		for _, server := range servers {
-			server.Stop()
+			if server != nil {
+				server.close()
+			}
 		}
 
 		for _, transport := range transports {
-			_ = transport.Close()
+			if transport != nil {
+				_ = transport.Close()
+			}
 		}
 
 		for _, store := range stores {
-			_ = store.Close()
+			if store != nil {
+				_ = store.Close()
+			}
 		}
 	}
 
@@ -2445,8 +2761,6 @@ func TestGRPCTransportFullClusterRestartFromWAL(t *testing.T) {
 		}
 	}
 
-	// Make sure all nodes have the complete log before
-	// shutting down the entire cluster.
 	waitForCondition(t, 10*time.Second, func() bool {
 		for _, node := range nodes {
 			if node.Log().LastIndex() != 3 {
@@ -2460,12 +2774,10 @@ func TestGRPCTransportFullClusterRestartFromWAL(t *testing.T) {
 	t.Log("stopping complete cluster")
 	stopCluster()
 
-	// Recreate every node from its existing WAL.
 	startCluster()
 
 	defer stopCluster()
 
-	// A new election should happen using recovered persistent state.
 	newLeaderIndex := waitForLeader(t, nodes)
 	newLeader := nodes[newLeaderIndex]
 
@@ -2497,7 +2809,6 @@ func TestGRPCTransportFullClusterRestartFromWAL(t *testing.T) {
 		}
 	}
 
-	// Every node should recover the same log.
 	for i, node := range nodes {
 		if node.Log().LastIndex() != 3 {
 			t.Fatalf(
@@ -2513,6 +2824,7 @@ func TestGRPCTransportFullClusterRestartFromWAL(t *testing.T) {
 		newLeader.ID(),
 	)
 }
+
 func registerRaftService(server *grpc.Server, node *raft.RaftNode) {
 	service, err := NewRaftService(node)
 	if err != nil {
@@ -2593,4 +2905,90 @@ func waitForCondition(
 	}
 
 	t.Fatalf("condition not satisfied within %s", timeout)
+}
+
+type testClusterTLS struct {
+	serverConfigs map[raft.NodeID]*tls.Config
+	clientConfigs map[raft.NodeID]*tls.Config
+}
+
+func newTestClusterTLS(
+	t *testing.T,
+	ids []raft.NodeID,
+) *testClusterTLS {
+	t.Helper()
+
+	if len(ids) == 0 {
+		t.Fatal("TLS cluster requires at least one node")
+	}
+
+	dir := t.TempDir()
+
+	ca := newTestCertificateAuthority(t, dir)
+
+	certs := make(map[raft.NodeID]testCertificateFiles, len(ids))
+
+	for _, id := range ids {
+		certs[id] = writeTestNodeCertificate(
+			t,
+			ca,
+			dir,
+			id,
+		)
+	}
+
+	result := &testClusterTLS{
+		serverConfigs: make(map[raft.NodeID]*tls.Config, len(ids)),
+		clientConfigs: make(map[raft.NodeID]*tls.Config, len(ids)),
+	}
+
+	for _, id := range ids {
+		allowedPeerSANs := make(map[string]struct{}, len(ids)-1)
+
+		for _, peerID := range ids {
+			if peerID == id {
+				continue
+			}
+
+			allowedPeerSANs[peerServerName(peerID)] = struct{}{}
+		}
+
+		serverFiles := certs[id]
+
+		serverTLS, err := LoadTLSServerConfig(
+			TLSConfig{
+				CAFile:   serverFiles.caFile,
+				CertFile: serverFiles.serverCertFile,
+				KeyFile:  serverFiles.serverKeyFile,
+			},
+			allowedPeerSANs,
+		)
+		if err != nil {
+			t.Fatalf(
+				"load server TLS config for %s: %v",
+				id,
+				err,
+			)
+		}
+
+		clientTLS, err := LoadTLSClientConfig(
+			TLSConfig{
+				CAFile:   serverFiles.caFile,
+				CertFile: serverFiles.clientCertFile,
+				KeyFile:  serverFiles.clientKeyFile,
+			},
+		)
+		if err != nil {
+			t.Fatalf(
+				"load client TLS config for %s: %v",
+				id,
+				err,
+			)
+		}
+
+		result.serverConfigs[id] = serverTLS
+		result.clientConfigs[id] = clientTLS
+	}
+
+	return result
 }

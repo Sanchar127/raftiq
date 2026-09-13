@@ -8,12 +8,13 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
-
+	"github.com/sanchar127/raftiq/internal/raft"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,6 +26,189 @@ type testCertificateFiles struct {
 
 	clientCertFile string
 	clientKeyFile  string
+}
+
+type testCertificateAuthority struct {
+	cert *x509.Certificate
+	key  *ecdsa.PrivateKey
+	file string
+}
+
+func newTestCertificateAuthority(
+	t *testing.T,
+	dir string,
+) testCertificateAuthority {
+	t.Helper()
+
+	now := time.Now()
+
+	caKey, err := ecdsa.GenerateKey(
+		elliptic.P256(),
+		rand.Reader,
+	)
+	require.NoError(t, err)
+
+	caTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: "RaftIQ Test CA",
+		},
+		NotBefore: now.Add(-time.Minute),
+		NotAfter:  now.Add(time.Hour),
+
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+
+		KeyUsage: x509.KeyUsageCertSign |
+			x509.KeyUsageDigitalSignature,
+	}
+
+	caDER, err := x509.CreateCertificate(
+		rand.Reader,
+		caTemplate,
+		caTemplate,
+		&caKey.PublicKey,
+		caKey,
+	)
+	require.NoError(t, err)
+
+	caCert, err := x509.ParseCertificate(caDER)
+	require.NoError(t, err)
+
+	caFile := filepath.Join(dir, "ca.crt")
+
+	require.NoError(
+		t,
+		os.WriteFile(
+			caFile,
+			pem.EncodeToMemory(&pem.Block{
+				Type:  "CERTIFICATE",
+				Bytes: caDER,
+			}),
+			0o600,
+		),
+	)
+
+	return testCertificateAuthority{
+		cert: caCert,
+		key:  caKey,
+		file: caFile,
+	}
+}
+
+func writeTestNodeCertificate(
+	t *testing.T,
+	ca testCertificateAuthority,
+	dir string,
+	nodeID raft.NodeID,
+) testCertificateFiles {
+	t.Helper()
+
+	now := time.Now()
+
+	// Generate a unique serial number for this node certificate.
+	serialBytes := make([]byte, 16)
+	_, err := rand.Read(serialBytes)
+	require.NoError(t, err)
+
+	serial := new(big.Int).SetBytes(serialBytes)
+
+	nodeKey, err := ecdsa.GenerateKey(
+		elliptic.P256(),
+		rand.Reader,
+	)
+	require.NoError(t, err)
+
+	san := peerServerName(nodeID)
+
+	nodeTemplate := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			CommonName: string(nodeID),
+		},
+		DNSNames: []string{
+			san,
+		},
+		NotBefore: now.Add(-time.Minute),
+		NotAfter:  now.Add(time.Hour),
+
+		ExtKeyUsage: []x509.ExtKeyUsage{
+			x509.ExtKeyUsageServerAuth,
+			x509.ExtKeyUsageClientAuth,
+		},
+
+		KeyUsage: x509.KeyUsageDigitalSignature,
+	}
+
+	nodeDER, err := x509.CreateCertificate(
+		rand.Reader,
+		nodeTemplate,
+		ca.cert,
+		&nodeKey.PublicKey,
+		ca.key,
+	)
+	require.NoError(t, err)
+
+	nodeCertFile := filepath.Join(
+		dir,
+		fmt.Sprintf("%s.crt", nodeID),
+	)
+
+	nodeKeyFile := filepath.Join(
+		dir,
+		fmt.Sprintf("%s.key", nodeID),
+	)
+
+	require.NoError(
+		t,
+		os.WriteFile(
+			nodeCertFile,
+			pem.EncodeToMemory(
+				&pem.Block{
+					Type:  "CERTIFICATE",
+					Bytes: nodeDER,
+				},
+			),
+			0o600,
+		),
+	)
+
+	nodeKeyDER, err := x509.MarshalECPrivateKey(nodeKey)
+	require.NoError(t, err)
+
+	require.NoError(
+		t,
+		os.WriteFile(
+			nodeKeyFile,
+			pem.EncodeToMemory(
+				&pem.Block{
+					Type:  "EC PRIVATE KEY",
+					Bytes: nodeKeyDER,
+				},
+			),
+			0o600,
+		),
+	)
+
+	return testCertificateFiles{
+		caFile: ca.file,
+
+		serverCertFile: nodeCertFile,
+		serverKeyFile:  nodeKeyFile,
+
+		clientCertFile: nodeCertFile,
+		clientKeyFile:  nodeKeyFile,
+	}
+}
+
+func mustPEM(
+	blockType string,
+	data []byte,
+) []byte {
+	return pem.EncodeToMemory(&pem.Block{
+		Type:  blockType,
+		Bytes: data,
+	})
 }
 
 func writeTestCertificateFiles(

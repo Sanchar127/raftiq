@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -12,7 +13,7 @@ import (
 	raftiqv1 "github.com/sanchar127/raftiq/api/proto"
 	"github.com/sanchar127/raftiq/internal/raft"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 )
 
 var (
@@ -26,6 +27,7 @@ type GRPCTransport struct {
 	conns  map[raft.NodeID]*grpc.ClientConn
 	closed bool
 	logger *slog.Logger
+	tls    *tls.Config
 }
 
 func discardGRPCTransportLogger() *slog.Logger {
@@ -48,6 +50,23 @@ func NewGRPCTransport() *GRPCTransport {
 		conns:  make(map[raft.NodeID]*grpc.ClientConn),
 		logger: discardGRPCTransportLogger(),
 	}
+}
+
+func (t *GRPCTransport) SetTLSConfig(config *tls.Config) error {
+	if config == nil {
+		return errors.New("TLS config is required")
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.closed {
+		return ErrGRPCTransportClosed
+	}
+
+	t.tls = config.Clone()
+
+	return nil
 }
 
 func (t *GRPCTransport) SetLogger(logger *slog.Logger) {
@@ -119,16 +138,25 @@ func (t *GRPCTransport) AddPeer(
 		return fmt.Errorf("raft peer %s already registered", id)
 	}
 
+	if t.tls == nil {
+		return errors.New("TLS config is not configured")
+	}
+
+	tlsConfig := t.tls.Clone()
+	tlsConfig.ServerName = peerServerName(id)
+
+	dialOpts := append(
+		[]grpc.DialOption{
+			grpc.WithTransportCredentials(
+				credentials.NewTLS(tlsConfig),
+			),
+		},
+		opts...,
+	)
+
 	conn, err := grpc.NewClient(
 		address,
-		append(
-			[]grpc.DialOption{
-				grpc.WithTransportCredentials(
-					insecure.NewCredentials(),
-				),
-			},
-			opts...,
-		)...,
+		dialOpts...,
 	)
 	if err != nil {
 		logger.Error(
@@ -649,4 +677,7 @@ func contextError(ctx context.Context) error {
 	default:
 		return nil
 	}
+}
+func peerServerName(id raft.NodeID) string {
+	return fmt.Sprintf("%s.raftiq", id)
 }

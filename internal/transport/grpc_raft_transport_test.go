@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"testing"
 	"time"
@@ -9,10 +10,8 @@ import (
 	raftiqv1 "github.com/sanchar127/raftiq/api/proto"
 	"github.com/sanchar127/raftiq/internal/raft"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/grpc/credentials"
 )
-
-const grpcTransportTestBufSize = 1024 * 1024
 
 type grpcTestNode struct {
 	raftiqv1.UnimplementedRaftServiceServer
@@ -92,48 +91,17 @@ func (n *grpcTestNode) InstallSnapshot(
 	}, nil
 }
 
+// startGRPCTestServer starts a gRPC server backed by node on a random
+// localhost port. When tlsConfig is provided, the server requires mTLS.
 func startGRPCTestServer(
 	t *testing.T,
 	node *grpcTestNode,
-) func() {
+	tlsConfigs ...*tls.Config,
+) (string, func()) {
 	t.Helper()
 
-	listener := bufconn.Listen(grpcTransportTestBufSize)
-
-	server := grpc.NewServer()
-	raftiqv1.RegisterRaftServiceServer(server, node)
-
-	go func() {
-		if err := server.Serve(listener); err != nil {
-			t.Errorf("gRPC test server failed: %v", err)
-		}
-	}()
-
-	return func() {
-		server.GracefulStop()
-		_ = listener.Close()
-	}
-}
-
-func dialBufconn(
-	ctx context.Context,
-	address string,
-) (*grpc.ClientConn, error) {
-	return grpc.NewClient(
-		address,
-		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
-			return bufconn.Listen(grpcTransportTestBufSize).Dial()
-		}),
-	)
-}
-
-func TestGRPCTransportRequestVote(t *testing.T) {
-	serverNode := &grpcTestNode{
-		requestVoteReply: raft.RequestVoteReply{
-			Term:        7,
-			VoterID:     "node-2",
-			VoteGranted: true,
-		},
+	if len(tlsConfigs) > 1 {
+		t.Fatal("startGRPCTestServer accepts at most one TLS config")
 	}
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -141,27 +109,137 @@ func TestGRPCTransportRequestVote(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 
-	server := grpc.NewServer()
-	raftiqv1.RegisterRaftServiceServer(server, serverNode)
+	var server *grpc.Server
+
+	if len(tlsConfigs) == 1 && tlsConfigs[0] != nil {
+		server = grpc.NewServer(
+			grpc.Creds(credentials.NewTLS(tlsConfigs[0])),
+		)
+	} else {
+		server = grpc.NewServer()
+	}
+
+	raftiqv1.RegisterRaftServiceServer(server, node)
+
+	serveErr := make(chan error, 1)
 
 	go func() {
-		if err := server.Serve(listener); err != nil {
-			t.Errorf("gRPC test server failed: %v", err)
+		err := server.Serve(listener)
+		if err != nil && err != grpc.ErrServerStopped {
+			serveErr <- err
+			return
 		}
+
+		serveErr <- nil
 	}()
 
-	defer func() {
+	cleanup := func() {
 		server.GracefulStop()
 		_ = listener.Close()
-	}()
+
+		select {
+		case err := <-serveErr:
+			if err != nil {
+				t.Errorf("gRPC test server failed: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Error("timed out waiting for gRPC test server to stop")
+		}
+	}
+
+	return listener.Addr().String(), cleanup
+}
+
+// newGRPCTestTLSConfigs creates a test CA and two node certificates.
+// The server certificate belongs to serverID and the client certificate
+// belongs to clientID. The server only accepts the expected client SAN.
+func newGRPCTestTLSConfigs(
+	t *testing.T,
+	serverID raft.NodeID,
+	clientID raft.NodeID,
+) (serverTLS *tls.Config, clientTLS *tls.Config) {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	ca := newTestCertificateAuthority(t, dir)
+
+	serverFiles := writeTestNodeCertificate(
+		t,
+		ca,
+		dir,
+		serverID,
+	)
+
+	clientFiles := writeTestNodeCertificate(
+		t,
+		ca,
+		dir,
+		clientID,
+	)
+
+	serverTLS, err := LoadTLSServerConfig(
+		TLSConfig{
+			CAFile:   serverFiles.caFile,
+			CertFile: serverFiles.serverCertFile,
+			KeyFile:  serverFiles.serverKeyFile,
+		},
+		map[string]struct{}{
+			peerServerName(clientID): {},
+		},
+	)
+	if err != nil {
+		t.Fatalf("load server TLS config: %v", err)
+	}
+
+	clientTLS, err = LoadTLSClientConfig(
+		TLSConfig{
+			CAFile:   clientFiles.caFile,
+			CertFile: clientFiles.clientCertFile,
+			KeyFile:  clientFiles.clientKeyFile,
+		},
+	)
+	if err != nil {
+		t.Fatalf("load client TLS config: %v", err)
+	}
+
+	return serverTLS, clientTLS
+}
+
+func TestGRPCTransportRequestVote(t *testing.T) {
+	const (
+		serverID = raft.NodeID("node-2")
+		clientID = raft.NodeID("node-1")
+	)
+
+	serverNode := &grpcTestNode{
+		requestVoteReply: raft.RequestVoteReply{
+			Term:        7,
+			VoterID:     serverID,
+			VoteGranted: true,
+		},
+	}
+
+	serverTLS, clientTLS := newGRPCTestTLSConfigs(
+		t,
+		serverID,
+		clientID,
+	)
+
+	address, stopServer := startGRPCTestServer(
+		t,
+		serverNode,
+		serverTLS,
+	)
+	defer stopServer()
 
 	transport := NewGRPCTransport()
 
-	err = transport.AddPeer(
-		"node-2",
-		listener.Addr().String(),
-	)
-	if err != nil {
+	if err := transport.SetTLSConfig(clientTLS); err != nil {
+		t.Fatalf("set TLS config: %v", err)
+	}
+
+	if err := transport.AddPeer(serverID, address); err != nil {
 		t.Fatalf("add peer: %v", err)
 	}
 
@@ -179,10 +257,10 @@ func TestGRPCTransportRequestVote(t *testing.T) {
 
 	reply, err := transport.RequestVote(
 		ctx,
-		"node-2",
+		serverID,
 		raft.RequestVoteArgs{
 			Term:         5,
-			CandidateID:  "node-1",
+			CandidateID:  clientID,
 			LastLogIndex: 12,
 			LastLogTerm:  4,
 		},
@@ -195,8 +273,12 @@ func TestGRPCTransportRequestVote(t *testing.T) {
 		t.Fatalf("expected term 7, got %d", reply.Term)
 	}
 
-	if reply.VoterID != "node-2" {
-		t.Fatalf("expected voter node-2, got %s", reply.VoterID)
+	if reply.VoterID != serverID {
+		t.Fatalf(
+			"expected voter %s, got %s",
+			serverID,
+			reply.VoterID,
+		)
 	}
 
 	if !reply.VoteGranted {
@@ -210,9 +292,10 @@ func TestGRPCTransportRequestVote(t *testing.T) {
 		)
 	}
 
-	if serverNode.requestVoteArgs.CandidateID != "node-1" {
+	if serverNode.requestVoteArgs.CandidateID != clientID {
 		t.Fatalf(
-			"expected candidate node-1, got %s",
+			"expected candidate %s, got %s",
+			clientID,
 			serverNode.requestVoteArgs.CandidateID,
 		)
 	}
@@ -231,41 +314,41 @@ func TestGRPCTransportRequestVote(t *testing.T) {
 		)
 	}
 }
+
 func TestGRPCTransportAppendEntries(t *testing.T) {
+	const (
+		serverID = raft.NodeID("node-2")
+		clientID = raft.NodeID("node-1")
+	)
+
 	serverNode := &grpcTestNode{
 		appendEntriesReply: raft.AppendEntriesReply{
 			Term:       8,
-			FollowerID: "node-2",
+			FollowerID: serverID,
 			Success:    true,
 		},
 	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	serverTLS, clientTLS := newGRPCTestTLSConfigs(
+		t,
+		serverID,
+		clientID,
+	)
 
-	server := grpc.NewServer()
-	raftiqv1.RegisterRaftServiceServer(server, serverNode)
-
-	go func() {
-		if err := server.Serve(listener); err != nil {
-			t.Errorf("gRPC test server failed: %v", err)
-		}
-	}()
-
-	defer func() {
-		server.GracefulStop()
-		_ = listener.Close()
-	}()
+	address, stopServer := startGRPCTestServer(
+		t,
+		serverNode,
+		serverTLS,
+	)
+	defer stopServer()
 
 	transport := NewGRPCTransport()
 
-	err = transport.AddPeer(
-		"node-2",
-		listener.Addr().String(),
-	)
-	if err != nil {
+	if err := transport.SetTLSConfig(clientTLS); err != nil {
+		t.Fatalf("set TLS config: %v", err)
+	}
+
+	if err := transport.AddPeer(serverID, address); err != nil {
 		t.Fatalf("add peer: %v", err)
 	}
 
@@ -296,10 +379,10 @@ func TestGRPCTransportAppendEntries(t *testing.T) {
 
 	reply, err := transport.AppendEntries(
 		ctx,
-		"node-2",
+		serverID,
 		raft.AppendEntriesArgs{
 			Term:         6,
-			LeaderID:     "node-1",
+			LeaderID:     clientID,
 			PrevLogIndex: 3,
 			PrevLogTerm:  2,
 			Entries:      entries,
@@ -314,9 +397,10 @@ func TestGRPCTransportAppendEntries(t *testing.T) {
 		t.Fatalf("expected term 8, got %d", reply.Term)
 	}
 
-	if reply.FollowerID != "node-2" {
+	if reply.FollowerID != serverID {
 		t.Fatalf(
-			"expected follower node-2, got %s",
+			"expected follower %s, got %s",
+			serverID,
 			reply.FollowerID,
 		)
 	}
@@ -331,9 +415,10 @@ func TestGRPCTransportAppendEntries(t *testing.T) {
 		t.Fatalf("expected term 6, got %d", got.Term)
 	}
 
-	if got.LeaderID != "node-1" {
+	if got.LeaderID != clientID {
 		t.Fatalf(
-			"expected leader node-1, got %s",
+			"expected leader %s, got %s",
+			clientID,
 			got.LeaderID,
 		)
 	}
@@ -378,41 +463,41 @@ func TestGRPCTransportAppendEntries(t *testing.T) {
 		t.Fatalf("unexpected second entry: %+v", got.Entries[1])
 	}
 }
+
 func TestGRPCTransportInstallSnapshot(t *testing.T) {
+	const (
+		serverID = raft.NodeID("node-2")
+		clientID = raft.NodeID("node-1")
+	)
+
 	serverNode := &grpcTestNode{
 		installSnapshotReply: raft.InstallSnapshotReply{
 			Term:       11,
-			FollowerID: "node-2",
+			FollowerID: serverID,
 			Success:    true,
 		},
 	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	serverTLS, clientTLS := newGRPCTestTLSConfigs(
+		t,
+		serverID,
+		clientID,
+	)
 
-	server := grpc.NewServer()
-	raftiqv1.RegisterRaftServiceServer(server, serverNode)
-
-	go func() {
-		if err := server.Serve(listener); err != nil {
-			t.Errorf("gRPC test server failed: %v", err)
-		}
-	}()
-
-	defer func() {
-		server.GracefulStop()
-		_ = listener.Close()
-	}()
+	address, stopServer := startGRPCTestServer(
+		t,
+		serverNode,
+		serverTLS,
+	)
+	defer stopServer()
 
 	transport := NewGRPCTransport()
 
-	err = transport.AddPeer(
-		"node-2",
-		listener.Addr().String(),
-	)
-	if err != nil {
+	if err := transport.SetTLSConfig(clientTLS); err != nil {
+		t.Fatalf("set TLS config: %v", err)
+	}
+
+	if err := transport.AddPeer(serverID, address); err != nil {
 		t.Fatalf("add peer: %v", err)
 	}
 
@@ -432,10 +517,10 @@ func TestGRPCTransportInstallSnapshot(t *testing.T) {
 
 	reply, err := transport.InstallSnapshot(
 		ctx,
-		"node-2",
+		serverID,
 		raft.InstallSnapshotArgs{
 			Term:              10,
-			LeaderID:          "node-1",
+			LeaderID:          clientID,
 			LastIncludedIndex: 42,
 			LastIncludedTerm:  9,
 			Data:              snapshot,
@@ -449,9 +534,10 @@ func TestGRPCTransportInstallSnapshot(t *testing.T) {
 		t.Fatalf("expected term 11, got %d", reply.Term)
 	}
 
-	if reply.FollowerID != "node-2" {
+	if reply.FollowerID != serverID {
 		t.Fatalf(
-			"expected follower node-2, got %s",
+			"expected follower %s, got %s",
+			serverID,
 			reply.FollowerID,
 		)
 	}
@@ -466,9 +552,10 @@ func TestGRPCTransportInstallSnapshot(t *testing.T) {
 		t.Fatalf("expected term 10, got %d", got.Term)
 	}
 
-	if got.LeaderID != "node-1" {
+	if got.LeaderID != clientID {
 		t.Fatalf(
-			"expected leader node-1, got %s",
+			"expected leader %s, got %s",
+			clientID,
 			got.LeaderID,
 		)
 	}
