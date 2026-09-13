@@ -506,7 +506,7 @@ func (m *Metrics) SetRole(role raft.Role) {
 		}
 
 		m.Role.
-			WithLabelValues(m.nodeID, string(candidate)).
+			WithLabelValues(m.nodeID, roleLabel(candidate)).
 			Set(value)
 	}
 }

@@ -158,6 +158,8 @@ func (n *RaftNode) becomeFollower(term Term) error {
 		return fmt.Errorf("persist follower transition: %w", err)
 	}
 
+	n.updateStateMetricsLocked()
+
 	return nil
 }
 
@@ -169,6 +171,7 @@ func (n *RaftNode) becomeLeaderLocked() {
 
 	n.finishElectionLocked("won")
 	n.metrics.IncLeaderChanges()
+	n.updateStateMetricsLocked()
 
 	nextIndex := n.log.LastIndex() + 1
 
@@ -359,6 +362,7 @@ func (n *RaftNode) RequestVote(args RequestVoteArgs) (reply RequestVoteReply) {
 
 			return reply
 		}
+		n.updateStateMetricsLocked()
 	}
 
 	reply.Term = n.state.Persistent.CurrentTerm
@@ -558,6 +562,8 @@ func (n *RaftNode) startElection() (Term, error) {
 		return 0, err
 	}
 
+	n.updateStateMetricsLocked()
+
 	term := n.state.Persistent.CurrentTerm
 	peerCount := len(n.peerIDs)
 
@@ -656,7 +662,7 @@ func (n *RaftNode) handleVoteReply(
 
 			return
 		}
-
+		n.updateStateMetricsLocked()
 		n.mu.Unlock()
 
 		logger.Info(
@@ -964,6 +970,9 @@ func (n *RaftNode) AppendEntries(
 	n.state.Role = Follower
 	n.state.LeaderID = args.LeaderID
 	n.electionElapsed = 0
+
+	// Synchronize runtime Raft state with observability.
+	n.updateStateMetricsLocked()
 
 	firstNew := -1
 	replaceFrom := model.LogIndex(0)
