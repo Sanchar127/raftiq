@@ -704,12 +704,104 @@ func (n *RaftNode) handleVoteReply(
 }
 
 func (n *RaftNode) runElection() {
+	if !n.runPreVote() {
+		return
+	}
+
 	if _, err := n.startElection(); err != nil {
 		return
 	}
 
 	n.requestVotes()
 	n.tryBecomeLeader()
+}
+func (n *RaftNode) runPreVote() bool {
+	n.mu.RLock()
+
+	term := n.state.Persistent.CurrentTerm + 1
+	lastLogIndex := n.log.LastIndex()
+	lastLogTerm := n.log.LastTerm()
+	candidateID := n.id
+	transport := n.transport
+	peerIDs := append([]NodeID(nil), n.peerIDs...)
+
+	n.mu.RUnlock()
+
+	// A single-node cluster already has a majority.
+	votes := 1
+	requiredVotes := majority(len(peerIDs) + 1)
+
+	if votes >= requiredVotes {
+		return true
+	}
+
+	if transport == nil {
+		n.getLogger().Debug(
+			"raft prevote skipped",
+			"term", term,
+			"reason", "transport_unavailable",
+		)
+
+		return false
+	}
+
+	args := PreVoteArgs{
+		Term:         term,
+		CandidateID:  candidateID,
+		LastLogIndex: lastLogIndex,
+		LastLogTerm:  lastLogTerm,
+	}
+
+	for _, peerID := range peerIDs {
+		ctx, cancel := n.rpcContext()
+
+		reply, err := transport.PreVote(
+			ctx,
+			peerID,
+			args,
+		)
+
+		cancel()
+
+		if err != nil {
+			n.getLogger().Debug(
+				"prevote request failed",
+				"peer_id", peerID,
+				"term", term,
+				"error", err,
+			)
+
+			continue
+		}
+
+		// PreVote must not mutate our term. A higher reply term is
+		// therefore deliberately not applied here.
+		if !reply.VoteGranted {
+			continue
+		}
+
+		votes++
+
+		if votes >= requiredVotes {
+			n.getLogger().Debug(
+				"raft prevote won",
+				"term", term,
+				"votes", votes,
+				"required_votes", requiredVotes,
+			)
+
+			return true
+		}
+	}
+
+	n.getLogger().Debug(
+		"raft prevote lost",
+		"term", term,
+		"votes", votes,
+		"required_votes", requiredVotes,
+	)
+
+	return false
 }
 
 func (n *RaftNode) Tick() bool {
