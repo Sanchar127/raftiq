@@ -2911,3 +2911,54 @@ func TestReadIndexNoQuorum(t *testing.T) {
 		t.Fatal("expected ReadIndex to fail without quorum")
 	}
 }
+func TestReadIndexHigherTermReply(t *testing.T) {
+	leader := NewRaftNode("A")
+	followerB := NewRaftNode("B")
+	followerC := NewRaftNode("C")
+
+	leader.SetPeers([]Peer{followerB, followerC})
+
+	if err := leader.Log().Append(LogEntry{
+		Index: 1,
+		Term:  1,
+		Data:  []byte("committed"),
+	}); err != nil {
+		t.Fatalf("append leader log entry: %v", err)
+	}
+
+	leader.mu.Lock()
+	leader.state.Persistent.CurrentTerm = 1
+	leader.mu.Unlock()
+
+	leader.becomeLeader()
+
+	leader.mu.Lock()
+	leader.state.Volatile.CommitIndex = 1
+	leader.mu.Unlock()
+
+	// Force one follower to have a higher term.
+	followerB.mu.Lock()
+	followerB.state.Persistent.CurrentTerm = 2
+	followerB.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err := leader.ReadIndex(ctx)
+	if err == nil {
+		t.Fatal("expected ReadIndex to fail after higher-term reply")
+	}
+
+	state := leader.State()
+
+	if state.Role != Follower {
+		t.Fatalf("expected leader to step down to Follower, got %v", state.Role)
+	}
+
+	if state.Persistent.CurrentTerm != 2 {
+		t.Fatalf(
+			"expected term 2 after higher-term reply, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+}
