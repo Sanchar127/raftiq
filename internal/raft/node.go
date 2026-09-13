@@ -512,6 +512,8 @@ type Peer interface {
 
 	RequestVote(args RequestVoteArgs) RequestVoteReply
 
+	PreVote(args PreVoteArgs) PreVoteReply
+
 	AppendEntries(args AppendEntriesArgs) AppendEntriesReply
 
 	InstallSnapshot(args InstallSnapshotArgs) InstallSnapshotReply
@@ -2306,4 +2308,28 @@ func (n *RaftNode) SetLogger(logger *slog.Logger) {
 	n.mu.Lock()
 	n.logger = logger
 	n.mu.Unlock()
+}
+
+func (n *RaftNode) PreVote(args PreVoteArgs) PreVoteReply {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	reply := PreVoteReply{
+		Term:        n.state.Persistent.CurrentTerm,
+		VoterID:     n.id,
+		VoteGranted: false,
+	}
+
+	// A PreVote does not modify persistent term/vote state.
+	if args.Term < n.state.Persistent.CurrentTerm {
+		return reply
+	}
+
+	if !n.isCandidateLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
+		return reply
+	}
+
+	reply.VoteGranted = true
+
+	return reply
 }

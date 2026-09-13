@@ -28,6 +28,19 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+type PreVoteArgs struct {
+	Term         Term
+	CandidateID  NodeID
+	LastLogIndex LogIndex
+	LastLogTerm  Term
+}
+
+type PreVoteReply struct {
+	Term        Term
+	VoterID     NodeID
+	VoteGranted bool
+}
+
 type AppendEntriesArgs struct {
 	Term         Term
 	LeaderID     NodeID

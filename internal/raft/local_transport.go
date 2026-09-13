@@ -300,3 +300,35 @@ func contextError(ctx context.Context) error {
 		return nil
 	}
 }
+
+func (t *LocalTransport) PreVote(
+	ctx context.Context,
+	target NodeID,
+	args PreVoteArgs,
+) (PreVoteReply, error) {
+	if err := contextError(ctx); err != nil {
+		return PreVoteReply{}, err
+	}
+
+	if err := t.checkBlocked(args.CandidateID, target); err != nil {
+		return PreVoteReply{}, err
+	}
+
+	peer, err := t.peer(target)
+	if err != nil {
+		return PreVoteReply{}, err
+	}
+
+	replyCh := make(chan PreVoteReply, 1)
+
+	go func() {
+		replyCh <- peer.PreVote(args)
+	}()
+
+	select {
+	case reply := <-replyCh:
+		return reply, nil
+	case <-ctx.Done():
+		return PreVoteReply{}, ctx.Err()
+	}
+}

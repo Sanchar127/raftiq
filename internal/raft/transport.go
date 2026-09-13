@@ -9,6 +9,12 @@ type Transport interface {
 		args RequestVoteArgs,
 	) (RequestVoteReply, error)
 
+	PreVote(
+		ctx context.Context,
+		target NodeID,
+		args PreVoteArgs,
+	) (PreVoteReply, error)
+
 	AppendEntries(
 		ctx context.Context,
 		target NodeID,

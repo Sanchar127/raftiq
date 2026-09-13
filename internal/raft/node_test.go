@@ -2434,6 +2434,16 @@ func (t *blockingTransport) RequestVote(
 	return RequestVoteReply{}, ctx.Err()
 }
 
+func (t *blockingTransport) PreVote(
+	ctx context.Context,
+	_ NodeID,
+	_ PreVoteArgs,
+) (PreVoteReply, error) {
+	<-ctx.Done()
+
+	return PreVoteReply{}, ctx.Err()
+}
+
 func (t *blockingTransport) AppendEntries(
 	ctx context.Context,
 	_ NodeID,
@@ -2460,4 +2470,114 @@ func (t *blockingTransport) InstallSnapshot(
 	<-ctx.Done()
 
 	return InstallSnapshotReply{}, ctx.Err()
+}
+
+func TestPreVoteGrantsVoteForUpToDateCandidate(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	reply := node.PreVote(PreVoteArgs{
+		Term:         1,
+		CandidateID:  "node-2",
+		LastLogIndex: 0,
+		LastLogTerm:  0,
+	})
+
+	if !reply.VoteGranted {
+		t.Fatal("expected pre-vote to be granted")
+	}
+
+	if reply.Term != 0 {
+		t.Fatalf("expected current term 0, got %d", reply.Term)
+	}
+
+	if reply.VoterID != "node-1" {
+		t.Fatalf("expected voter ID node-1, got %q", reply.VoterID)
+	}
+}
+
+func TestPreVoteRejectsOlderTerm(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
+
+	reply := node.PreVote(PreVoteArgs{
+		Term:        0,
+		CandidateID: "node-2",
+	})
+
+	if reply.VoteGranted {
+		t.Fatal("expected older-term pre-vote to be rejected")
+	}
+
+	if reply.Term != 1 {
+		t.Fatalf("expected current term 1, got %d", reply.Term)
+	}
+}
+
+func TestPreVoteDoesNotChangeTermOrVote(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	before := node.State()
+
+	reply := node.PreVote(PreVoteArgs{
+		Term:         5,
+		CandidateID:  "node-2",
+		LastLogIndex: 0,
+		LastLogTerm:  0,
+	})
+
+	if !reply.VoteGranted {
+		t.Fatal("expected pre-vote to be granted")
+	}
+
+	after := node.State()
+
+	if after.Persistent.CurrentTerm != before.Persistent.CurrentTerm {
+		t.Fatalf(
+			"pre-vote changed term: before=%d after=%d",
+			before.Persistent.CurrentTerm,
+			after.Persistent.CurrentTerm,
+		)
+	}
+
+	if after.Persistent.VotedFor != before.Persistent.VotedFor {
+		t.Fatalf(
+			"pre-vote changed VotedFor: before=%q after=%q",
+			before.Persistent.VotedFor,
+			after.Persistent.VotedFor,
+		)
+	}
+
+	if after.Role != before.Role {
+		t.Fatalf(
+			"pre-vote changed role: before=%v after=%v",
+			before.Role,
+			after.Role,
+		)
+	}
+}
+
+func TestPreVoteRejectsStaleCandidateLog(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	if err := node.log.Append(LogEntry{
+		Index: 1,
+		Term:  1,
+	}); err != nil {
+		t.Fatalf("append log entry: %v", err)
+	}
+
+	reply := node.PreVote(PreVoteArgs{
+		Term:         2,
+		CandidateID:  "node-2",
+		LastLogIndex: 0,
+		LastLogTerm:  0,
+	})
+
+	if reply.VoteGranted {
+		t.Fatal("expected stale candidate log to be rejected")
+	}
 }
