@@ -597,3 +597,226 @@ func (c *networkPartitionCluster) assertSingleLeaderPerTerm(
 		leadersByTerm[state.Persistent.CurrentTerm] = node.ID()
 	}
 }
+
+func TestAsymmetricNetworkPartition(t *testing.T) {
+	cluster := newNetworkPartitionCluster(t)
+	cluster.start()
+
+	t.Cleanup(cluster.stop)
+
+	initialLeader := cluster.waitForLeader(networkPartitionWaitTimeout)
+	if initialLeader == nil {
+		t.Fatal("cluster failed to elect an initial leader")
+	}
+
+	leaderID := initialLeader.ID()
+	initialTerm := initialLeader.State().Persistent.CurrentTerm
+
+	var asymmetricFollower *raft.RaftNode
+	var healthyFollower *raft.RaftNode
+
+	for _, node := range cluster.nodes {
+		if node.ID() == leaderID {
+			continue
+		}
+
+		if asymmetricFollower == nil {
+			asymmetricFollower = node
+			continue
+		}
+
+		healthyFollower = node
+	}
+
+	if asymmetricFollower == nil || healthyFollower == nil {
+		t.Fatal("failed to identify follower nodes")
+	}
+
+	// Create a genuinely asymmetric network condition:
+	//
+	//   leader -> asymmetricFollower : ALLOWED
+	//   asymmetricFollower -> leader : BLOCKED
+	//
+	// Communication between the leader and the healthy follower remains
+	// bidirectional, so the leader still has a majority.
+	cluster.transport.Block(
+		asymmetricFollower.ID(),
+		leaderID,
+	)
+
+	t.Cleanup(func() {
+		cluster.transport.Unblock(
+			asymmetricFollower.ID(),
+			leaderID,
+		)
+	})
+
+	if cluster.transport.IsBlocked(
+		leaderID,
+		asymmetricFollower.ID(),
+	) {
+		t.Fatal("leader -> asymmetric follower must remain available")
+	}
+
+	if !cluster.transport.IsBlocked(
+		asymmetricFollower.ID(),
+		leaderID,
+	) {
+		t.Fatal("asymmetric follower -> leader link was not blocked")
+	}
+
+	t.Logf(
+		"asymmetric partition created: %s -> %s allowed, %s -> %s blocked",
+		leaderID,
+		asymmetricFollower.ID(),
+		asymmetricFollower.ID(),
+		leaderID,
+	)
+
+	// The leader must remain able to communicate with the healthy follower
+	// and therefore retain its majority.
+	testData := []byte("asymmetric-partition-majority-progress")
+
+	index, err := initialLeader.Propose(testData)
+	if err != nil {
+		t.Fatalf(
+			"leader proposal failed during asymmetric partition: %v",
+			err,
+		)
+	}
+
+	cluster.waitForNodeLogEntry(
+		t,
+		healthyFollower,
+		networkPartitionWaitTimeout,
+		index,
+		testData,
+	)
+
+	leaderState := initialLeader.State()
+
+	if leaderState.Role != raft.Leader {
+		t.Fatalf(
+			"leader lost leadership despite retaining majority: node=%s role=%v term=%d",
+			leaderID,
+			leaderState.Role,
+			leaderState.Persistent.CurrentTerm,
+		)
+	}
+
+	if leaderState.Persistent.CurrentTerm != initialTerm {
+		t.Fatalf(
+			"leader term changed unexpectedly: node=%s initial_term=%d current_term=%d",
+			leaderID,
+			initialTerm,
+			leaderState.Persistent.CurrentTerm,
+		)
+	}
+
+	if leaderState.Volatile.CommitIndex < index {
+		t.Fatalf(
+			"majority entry was not committed: leader=%s commit_index=%d entry_index=%d",
+			leaderID,
+			leaderState.Volatile.CommitIndex,
+			index,
+		)
+	}
+
+	// A -> B remains available, so the asymmetric follower continues
+	// receiving heartbeats. It must therefore remain a follower instead of
+	// repeatedly becoming a candidate.
+	observationDeadline := time.Now().Add(750 * time.Millisecond)
+
+	for time.Now().Before(observationDeadline) {
+		state := asymmetricFollower.State()
+
+		if state.Role != raft.Follower {
+			t.Fatalf(
+				"asymmetric follower entered election loop: node=%s role=%v term=%d initial_term=%d",
+				asymmetricFollower.ID(),
+				state.Role,
+				state.Persistent.CurrentTerm,
+				initialTerm,
+			)
+		}
+
+		if state.Persistent.CurrentTerm != initialTerm {
+			t.Fatalf(
+				"asymmetric follower advanced term despite receiving leader heartbeats: node=%s initial_term=%d current_term=%d",
+				asymmetricFollower.ID(),
+				initialTerm,
+				state.Persistent.CurrentTerm,
+			)
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// There must never be another leader in the same term.
+	cluster.assertSingleLeaderPerTerm(t)
+
+	leaderState = initialLeader.State()
+
+	if leaderState.Role != raft.Leader ||
+		leaderState.Persistent.CurrentTerm != initialTerm {
+		t.Fatalf(
+			"asymmetric partition caused leadership instability: leader=%s role=%v term=%d expected_term=%d",
+			leaderID,
+			leaderState.Role,
+			leaderState.Persistent.CurrentTerm,
+			initialTerm,
+		)
+	}
+
+	t.Logf(
+		"asymmetric partition remained stable: leader=%s term=%d follower=%s healthy_follower=%s",
+		leaderID,
+		initialTerm,
+		asymmetricFollower.ID(),
+		healthyFollower.ID(),
+	)
+
+	// Heal the one-way partition and verify that communication remains healthy.
+	cluster.transport.Unblock(
+		asymmetricFollower.ID(),
+		leaderID,
+	)
+
+	if cluster.transport.IsBlocked(
+		asymmetricFollower.ID(),
+		leaderID,
+	) {
+		t.Fatal("asymmetric partition did not heal")
+	}
+
+	if cluster.transport.IsBlocked(
+		leaderID,
+		asymmetricFollower.ID(),
+	) {
+		t.Fatal("leader -> follower link unexpectedly became blocked")
+	}
+
+	// The cluster should remain stable after healing.
+	if !cluster.waitForFollower(
+		asymmetricFollower,
+		initialTerm,
+		networkPartitionWaitTimeout,
+	) {
+		state := asymmetricFollower.State()
+
+		t.Fatalf(
+			"asymmetric follower did not remain follower after healing: node=%s role=%v term=%d",
+			asymmetricFollower.ID(),
+			state.Role,
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	cluster.assertSingleLeaderPerTerm(t)
+
+	t.Logf(
+		"asymmetric network partition recovered successfully: leader=%s term=%d",
+		leaderID,
+		initialTerm,
+	)
+}
