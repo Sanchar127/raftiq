@@ -163,6 +163,7 @@ func (n *RaftNode) becomeFollower(term Term) error {
 func (n *RaftNode) becomeLeaderLocked() {
 	n.state.Role = Leader
 	n.state.LeaderID = n.id
+	n.electionElapsed = 0
 	n.heartbeatElapsed = 0
 
 	n.finishElectionLocked("won")
@@ -1656,14 +1657,9 @@ func (n *RaftNode) Stop() {
 	)
 }
 
-func (n *RaftNode) tick() (
-	electionDue,
-	heartbeatDue bool,
-) {
+func (n *RaftNode) tick() (electionDue, heartbeatDue bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-
-	n.electionElapsed++
 
 	if n.state.Role == Leader {
 		n.heartbeatElapsed++
@@ -1672,15 +1668,18 @@ func (n *RaftNode) tick() (
 			n.heartbeatElapsed = 0
 			heartbeatDue = true
 		}
+
+		return false, heartbeatDue
 	}
 
-	electionDue = n.electionElapsed >= n.electionTimeout
+	n.electionElapsed++
 
-	if electionDue {
+	if n.electionElapsed >= n.electionTimeout {
 		n.electionElapsed = 0
+		electionDue = true
 	}
 
-	return electionDue, heartbeatDue
+	return electionDue, false
 }
 
 func (n *RaftNode) WaitApplied(
