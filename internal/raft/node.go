@@ -2495,3 +2495,135 @@ func (n *RaftNode) PreVote(args PreVoteArgs) PreVoteReply {
 	reply.VoteGranted = true
 	return reply
 }
+func (n *RaftNode) ReadIndex(ctx context.Context) (model.LogIndex, error) {
+	n.mu.RLock()
+
+	if n.state.Role != Leader {
+		n.mu.RUnlock()
+		return 0, errors.New("raft: not leader")
+	}
+
+	term := n.state.Persistent.CurrentTerm
+	commitIndex := n.state.Volatile.CommitIndex
+	peers := append([]Peer(nil), n.peers...)
+
+	n.mu.RUnlock()
+
+	// A single-node cluster already has a quorum.
+	if len(peers) == 0 {
+		return commitIndex, nil
+	}
+
+	type result struct {
+		reply AppendEntriesReply
+	}
+
+	results := make(chan result, len(peers))
+
+	for _, peer := range peers {
+		peer := peer
+
+		go func() {
+			n.mu.RLock()
+
+			// The leader may have changed while this RPC was being prepared.
+			if n.state.Role != Leader ||
+				n.state.Persistent.CurrentTerm != term {
+				n.mu.RUnlock()
+				return
+			}
+
+			args := AppendEntriesArgs{
+				Term:         term,
+				LeaderID:     n.id,
+				LeaderCommit: commitIndex,
+			}
+
+			// Use the follower's current replication position to construct
+			// a valid empty AppendEntries heartbeat without changing it.
+			nextIndex, ok := n.state.Leader.NextIndex[peer.ID()]
+			if !ok {
+				n.mu.RUnlock()
+				return
+			}
+
+			if nextIndex > 1 {
+				prevIndex := nextIndex - 1
+
+				prevEntry, ok := n.log.Get(prevIndex)
+				if !ok {
+					n.mu.RUnlock()
+					return
+				}
+
+				args.PrevLogIndex = prevIndex
+				args.PrevLogTerm = prevEntry.Term
+			}
+
+			n.mu.RUnlock()
+
+			rpcCtx, cancel := n.rpcContext(ctx)
+			defer cancel()
+
+			reply := peer.AppendEntries(rpcCtx, args)
+
+			select {
+			case results <- result{reply: reply}:
+			case <-ctx.Done():
+			}
+		}()
+	}
+
+	majority := (len(peers)+1)/2 + 1
+	acks := 1 // the leader itself
+
+	pending := len(peers)
+
+	for pending > 0 {
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+
+		case r := <-results:
+			pending--
+
+			reply := r.reply
+
+			if reply.Term > term {
+				if err := n.handleHigherTerm(reply.Term); err != nil {
+					return 0, err
+				}
+
+				return 0, errors.New("raft: leadership lost during ReadIndex")
+			}
+
+			if reply.Term != term || !reply.Success {
+				continue
+			}
+
+			acks++
+
+			if acks >= majority {
+				n.mu.RLock()
+				stillLeader := n.state.Role == Leader &&
+					n.state.Persistent.CurrentTerm == term
+				safeIndex := n.state.Volatile.CommitIndex
+				n.mu.RUnlock()
+
+				if !stillLeader {
+					return 0, errors.New("raft: leadership lost during ReadIndex")
+				}
+
+				// Never return a commit index newer than the one whose
+				// quorum confirmation we established.
+				if safeIndex > commitIndex {
+					safeIndex = commitIndex
+				}
+
+				return safeIndex, nil
+			}
+		}
+	}
+
+	return 0, errors.New("raft: ReadIndex quorum unavailable")
+}
