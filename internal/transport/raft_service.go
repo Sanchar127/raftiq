@@ -13,6 +13,7 @@ import (
 
 const (
 	rpcMethodRequestVote     = "RequestVote"
+	rpcMethodPreVote         = "PreVote"
 	rpcMethodAppendEntries   = "AppendEntries"
 	rpcMethodInstallSnapshot = "InstallSnapshot"
 )
@@ -27,6 +28,7 @@ type RaftService struct {
 
 type raftRPC interface {
 	RequestVote(args raft.RequestVoteArgs) raft.RequestVoteReply
+	PreVote(args raft.PreVoteArgs) raft.PreVoteReply
 	AppendEntries(args raft.AppendEntriesArgs) raft.AppendEntriesReply
 	InstallSnapshot(args raft.InstallSnapshotArgs) raft.InstallSnapshotReply
 }
@@ -304,4 +306,65 @@ func discardRPCLogger() *slog.Logger {
 	return slog.New(
 		slog.NewTextHandler(io.Discard, nil),
 	)
+}
+
+func (s *RaftService) PreVote(
+	_ context.Context,
+	req *raftiqv1.PreVoteRequest,
+) (_ *raftiqv1.PreVoteResponse, err error) {
+	startedAt := time.Now()
+
+	defer func() {
+		s.observeRPC(
+			rpcMethodPreVote,
+			startedAt,
+			err,
+		)
+	}()
+
+	if req == nil {
+		err = errors.New("pre vote request is required")
+
+		s.logger.Warn(
+			"rejected PreVote RPC",
+			slog.String("component", "rpc"),
+			slog.String("rpc_method", rpcMethodPreVote),
+			slog.Any("error", err),
+		)
+
+		return nil, err
+	}
+
+	reply := s.node.PreVote(raft.PreVoteArgs{
+		Term:         raft.Term(req.GetTerm()),
+		CandidateID:  raft.NodeID(req.GetCandidateId()),
+		LastLogIndex: raft.LogIndex(req.GetLastLogIndex()),
+		LastLogTerm:  raft.Term(req.GetLastLogTerm()),
+	})
+
+	if !reply.VoteGranted {
+		s.logger.Debug(
+			"PreVote denied",
+			slog.String("component", "rpc"),
+			slog.String("rpc_method", rpcMethodPreVote),
+			slog.String("candidate_id", req.GetCandidateId()),
+			slog.Uint64("request_term", req.GetTerm()),
+			slog.Uint64("response_term", uint64(reply.Term)),
+		)
+	} else {
+		s.logger.Debug(
+			"PreVote granted",
+			slog.String("component", "rpc"),
+			slog.String("rpc_method", rpcMethodPreVote),
+			slog.String("candidate_id", req.GetCandidateId()),
+			slog.Uint64("request_term", req.GetTerm()),
+			slog.Uint64("response_term", uint64(reply.Term)),
+		)
+	}
+
+	return &raftiqv1.PreVoteResponse{
+		Term:        uint64(reply.Term),
+		VoterId:     string(reply.VoterID),
+		VoteGranted: reply.VoteGranted,
+	}, nil
 }
