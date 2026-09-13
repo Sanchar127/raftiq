@@ -270,13 +270,18 @@ func newTestGRPCKV(
 
 	cleanup := func() {
 		require.NoError(t, conn.Close())
+
 		grpcServer.Stop()
+
 		require.NoError(t, listener.Close())
 
 		select {
 		case err := <-serveErr:
-			require.ErrorIs(t, err, grpc.ErrServerStopped)
-		default:
+			if err != nil {
+				require.ErrorIs(t, err, grpc.ErrServerStopped)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for gRPC server to stop")
 		}
 	}
 

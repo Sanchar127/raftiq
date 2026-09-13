@@ -33,12 +33,16 @@ func TestDialAndKVOperations(t *testing.T) {
 
 	defer func() {
 		grpcServer.Stop()
+
 		require.NoError(t, listener.Close())
 
 		select {
 		case err := <-serveErr:
-			require.ErrorIs(t, err, grpc.ErrServerStopped)
-		default:
+			if err != nil {
+				require.ErrorIs(t, err, grpc.ErrServerStopped)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for gRPC server to stop")
 		}
 	}()
 
@@ -88,13 +92,25 @@ func TestDialCloseMakesClientUnavailable(t *testing.T) {
 
 	raftiqv1.RegisterKVServiceServer(grpcServer, store)
 
+	serveErr := make(chan error, 1)
+
 	go func() {
-		_ = grpcServer.Serve(listener)
+		serveErr <- grpcServer.Serve(listener)
 	}()
 
 	defer func() {
 		grpcServer.Stop()
-		_ = listener.Close()
+
+		require.NoError(t, listener.Close())
+
+		select {
+		case err := <-serveErr:
+			if err != nil {
+				require.ErrorIs(t, err, grpc.ErrServerStopped)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for gRPC server to stop")
+		}
 	}()
 
 	cl, err := Dial(
@@ -117,3 +133,4 @@ func TestDialCloseMakesClientUnavailable(t *testing.T) {
 	err = cl.Delete(context.Background(), "name")
 	require.ErrorIs(t, err, ErrClientClosed)
 }
+
