@@ -14,6 +14,7 @@ var (
 	ErrTLSCertificate     = errors.New("TLS certificate is required")
 	ErrTLSPrivateKey      = errors.New("TLS private key is required")
 	ErrTLSInvalidPeerName = errors.New("TLS peer server name is required")
+	ErrTLSInvalidPeerSAN  = errors.New("TLS peer SAN validation failed")
 )
 
 // TLSConfig contains the material and policy required for Raft peer mTLS.
@@ -113,15 +114,78 @@ func verifyPeerSAN(expectedSAN string) func(tls.ConnectionState) error {
 
 func LoadTLSServerConfig(
 	cfg TLSConfig,
-	expectedPeerSAN string,
+	allowedPeerSANs map[string]struct{},
 ) (*tls.Config, error) {
-	tlsConfig, err := LoadTLSConfig(cfg)
-	if err != nil {
-		return nil, err
+	if cfg.CAFile == "" {
+		return nil, ErrTLSCACertificate
 	}
 
-	tlsConfig.ServerName = ""
-	tlsConfig.VerifyConnection = verifyPeerSAN(expectedPeerSAN)
+	if cfg.CertFile == "" {
+		return nil, ErrTLSCertificate
+	}
 
-	return tlsConfig, nil
+	if cfg.KeyFile == "" {
+		return nil, ErrTLSPrivateKey
+	}
+
+	if len(allowedPeerSANs) == 0 {
+		return nil, ErrTLSInvalidPeerName
+	}
+
+	caPEM, err := os.ReadFile(cfg.CAFile)
+	if err != nil {
+		return nil, fmt.Errorf("read TLS CA certificate: %w", err)
+	}
+
+	caPool := x509.NewCertPool()
+
+	if !caPool.AppendCertsFromPEM(caPEM) {
+		return nil, errors.New("parse TLS CA certificate")
+	}
+
+	certificate, err := tls.LoadX509KeyPair(
+		cfg.CertFile,
+		cfg.KeyFile,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"load TLS certificate and key: %w",
+			err,
+		)
+	}
+
+	return &tls.Config{
+		MinVersion: tls.VersionTLS13,
+
+		Certificates: []tls.Certificate{
+			certificate,
+		},
+
+		RootCAs:   caPool,
+		ClientCAs: caPool,
+
+		ClientAuth: tls.RequireAndVerifyClientCert,
+
+		VerifyConnection: verifyPeerSANs(allowedPeerSANs),
+	}, nil
+}
+
+func verifyPeerSANs(
+	allowedSANs map[string]struct{},
+) func(tls.ConnectionState) error {
+	return func(state tls.ConnectionState) error {
+		if len(state.PeerCertificates) == 0 {
+			return ErrTLSInvalidPeerSAN
+		}
+
+		cert := state.PeerCertificates[0]
+
+		for _, san := range cert.DNSNames {
+			if _, ok := allowedSANs[san]; ok {
+				return nil
+			}
+		}
+
+		return ErrTLSInvalidPeerSAN
+	}
 }

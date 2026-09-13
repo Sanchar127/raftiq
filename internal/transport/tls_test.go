@@ -17,13 +17,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type testCertificateFiles struct {
+	caFile string
+
+	serverCertFile string
+	serverKeyFile  string
+
+	clientCertFile string
+	clientKeyFile  string
+}
+
 func writeTestCertificateFiles(
 	t *testing.T,
 	dir string,
-) (caFile, certFile, keyFile string) {
+	serverSAN string,
+	clientSAN string,
+) testCertificateFiles {
 	t.Helper()
 
 	now := time.Now()
+
+	// -------------------------------------------------------------------------
+	// Test CA
+	// -------------------------------------------------------------------------
 
 	caKey, err := ecdsa.GenerateKey(
 		elliptic.P256(),
@@ -58,20 +74,24 @@ func writeTestCertificateFiles(
 	caCert, err := x509.ParseCertificate(caDER)
 	require.NoError(t, err)
 
-	nodeKey, err := ecdsa.GenerateKey(
+	// -------------------------------------------------------------------------
+	// Server certificate
+	// -------------------------------------------------------------------------
+
+	serverKey, err := ecdsa.GenerateKey(
 		elliptic.P256(),
 		rand.Reader,
 	)
 	require.NoError(t, err)
 
-	nodeTemplate := &x509.Certificate{
+	serverTemplate := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
 		Subject: pkix.Name{
-			CommonName: "node-1",
+			CommonName: "RaftIQ Test Server",
 		},
 
 		DNSNames: []string{
-			"node-1.raftiq",
+			serverSAN,
 		},
 
 		NotBefore: now.Add(-time.Minute),
@@ -85,23 +105,77 @@ func writeTestCertificateFiles(
 		KeyUsage: x509.KeyUsageDigitalSignature,
 	}
 
-	nodeDER, err := x509.CreateCertificate(
+	serverDER, err := x509.CreateCertificate(
 		rand.Reader,
-		nodeTemplate,
+		serverTemplate,
 		caCert,
-		&nodeKey.PublicKey,
+		&serverKey.PublicKey,
 		caKey,
 	)
 	require.NoError(t, err)
 
-	caFile = filepath.Join(dir, "ca.crt")
-	certFile = filepath.Join(dir, "node.crt")
-	keyFile = filepath.Join(dir, "node.key")
+	// -------------------------------------------------------------------------
+	// Client certificate
+	// -------------------------------------------------------------------------
+
+	clientKey, err := ecdsa.GenerateKey(
+		elliptic.P256(),
+		rand.Reader,
+	)
+	require.NoError(t, err)
+
+	clientTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(3),
+		Subject: pkix.Name{
+			CommonName: "RaftIQ Test Client",
+		},
+
+		DNSNames: []string{
+			clientSAN,
+		},
+
+		NotBefore: now.Add(-time.Minute),
+		NotAfter:  now.Add(time.Hour),
+
+		ExtKeyUsage: []x509.ExtKeyUsage{
+			x509.ExtKeyUsageServerAuth,
+			x509.ExtKeyUsageClientAuth,
+		},
+
+		KeyUsage: x509.KeyUsageDigitalSignature,
+	}
+
+	clientDER, err := x509.CreateCertificate(
+		rand.Reader,
+		clientTemplate,
+		caCert,
+		&clientKey.PublicKey,
+		caKey,
+	)
+	require.NoError(t, err)
+
+	// -------------------------------------------------------------------------
+	// File paths
+	// -------------------------------------------------------------------------
+
+	files := testCertificateFiles{
+		caFile: filepath.Join(dir, "ca.crt"),
+
+		serverCertFile: filepath.Join(dir, "server.crt"),
+		serverKeyFile:  filepath.Join(dir, "server.key"),
+
+		clientCertFile: filepath.Join(dir, "client.crt"),
+		clientKeyFile:  filepath.Join(dir, "client.key"),
+	}
+
+	// -------------------------------------------------------------------------
+	// Write CA
+	// -------------------------------------------------------------------------
 
 	require.NoError(
 		t,
 		os.WriteFile(
-			caFile,
+			files.caFile,
 			pem.EncodeToMemory(&pem.Block{
 				Type:  "CERTIFICATE",
 				Bytes: caDER,
@@ -110,48 +184,85 @@ func writeTestCertificateFiles(
 		),
 	)
 
+	// -------------------------------------------------------------------------
+	// Write server certificate
+	// -------------------------------------------------------------------------
+
 	require.NoError(
 		t,
 		os.WriteFile(
-			certFile,
+			files.serverCertFile,
 			pem.EncodeToMemory(&pem.Block{
 				Type:  "CERTIFICATE",
-				Bytes: nodeDER,
+				Bytes: serverDER,
 			}),
 			0o600,
 		),
 	)
 
-	nodeKeyDER, err := x509.MarshalECPrivateKey(nodeKey)
+	serverKeyDER, err := x509.MarshalECPrivateKey(serverKey)
 	require.NoError(t, err)
 
 	require.NoError(
 		t,
 		os.WriteFile(
-			keyFile,
+			files.serverKeyFile,
 			pem.EncodeToMemory(&pem.Block{
 				Type:  "EC PRIVATE KEY",
-				Bytes: nodeKeyDER,
+				Bytes: serverKeyDER,
 			}),
 			0o600,
 		),
 	)
 
-	return caFile, certFile, keyFile
+	// -------------------------------------------------------------------------
+	// Write client certificate
+	// -------------------------------------------------------------------------
+
+	require.NoError(
+		t,
+		os.WriteFile(
+			files.clientCertFile,
+			pem.EncodeToMemory(&pem.Block{
+				Type:  "CERTIFICATE",
+				Bytes: clientDER,
+			}),
+			0o600,
+		),
+	)
+
+	clientKeyDER, err := x509.MarshalECPrivateKey(clientKey)
+	require.NoError(t, err)
+
+	require.NoError(
+		t,
+		os.WriteFile(
+			files.clientKeyFile,
+			pem.EncodeToMemory(&pem.Block{
+				Type:  "EC PRIVATE KEY",
+				Bytes: clientKeyDER,
+			}),
+			0o600,
+		),
+	)
+
+	return files
 }
 
 func TestLoadTLSConfig(t *testing.T) {
 	dir := t.TempDir()
 
-	caFile, certFile, keyFile := writeTestCertificateFiles(
+	files := writeTestCertificateFiles(
 		t,
 		dir,
+		"node-1.raftiq",
+		"node-1.raftiq",
 	)
 
 	cfg, err := LoadTLSConfig(TLSConfig{
-		CAFile:         caFile,
-		CertFile:       certFile,
-		KeyFile:        keyFile,
+		CAFile:         files.caFile,
+		CertFile:       files.clientCertFile,
+		KeyFile:        files.clientKeyFile,
 		PeerServerName: "node-1.raftiq",
 	})
 	require.NoError(t, err)
@@ -231,39 +342,41 @@ func TestLoadTLSConfigRequiresAllFields(t *testing.T) {
 		})
 	}
 }
+
 func TestTLSMutualHandshake(t *testing.T) {
 	dir := t.TempDir()
 
-	caFile, certFile, keyFile := writeTestCertificateFiles(t, dir)
+	files := writeTestCertificateFiles(
+		t,
+		dir,
+		"node-1.raftiq",
+		"node-1.raftiq",
+	)
 
-	serverTLS, err := LoadTLSConfig(TLSConfig{
-		CAFile:         caFile,
-		CertFile:       certFile,
-		KeyFile:        keyFile,
-		PeerServerName: "node-1.raftiq",
-	})
+	serverTLS, err := LoadTLSServerConfig(
+		TLSConfig{
+			CAFile:   files.caFile,
+			CertFile: files.serverCertFile,
+			KeyFile:  files.serverKeyFile,
+		},
+		map[string]struct{}{
+			"node-1.raftiq": {},
+		},
+	)
 	require.NoError(t, err)
 
 	clientTLS, err := LoadTLSConfig(TLSConfig{
-		CAFile:         caFile,
-		CertFile:       certFile,
-		KeyFile:        keyFile,
+		CAFile:         files.caFile,
+		CertFile:       files.clientCertFile,
+		KeyFile:        files.clientKeyFile,
 		PeerServerName: "node-1.raftiq",
 	})
 	require.NoError(t, err)
-
-	serverTLS = serverTLS.Clone()
-	serverTLS.ServerName = ""
 
 	listener, err := tls.Listen(
 		"tcp",
 		"127.0.0.1:0",
-		&tls.Config{
-			Certificates: serverTLS.Certificates,
-			ClientCAs:    serverTLS.ClientCAs,
-			ClientAuth:   tls.RequireAndVerifyClientCert,
-			MinVersion:   tls.VersionTLS13,
-		},
+		serverTLS,
 	)
 	require.NoError(t, err)
 	defer listener.Close()
@@ -278,10 +391,7 @@ func TestTLSMutualHandshake(t *testing.T) {
 		}
 		defer conn.Close()
 
-		tlsConn, ok := conn.(*tls.Conn)
-		require.True(t, ok)
-
-		serverErr <- tlsConn.Handshake()
+		serverErr <- conn.(*tls.Conn).Handshake()
 	}()
 
 	clientConn, err := tls.Dial(
@@ -300,48 +410,56 @@ func TestTLSMutualHandshake(t *testing.T) {
 	require.NoError(t, clientConn.Handshake())
 	require.NoError(t, <-serverErr)
 }
+
 func TestTLSRejectsWrongServerSAN(t *testing.T) {
 	dir := t.TempDir()
 
-	caFile, certFile, keyFile := writeTestCertificateFiles(t, dir)
+	files := writeTestCertificateFiles(
+		t,
+		dir,
+		"node-1.raftiq",
+		"node-1.raftiq",
+	)
 
 	clientTLS, err := LoadTLSConfig(TLSConfig{
-		CAFile:         caFile,
-		CertFile:       certFile,
-		KeyFile:        keyFile,
+		CAFile:         files.caFile,
+		CertFile:       files.clientCertFile,
+		KeyFile:        files.clientKeyFile,
 		PeerServerName: "wrong-node.raftiq",
 	})
 	require.NoError(t, err)
 
-	serverTLS, err := LoadTLSConfig(TLSConfig{
-		CAFile:         caFile,
-		CertFile:       certFile,
-		KeyFile:        keyFile,
-		PeerServerName: "node-1.raftiq",
-	})
+	serverTLS, err := LoadTLSServerConfig(
+		TLSConfig{
+			CAFile:   files.caFile,
+			CertFile: files.serverCertFile,
+			KeyFile:  files.serverKeyFile,
+		},
+		map[string]struct{}{
+			"node-1.raftiq": {},
+		},
+	)
 	require.NoError(t, err)
 
 	listener, err := tls.Listen(
 		"tcp",
 		"127.0.0.1:0",
-		&tls.Config{
-			Certificates: serverTLS.Certificates,
-			ClientCAs:    serverTLS.ClientCAs,
-			ClientAuth:   tls.RequireAndVerifyClientCert,
-			MinVersion:   tls.VersionTLS13,
-		},
+		serverTLS,
 	)
 	require.NoError(t, err)
 	defer listener.Close()
 
+	serverErr := make(chan error, 1)
+
 	go func() {
 		conn, err := listener.Accept()
 		if err != nil {
+			serverErr <- err
 			return
 		}
 		defer conn.Close()
 
-		_ = conn.(*tls.Conn).Handshake()
+		serverErr <- conn.(*tls.Conn).Handshake()
 	}()
 
 	_, err = tls.Dial(
@@ -357,4 +475,148 @@ func TestTLSRejectsWrongServerSAN(t *testing.T) {
 
 	require.Error(t, err)
 	require.ErrorContains(t, err, "certificate")
+
+	require.Error(t, <-serverErr)
+}
+
+func TestTLSRejectsWrongClientSAN(t *testing.T) {
+	dir := t.TempDir()
+
+	files := writeTestCertificateFiles(
+		t,
+		dir,
+		"node-1.raftiq",
+		"wrong-client.raftiq",
+	)
+
+	serverTLS, err := LoadTLSServerConfig(
+		TLSConfig{
+			CAFile:   files.caFile,
+			CertFile: files.serverCertFile,
+			KeyFile:  files.serverKeyFile,
+		},
+		map[string]struct{}{
+			"node-1.raftiq": {},
+		},
+	)
+	require.NoError(t, err)
+
+	listener, err := tls.Listen(
+		"tcp",
+		"127.0.0.1:0",
+		serverTLS,
+	)
+	require.NoError(t, err)
+	defer listener.Close()
+
+	serverErr := make(chan error, 1)
+
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+
+		serverErr <- conn.(*tls.Conn).Handshake()
+	}()
+
+	clientTLS, err := LoadTLSConfig(TLSConfig{
+		CAFile:         files.caFile,
+		CertFile:       files.clientCertFile,
+		KeyFile:        files.clientKeyFile,
+		PeerServerName: "node-1.raftiq",
+	})
+	require.NoError(t, err)
+
+	clientConn, err := tls.Dial(
+		"tcp",
+		listener.Addr().String(),
+		&tls.Config{
+			Certificates: clientTLS.Certificates,
+			RootCAs:      clientTLS.RootCAs,
+			ServerName:   "node-1.raftiq",
+			MinVersion:   tls.VersionTLS13,
+		},
+	)
+
+	if err == nil {
+		defer clientConn.Close()
+	}
+
+	require.NoError(t, err)
+
+	err = <-serverErr
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrTLSInvalidPeerSAN)
+}
+
+func TestTLSAcceptsCorrectClientSAN(t *testing.T) {
+	dir := t.TempDir()
+
+	files := writeTestCertificateFiles(
+		t,
+		dir,
+		"node-1.raftiq",
+		"node-1.raftiq",
+	)
+
+	serverTLS, err := LoadTLSServerConfig(
+		TLSConfig{
+			CAFile:   files.caFile,
+			CertFile: files.serverCertFile,
+			KeyFile:  files.serverKeyFile,
+		},
+		map[string]struct{}{
+			"node-1.raftiq": {},
+		},
+	)
+	require.NoError(t, err)
+
+	listener, err := tls.Listen(
+		"tcp",
+		"127.0.0.1:0",
+		serverTLS,
+	)
+	require.NoError(t, err)
+	defer listener.Close()
+
+	serverErr := make(chan error, 1)
+
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+
+		serverErr <- conn.(*tls.Conn).Handshake()
+	}()
+
+	clientTLS, err := LoadTLSConfig(TLSConfig{
+		CAFile:         files.caFile,
+		CertFile:       files.clientCertFile,
+		KeyFile:        files.clientKeyFile,
+		PeerServerName: "node-1.raftiq",
+	})
+	require.NoError(t, err)
+
+	clientConn, err := tls.Dial(
+		"tcp",
+		listener.Addr().String(),
+		&tls.Config{
+			Certificates: clientTLS.Certificates,
+			RootCAs:      clientTLS.RootCAs,
+			ServerName:   "node-1.raftiq",
+			MinVersion:   tls.VersionTLS13,
+		},
+	)
+	require.NoError(t, err)
+	defer clientConn.Close()
+
+	require.NoError(t, clientConn.Handshake())
+	require.NoError(t, <-serverErr)
 }
