@@ -2634,3 +2634,42 @@ func TestPreVoteRejectsWhenRecentLeaderExists(t *testing.T) {
 		t.Fatalf("expected PreVote not to reset election timer, got %d", elapsed)
 	}
 }
+func TestPreVoteGrantsAfterElectionTimeout(t *testing.T) {
+	node := NewRaftNode("node-2")
+	node.SetElectionTimeout(10)
+
+	appendReply := node.AppendEntries(AppendEntriesArgs{
+		Term:     1,
+		LeaderID: "node-1",
+	})
+
+	if !appendReply.Success {
+		t.Fatal("expected AppendEntries to succeed")
+	}
+
+	// Simulate the election timer expiring without another heartbeat.
+	node.mu.Lock()
+	node.electionElapsed = node.electionTimeout
+	node.mu.Unlock()
+
+	preVoteReply := node.PreVote(PreVoteArgs{
+		Term:         2,
+		CandidateID:  "node-3",
+		LastLogIndex: 0,
+		LastLogTerm:  0,
+	})
+
+	if !preVoteReply.VoteGranted {
+		t.Fatal("expected PreVote to be granted after election timeout")
+	}
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 1 {
+		t.Fatalf("expected term to remain 1, got %d", state.Persistent.CurrentTerm)
+	}
+
+	if state.LeaderID != "node-1" {
+		t.Fatalf("expected leader ID to remain node-1, got %q", state.LeaderID)
+	}
+}
