@@ -1308,7 +1308,7 @@ func (n *RaftNode) handleAppendEntriesReply(
 
 			return
 		}
-
+		n.updateStateMetricsLocked()
 		n.mu.Unlock()
 
 		n.getLogger().Info(
@@ -2072,6 +2072,7 @@ func (n *RaftNode) InstallSnapshot(
 	n.state.Role = Follower
 	n.state.LeaderID = args.LeaderID
 	n.electionElapsed = 0
+	n.updateStateMetricsLocked()
 
 	reply.Term = n.state.Persistent.CurrentTerm
 
