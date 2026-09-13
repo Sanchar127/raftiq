@@ -209,6 +209,134 @@ func (x *RequestVoteResponse) GetVoteGranted() bool {
 	return false
 }
 
+type PreVoteRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	CandidateId   string                 `protobuf:"bytes,2,opt,name=candidate_id,json=candidateId,proto3" json:"candidate_id,omitempty"`
+	LastLogIndex  uint64                 `protobuf:"varint,3,opt,name=last_log_index,json=lastLogIndex,proto3" json:"last_log_index,omitempty"`
+	LastLogTerm   uint64                 `protobuf:"varint,4,opt,name=last_log_term,json=lastLogTerm,proto3" json:"last_log_term,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PreVoteRequest) Reset() {
+	*x = PreVoteRequest{}
+	mi := &file_api_proto_raftiq_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PreVoteRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PreVoteRequest) ProtoMessage() {}
+
+func (x *PreVoteRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_raftiq_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PreVoteRequest.ProtoReflect.Descriptor instead.
+func (*PreVoteRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *PreVoteRequest) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *PreVoteRequest) GetCandidateId() string {
+	if x != nil {
+		return x.CandidateId
+	}
+	return ""
+}
+
+func (x *PreVoteRequest) GetLastLogIndex() uint64 {
+	if x != nil {
+		return x.LastLogIndex
+	}
+	return 0
+}
+
+func (x *PreVoteRequest) GetLastLogTerm() uint64 {
+	if x != nil {
+		return x.LastLogTerm
+	}
+	return 0
+}
+
+type PreVoteResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	VoterId       string                 `protobuf:"bytes,2,opt,name=voter_id,json=voterId,proto3" json:"voter_id,omitempty"`
+	VoteGranted   bool                   `protobuf:"varint,3,opt,name=vote_granted,json=voteGranted,proto3" json:"vote_granted,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PreVoteResponse) Reset() {
+	*x = PreVoteResponse{}
+	mi := &file_api_proto_raftiq_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PreVoteResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PreVoteResponse) ProtoMessage() {}
+
+func (x *PreVoteResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_raftiq_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PreVoteResponse.ProtoReflect.Descriptor instead.
+func (*PreVoteResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *PreVoteResponse) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *PreVoteResponse) GetVoterId() string {
+	if x != nil {
+		return x.VoterId
+	}
+	return ""
+}
+
+func (x *PreVoteResponse) GetVoteGranted() bool {
+	if x != nil {
+		return x.VoteGranted
+	}
+	return false
+}
+
 type AppendEntriesRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
@@ -223,7 +351,7 @@ type AppendEntriesRequest struct {
 
 func (x *AppendEntriesRequest) Reset() {
 	*x = AppendEntriesRequest{}
-	mi := &file_api_proto_raftiq_proto_msgTypes[3]
+	mi := &file_api_proto_raftiq_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -235,7 +363,7 @@ func (x *AppendEntriesRequest) String() string {
 func (*AppendEntriesRequest) ProtoMessage() {}
 
 func (x *AppendEntriesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_raftiq_proto_msgTypes[3]
+	mi := &file_api_proto_raftiq_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -248,7 +376,7 @@ func (x *AppendEntriesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppendEntriesRequest.ProtoReflect.Descriptor instead.
 func (*AppendEntriesRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{3}
+	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *AppendEntriesRequest) GetTerm() uint64 {
@@ -304,7 +432,7 @@ type AppendEntriesResponse struct {
 
 func (x *AppendEntriesResponse) Reset() {
 	*x = AppendEntriesResponse{}
-	mi := &file_api_proto_raftiq_proto_msgTypes[4]
+	mi := &file_api_proto_raftiq_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -316,7 +444,7 @@ func (x *AppendEntriesResponse) String() string {
 func (*AppendEntriesResponse) ProtoMessage() {}
 
 func (x *AppendEntriesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_raftiq_proto_msgTypes[4]
+	mi := &file_api_proto_raftiq_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -329,7 +457,7 @@ func (x *AppendEntriesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppendEntriesResponse.ProtoReflect.Descriptor instead.
 func (*AppendEntriesResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{4}
+	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *AppendEntriesResponse) GetTerm() uint64 {
@@ -366,7 +494,7 @@ type InstallSnapshotRequest struct {
 
 func (x *InstallSnapshotRequest) Reset() {
 	*x = InstallSnapshotRequest{}
-	mi := &file_api_proto_raftiq_proto_msgTypes[5]
+	mi := &file_api_proto_raftiq_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -378,7 +506,7 @@ func (x *InstallSnapshotRequest) String() string {
 func (*InstallSnapshotRequest) ProtoMessage() {}
 
 func (x *InstallSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_raftiq_proto_msgTypes[5]
+	mi := &file_api_proto_raftiq_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -391,7 +519,7 @@ func (x *InstallSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InstallSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*InstallSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{5}
+	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *InstallSnapshotRequest) GetTerm() uint64 {
@@ -440,7 +568,7 @@ type InstallSnapshotResponse struct {
 
 func (x *InstallSnapshotResponse) Reset() {
 	*x = InstallSnapshotResponse{}
-	mi := &file_api_proto_raftiq_proto_msgTypes[6]
+	mi := &file_api_proto_raftiq_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -452,7 +580,7 @@ func (x *InstallSnapshotResponse) String() string {
 func (*InstallSnapshotResponse) ProtoMessage() {}
 
 func (x *InstallSnapshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_raftiq_proto_msgTypes[6]
+	mi := &file_api_proto_raftiq_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -465,7 +593,7 @@ func (x *InstallSnapshotResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InstallSnapshotResponse.ProtoReflect.Descriptor instead.
 func (*InstallSnapshotResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{6}
+	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *InstallSnapshotResponse) GetTerm() uint64 {
@@ -498,7 +626,7 @@ type GetRequest struct {
 
 func (x *GetRequest) Reset() {
 	*x = GetRequest{}
-	mi := &file_api_proto_raftiq_proto_msgTypes[7]
+	mi := &file_api_proto_raftiq_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -510,7 +638,7 @@ func (x *GetRequest) String() string {
 func (*GetRequest) ProtoMessage() {}
 
 func (x *GetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_raftiq_proto_msgTypes[7]
+	mi := &file_api_proto_raftiq_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -523,7 +651,7 @@ func (x *GetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRequest.ProtoReflect.Descriptor instead.
 func (*GetRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{7}
+	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GetRequest) GetKey() string {
@@ -543,7 +671,7 @@ type GetResponse struct {
 
 func (x *GetResponse) Reset() {
 	*x = GetResponse{}
-	mi := &file_api_proto_raftiq_proto_msgTypes[8]
+	mi := &file_api_proto_raftiq_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -555,7 +683,7 @@ func (x *GetResponse) String() string {
 func (*GetResponse) ProtoMessage() {}
 
 func (x *GetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_raftiq_proto_msgTypes[8]
+	mi := &file_api_proto_raftiq_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -568,7 +696,7 @@ func (x *GetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetResponse.ProtoReflect.Descriptor instead.
 func (*GetResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{8}
+	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GetResponse) GetValue() []byte {
@@ -595,7 +723,7 @@ type PutRequest struct {
 
 func (x *PutRequest) Reset() {
 	*x = PutRequest{}
-	mi := &file_api_proto_raftiq_proto_msgTypes[9]
+	mi := &file_api_proto_raftiq_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -607,7 +735,7 @@ func (x *PutRequest) String() string {
 func (*PutRequest) ProtoMessage() {}
 
 func (x *PutRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_raftiq_proto_msgTypes[9]
+	mi := &file_api_proto_raftiq_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -620,7 +748,7 @@ func (x *PutRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PutRequest.ProtoReflect.Descriptor instead.
 func (*PutRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{9}
+	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *PutRequest) GetKey() string {
@@ -645,7 +773,7 @@ type PutResponse struct {
 
 func (x *PutResponse) Reset() {
 	*x = PutResponse{}
-	mi := &file_api_proto_raftiq_proto_msgTypes[10]
+	mi := &file_api_proto_raftiq_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -657,7 +785,7 @@ func (x *PutResponse) String() string {
 func (*PutResponse) ProtoMessage() {}
 
 func (x *PutResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_raftiq_proto_msgTypes[10]
+	mi := &file_api_proto_raftiq_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -670,7 +798,7 @@ func (x *PutResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PutResponse.ProtoReflect.Descriptor instead.
 func (*PutResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{10}
+	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{12}
 }
 
 type DeleteRequest struct {
@@ -682,7 +810,7 @@ type DeleteRequest struct {
 
 func (x *DeleteRequest) Reset() {
 	*x = DeleteRequest{}
-	mi := &file_api_proto_raftiq_proto_msgTypes[11]
+	mi := &file_api_proto_raftiq_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -694,7 +822,7 @@ func (x *DeleteRequest) String() string {
 func (*DeleteRequest) ProtoMessage() {}
 
 func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_raftiq_proto_msgTypes[11]
+	mi := &file_api_proto_raftiq_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -707,7 +835,7 @@ func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteRequest.ProtoReflect.Descriptor instead.
 func (*DeleteRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{11}
+	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *DeleteRequest) GetKey() string {
@@ -725,7 +853,7 @@ type DeleteResponse struct {
 
 func (x *DeleteResponse) Reset() {
 	*x = DeleteResponse{}
-	mi := &file_api_proto_raftiq_proto_msgTypes[12]
+	mi := &file_api_proto_raftiq_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -737,7 +865,7 @@ func (x *DeleteResponse) String() string {
 func (*DeleteResponse) ProtoMessage() {}
 
 func (x *DeleteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_raftiq_proto_msgTypes[12]
+	mi := &file_api_proto_raftiq_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -750,7 +878,7 @@ func (x *DeleteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteResponse.ProtoReflect.Descriptor instead.
 func (*DeleteResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{12}
+	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{14}
 }
 
 var File_api_proto_raftiq_proto protoreflect.FileDescriptor
@@ -768,6 +896,15 @@ const file_api_proto_raftiq_proto_rawDesc = "" +
 	"\x0elast_log_index\x18\x03 \x01(\x04R\flastLogIndex\x12\"\n" +
 	"\rlast_log_term\x18\x04 \x01(\x04R\vlastLogTerm\"g\n" +
 	"\x13RequestVoteResponse\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x19\n" +
+	"\bvoter_id\x18\x02 \x01(\tR\avoterId\x12!\n" +
+	"\fvote_granted\x18\x03 \x01(\bR\vvoteGranted\"\x91\x01\n" +
+	"\x0ePreVoteRequest\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x04R\x04term\x12!\n" +
+	"\fcandidate_id\x18\x02 \x01(\tR\vcandidateId\x12$\n" +
+	"\x0elast_log_index\x18\x03 \x01(\x04R\flastLogIndex\x12\"\n" +
+	"\rlast_log_term\x18\x04 \x01(\x04R\vlastLogTerm\"c\n" +
+	"\x0fPreVoteResponse\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x19\n" +
 	"\bvoter_id\x18\x02 \x01(\tR\avoterId\x12!\n" +
 	"\fvote_granted\x18\x03 \x01(\bR\vvoteGranted\"\xe5\x01\n" +
@@ -807,9 +944,10 @@ const file_api_proto_raftiq_proto_rawDesc = "" +
 	"\vPutResponse\"!\n" +
 	"\rDeleteRequest\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\"\x10\n" +
-	"\x0eDeleteResponse2\x89\x02\n" +
+	"\x0eDeleteResponse2\xcb\x02\n" +
 	"\vRaftService\x12L\n" +
-	"\vRequestVote\x12\x1d.raftiq.v1.RequestVoteRequest\x1a\x1e.raftiq.v1.RequestVoteResponse\x12R\n" +
+	"\vRequestVote\x12\x1d.raftiq.v1.RequestVoteRequest\x1a\x1e.raftiq.v1.RequestVoteResponse\x12@\n" +
+	"\aPreVote\x12\x19.raftiq.v1.PreVoteRequest\x1a\x1a.raftiq.v1.PreVoteResponse\x12R\n" +
 	"\rAppendEntries\x12\x1f.raftiq.v1.AppendEntriesRequest\x1a .raftiq.v1.AppendEntriesResponse\x12X\n" +
 	"\x0fInstallSnapshot\x12!.raftiq.v1.InstallSnapshotRequest\x1a\".raftiq.v1.InstallSnapshotResponse2\xb6\x01\n" +
 	"\tKVService\x124\n" +
@@ -829,38 +967,42 @@ func file_api_proto_raftiq_proto_rawDescGZIP() []byte {
 	return file_api_proto_raftiq_proto_rawDescData
 }
 
-var file_api_proto_raftiq_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_api_proto_raftiq_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_api_proto_raftiq_proto_goTypes = []any{
 	(*LogEntry)(nil),                // 0: raftiq.v1.LogEntry
 	(*RequestVoteRequest)(nil),      // 1: raftiq.v1.RequestVoteRequest
 	(*RequestVoteResponse)(nil),     // 2: raftiq.v1.RequestVoteResponse
-	(*AppendEntriesRequest)(nil),    // 3: raftiq.v1.AppendEntriesRequest
-	(*AppendEntriesResponse)(nil),   // 4: raftiq.v1.AppendEntriesResponse
-	(*InstallSnapshotRequest)(nil),  // 5: raftiq.v1.InstallSnapshotRequest
-	(*InstallSnapshotResponse)(nil), // 6: raftiq.v1.InstallSnapshotResponse
-	(*GetRequest)(nil),              // 7: raftiq.v1.GetRequest
-	(*GetResponse)(nil),             // 8: raftiq.v1.GetResponse
-	(*PutRequest)(nil),              // 9: raftiq.v1.PutRequest
-	(*PutResponse)(nil),             // 10: raftiq.v1.PutResponse
-	(*DeleteRequest)(nil),           // 11: raftiq.v1.DeleteRequest
-	(*DeleteResponse)(nil),          // 12: raftiq.v1.DeleteResponse
+	(*PreVoteRequest)(nil),          // 3: raftiq.v1.PreVoteRequest
+	(*PreVoteResponse)(nil),         // 4: raftiq.v1.PreVoteResponse
+	(*AppendEntriesRequest)(nil),    // 5: raftiq.v1.AppendEntriesRequest
+	(*AppendEntriesResponse)(nil),   // 6: raftiq.v1.AppendEntriesResponse
+	(*InstallSnapshotRequest)(nil),  // 7: raftiq.v1.InstallSnapshotRequest
+	(*InstallSnapshotResponse)(nil), // 8: raftiq.v1.InstallSnapshotResponse
+	(*GetRequest)(nil),              // 9: raftiq.v1.GetRequest
+	(*GetResponse)(nil),             // 10: raftiq.v1.GetResponse
+	(*PutRequest)(nil),              // 11: raftiq.v1.PutRequest
+	(*PutResponse)(nil),             // 12: raftiq.v1.PutResponse
+	(*DeleteRequest)(nil),           // 13: raftiq.v1.DeleteRequest
+	(*DeleteResponse)(nil),          // 14: raftiq.v1.DeleteResponse
 }
 var file_api_proto_raftiq_proto_depIdxs = []int32{
 	0,  // 0: raftiq.v1.AppendEntriesRequest.entries:type_name -> raftiq.v1.LogEntry
 	1,  // 1: raftiq.v1.RaftService.RequestVote:input_type -> raftiq.v1.RequestVoteRequest
-	3,  // 2: raftiq.v1.RaftService.AppendEntries:input_type -> raftiq.v1.AppendEntriesRequest
-	5,  // 3: raftiq.v1.RaftService.InstallSnapshot:input_type -> raftiq.v1.InstallSnapshotRequest
-	7,  // 4: raftiq.v1.KVService.Get:input_type -> raftiq.v1.GetRequest
-	9,  // 5: raftiq.v1.KVService.Put:input_type -> raftiq.v1.PutRequest
-	11, // 6: raftiq.v1.KVService.Delete:input_type -> raftiq.v1.DeleteRequest
-	2,  // 7: raftiq.v1.RaftService.RequestVote:output_type -> raftiq.v1.RequestVoteResponse
-	4,  // 8: raftiq.v1.RaftService.AppendEntries:output_type -> raftiq.v1.AppendEntriesResponse
-	6,  // 9: raftiq.v1.RaftService.InstallSnapshot:output_type -> raftiq.v1.InstallSnapshotResponse
-	8,  // 10: raftiq.v1.KVService.Get:output_type -> raftiq.v1.GetResponse
-	10, // 11: raftiq.v1.KVService.Put:output_type -> raftiq.v1.PutResponse
-	12, // 12: raftiq.v1.KVService.Delete:output_type -> raftiq.v1.DeleteResponse
-	7,  // [7:13] is the sub-list for method output_type
-	1,  // [1:7] is the sub-list for method input_type
+	3,  // 2: raftiq.v1.RaftService.PreVote:input_type -> raftiq.v1.PreVoteRequest
+	5,  // 3: raftiq.v1.RaftService.AppendEntries:input_type -> raftiq.v1.AppendEntriesRequest
+	7,  // 4: raftiq.v1.RaftService.InstallSnapshot:input_type -> raftiq.v1.InstallSnapshotRequest
+	9,  // 5: raftiq.v1.KVService.Get:input_type -> raftiq.v1.GetRequest
+	11, // 6: raftiq.v1.KVService.Put:input_type -> raftiq.v1.PutRequest
+	13, // 7: raftiq.v1.KVService.Delete:input_type -> raftiq.v1.DeleteRequest
+	2,  // 8: raftiq.v1.RaftService.RequestVote:output_type -> raftiq.v1.RequestVoteResponse
+	4,  // 9: raftiq.v1.RaftService.PreVote:output_type -> raftiq.v1.PreVoteResponse
+	6,  // 10: raftiq.v1.RaftService.AppendEntries:output_type -> raftiq.v1.AppendEntriesResponse
+	8,  // 11: raftiq.v1.RaftService.InstallSnapshot:output_type -> raftiq.v1.InstallSnapshotResponse
+	10, // 12: raftiq.v1.KVService.Get:output_type -> raftiq.v1.GetResponse
+	12, // 13: raftiq.v1.KVService.Put:output_type -> raftiq.v1.PutResponse
+	14, // 14: raftiq.v1.KVService.Delete:output_type -> raftiq.v1.DeleteResponse
+	8,  // [8:15] is the sub-list for method output_type
+	1,  // [1:8] is the sub-list for method input_type
 	1,  // [1:1] is the sub-list for extension type_name
 	1,  // [1:1] is the sub-list for extension extendee
 	0,  // [0:1] is the sub-list for field type_name
@@ -877,7 +1019,7 @@ func file_api_proto_raftiq_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_raftiq_proto_rawDesc), len(file_api_proto_raftiq_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   13,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

@@ -6,10 +6,10 @@ option go_package = "github.com/sanchar127/raftiq/api/proto;raftiqv1";
 
 service RaftService {
   rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+  rpc PreVote(PreVoteRequest) returns (PreVoteResponse);
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
   rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
 }
-
 service KVService {
   rpc Get(GetRequest) returns (GetResponse);
   rpc Put(PutRequest) returns (PutResponse);
@@ -30,6 +30,19 @@ message RequestVoteRequest {
 }
 
 message RequestVoteResponse {
+  uint64 term = 1;
+  string voter_id = 2;
+  bool vote_granted = 3;
+}
+
+message PreVoteRequest {
+  uint64 term = 1;
+  string candidate_id = 2;
+  uint64 last_log_index = 3;
+  uint64 last_log_term = 4;
+}
+
+message PreVoteResponse {
   uint64 term = 1;
   string voter_id = 2;
   bool vote_granted = 3;
