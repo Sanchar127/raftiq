@@ -152,6 +152,7 @@ func (n *RaftNode) becomeFollower(term Term) error {
 	n.state.Persistent.CurrentTerm = term
 	n.state.Persistent.VotedFor = ""
 	n.state.LeaderID = ""
+	n.electionElapsed = 0
 
 	if err := n.persistStateLocked(); err != nil {
 		return fmt.Errorf("persist follower transition: %w", err)
@@ -529,6 +530,11 @@ func (n *RaftNode) startElection() (Term, error) {
 	n.state.Persistent.VotedFor = n.id
 	n.state.LeaderID = ""
 
+	// The election timeout has now been consumed by the election
+	// attempt. A failed PreVote is handled separately and resets
+	// the timer before another attempt.
+	n.electionElapsed = 0
+
 	n.state.Election.VotesReceived = map[NodeID]struct{}{
 		n.id: {},
 	}
@@ -705,16 +711,44 @@ func (n *RaftNode) handleVoteReply(
 
 func (n *RaftNode) runElection() {
 	if !n.runPreVote() {
+		// The PreVote failed, so wait for another complete election
+		// timeout before retrying.
+		n.resetElectionTimer()
+		return
+	}
+
+	// A valid leader may have contacted us while the PreVote RPCs
+	// were in flight. Re-check the election state before incrementing
+	// the real Raft term.
+	n.mu.RLock()
+
+	role := n.state.Role
+	electionElapsed := n.electionElapsed
+	electionTimeout := n.electionTimeout
+	leaderID := n.state.LeaderID
+
+	n.mu.RUnlock()
+
+	if role == Leader {
+		return
+	}
+
+	if leaderID != "" && electionElapsed < electionTimeout {
+		// We heard from a valid leader while PreVote was running.
 		return
 	}
 
 	if _, err := n.startElection(); err != nil {
+		// If the election could not be persisted, don't immediately
+		// spin another election attempt.
+		n.resetElectionTimer()
 		return
 	}
 
 	n.requestVotes()
 	n.tryBecomeLeader()
 }
+
 func (n *RaftNode) runPreVote() bool {
 	n.mu.RLock()
 
@@ -774,8 +808,7 @@ func (n *RaftNode) runPreVote() bool {
 			continue
 		}
 
-		// PreVote must not mutate our term. A higher reply term is
-		// therefore deliberately not applied here.
+		// PreVote deliberately does not change our persistent term.
 		if !reply.VoteGranted {
 			continue
 		}
@@ -834,11 +867,7 @@ func (n *RaftNode) onElectionTimeout() {
 		"role", state.Role,
 	)
 
-	if _, err := n.startElection(); err != nil {
-		return
-	}
-
-	n.requestVotes()
+	n.runElection()
 }
 
 func (n *RaftNode) resetElectionTimer() {
@@ -1768,8 +1797,15 @@ func (n *RaftNode) tick() (electionDue, heartbeatDue bool) {
 
 	n.electionElapsed++
 
+	// Do not reset electionElapsed here.
+	//
+	// PreVote needs to be able to observe that the election timer
+	// actually expired. The timer is reset when:
+	//   - a valid AppendEntries is received,
+	//   - a vote is granted,
+	//   - an actual election starts, or
+	//   - a failed PreVote attempt is completed.
 	if n.electionElapsed >= n.electionTimeout {
-		n.electionElapsed = 0
 		electionDue = true
 	}
 
@@ -1785,12 +1821,12 @@ func (n *RaftNode) WaitApplied(
 
 	for {
 		n.mu.RLock()
-		applied := n.state.Volatile.LastApplied >= index
-		n.mu.RUnlock()
-
+		applied := n.state.Volatile.LastApplied >= n.state.Volatile.CommitIndex
 		if applied {
+			n.mu.RUnlock()
 			return nil
 		}
+		n.mu.RUnlock()
 
 		select {
 		case <-ctx.Done():
@@ -2424,13 +2460,25 @@ func (n *RaftNode) PreVote(args PreVoteArgs) PreVoteReply {
 
 	// If we recently heard from a valid leader, do not allow an
 	// isolated/stale candidate to start another election.
+	//
+	// electionElapsed is deliberately not reset by tick() when the
+	// timeout is reached. This allows the voter to distinguish:
+	//
+	//   electionElapsed < electionTimeout
+	//       -> leader contact is still recent
+	//
+	//   electionElapsed >= electionTimeout
+	//       -> leader contact has expired
 	if n.state.LeaderID != "" &&
 		n.electionElapsed < n.electionTimeout {
 		return reply
 	}
 
 	// Candidate's log must be at least as up-to-date as ours.
-	if !n.isCandidateLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
+	if !n.isCandidateLogUpToDate(
+		args.LastLogIndex,
+		args.LastLogTerm,
+	) {
 		return reply
 	}
 

@@ -585,8 +585,12 @@ func TestTickTriggersElectionTimeout(t *testing.T) {
 	elapsed := node.electionElapsed
 	node.mu.RUnlock()
 
-	if elapsed != 0 {
-		t.Fatalf("expected election elapsed to reset to 0, got %d", elapsed)
+	if elapsed < node.electionTimeout {
+		t.Fatalf(
+			"expected election elapsed to reach timeout %d, got %d",
+			node.electionTimeout,
+			elapsed,
+		)
 	}
 }
 
@@ -658,6 +662,13 @@ func TestElectionTimeoutStartsElection(t *testing.T) {
 	node := NewRaftNode("A")
 	node.SetElectionTimeout(3)
 
+	if err := node.SetTransport(
+		&grantingTransport{},
+		[]NodeID{"B", "C"},
+	); err != nil {
+		t.Fatalf("set transport: %v", err)
+	}
+
 	if node.Tick() {
 		t.Fatal("expected no timeout on first tick")
 	}
@@ -674,8 +685,8 @@ func TestElectionTimeoutStartsElection(t *testing.T) {
 
 	state := node.State()
 
-	if state.Role != Candidate {
-		t.Fatalf("expected Candidate, got %v", state.Role)
+	if state.Role != Leader {
+		t.Fatalf("expected Leader, got %v", state.Role)
 	}
 
 	if state.Persistent.CurrentTerm != 1 {
@@ -684,6 +695,10 @@ func TestElectionTimeoutStartsElection(t *testing.T) {
 
 	if state.Persistent.VotedFor != "A" {
 		t.Fatalf("expected self-vote for A, got %q", state.Persistent.VotedFor)
+	}
+
+	if state.LeaderID != "A" {
+		t.Fatalf("expected LeaderID A, got %q", state.LeaderID)
 	}
 }
 
@@ -781,6 +796,7 @@ func TestAppendEntriesRejectsOlderTerm(t *testing.T) {
 	node.state.Persistent.CurrentTerm = 5
 	node.state.Role = Follower
 	node.state.LeaderID = "A"
+	node.electionElapsed = 2
 	node.mu.Unlock()
 
 	reply := node.AppendEntries(AppendEntriesArgs{
@@ -2414,6 +2430,91 @@ func TestRaftNodeStopCancelsRPC(t *testing.T) {
 type blockingTransport struct {
 	requestVoteStarted   chan struct{}
 	appendEntriesStarted chan struct{}
+}
+type grantingTransport struct{}
+
+func (t *grantingTransport) RequestVote(
+	ctx context.Context,
+	target NodeID,
+	args RequestVoteArgs,
+) (RequestVoteReply, error) {
+	return RequestVoteReply{
+		Term:        args.Term,
+		VoterID:     target,
+		VoteGranted: true,
+	}, nil
+}
+
+func (t *grantingTransport) PreVote(
+	ctx context.Context,
+	target NodeID,
+	args PreVoteArgs,
+) (PreVoteReply, error) {
+	return PreVoteReply{
+		Term:        args.Term,
+		VoterID:     target,
+		VoteGranted: true,
+	}, nil
+}
+
+func (t *grantingTransport) AppendEntries(
+	ctx context.Context,
+	target NodeID,
+	args AppendEntriesArgs,
+) (AppendEntriesReply, error) {
+	return AppendEntriesReply{}, nil
+}
+
+func (t *grantingTransport) InstallSnapshot(
+	ctx context.Context,
+	target NodeID,
+	args InstallSnapshotArgs,
+) (InstallSnapshotReply, error) {
+	return InstallSnapshotReply{}, nil
+}
+
+type electionTransport struct {
+	peers []NodeID
+}
+
+func (t *electionTransport) RequestVote(
+	ctx context.Context,
+	target NodeID,
+	args RequestVoteArgs,
+) (RequestVoteReply, error) {
+	return RequestVoteReply{
+		Term:        args.Term,
+		VoterID:     target,
+		VoteGranted: true,
+	}, nil
+}
+
+func (t *electionTransport) PreVote(
+	ctx context.Context,
+	target NodeID,
+	args PreVoteArgs,
+) (PreVoteReply, error) {
+	return PreVoteReply{
+		Term:        args.Term - 1,
+		VoterID:     target,
+		VoteGranted: true,
+	}, nil
+}
+
+func (t *electionTransport) AppendEntries(
+	ctx context.Context,
+	target NodeID,
+	args AppendEntriesArgs,
+) (AppendEntriesReply, error) {
+	return AppendEntriesReply{}, nil
+}
+
+func (t *electionTransport) InstallSnapshot(
+	ctx context.Context,
+	target NodeID,
+	args InstallSnapshotArgs,
+) (InstallSnapshotReply, error) {
+	return InstallSnapshotReply{}, nil
 }
 
 func (t *blockingTransport) RequestVote(
