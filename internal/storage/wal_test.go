@@ -615,3 +615,87 @@ func TestWALStorageRejectsOperationsAfterClose(t *testing.T) {
 		t.Fatalf("LoadEntries() error = %v, want ErrClosedStorage", err)
 	}
 }
+func TestWALStorageRejectsCorruptedRecordOnRecovery(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("OpenWAL() error = %v", err)
+	}
+
+	entries := []model.LogEntry{
+		{
+			Index: 1,
+			Term:  1,
+			Data:  []byte("command-1"),
+		},
+		{
+			Index: 2,
+			Term:  1,
+			Data:  []byte("command-2"),
+		},
+		{
+			Index: 3,
+			Term:  1,
+			Data:  []byte("command-3"),
+		},
+	}
+
+	if err := storage.AppendEntries(entries); err != nil {
+		t.Fatalf("AppendEntries() error = %v", err)
+	}
+
+	if err := storage.Sync(); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+
+	if err := storage.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	// Reconstruct the exact encoded record that was written.
+	record, err := encodeEntriesRecord(entries)
+	if err != nil {
+		t.Fatalf("encodeEntriesRecord() error = %v", err)
+	}
+
+	walData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+
+	offset := bytes.Index(walData, record)
+	if offset < 0 {
+		t.Fatal("encoded entries record not found in WAL")
+	}
+
+	// Corrupt a byte inside the payload while leaving the record
+	// structurally complete. The stored CRC is now invalid.
+	payloadOffset := offset + recordHeaderSize
+
+	if payloadOffset >= offset+len(record)-recordFooterSize {
+		t.Fatal("calculated corruption offset is outside record payload")
+	}
+
+	walData[payloadOffset] ^= 0xff
+
+	if err := os.WriteFile(path, walData, 0o600); err != nil {
+		t.Fatalf("WriteFile() corrupted WAL error = %v", err)
+	}
+
+	_, err = OpenWAL(path)
+	if err == nil {
+		t.Fatal("OpenWAL() error = nil, want checksum corruption error")
+	}
+
+	if !bytes.Contains(
+		[]byte(err.Error()),
+		[]byte("checksum mismatch"),
+	) {
+		t.Fatalf(
+			"OpenWAL() error = %v, want checksum mismatch",
+			err,
+		)
+	}
+}
