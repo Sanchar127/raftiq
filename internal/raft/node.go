@@ -713,7 +713,7 @@ func (n *RaftNode) runElection() {
 	if !n.runPreVote() {
 		// The PreVote failed, so wait for another complete election
 		// timeout before retrying.
-		n.resetElectionTimer()
+
 		return
 	}
 
