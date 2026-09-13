@@ -13,9 +13,11 @@ import (
 
 type fakeRaftNode struct {
 	requestVoteArgs      raft.RequestVoteArgs
+	preVoteArgs          raft.PreVoteArgs
 	appendEntriesArgs    raft.AppendEntriesArgs
 	installSnapshotArgs  raft.InstallSnapshotArgs
 	requestVoteReply     raft.RequestVoteReply
+	preVoteReply         raft.PreVoteReply
 	appendEntriesReply   raft.AppendEntriesReply
 	installSnapshotReply raft.InstallSnapshotReply
 }
@@ -23,6 +25,11 @@ type fakeRaftNode struct {
 func (f *fakeRaftNode) RequestVote(args raft.RequestVoteArgs) raft.RequestVoteReply {
 	f.requestVoteArgs = args
 	return f.requestVoteReply
+}
+
+func (f *fakeRaftNode) PreVote(args raft.PreVoteArgs) raft.PreVoteReply {
+	f.preVoteArgs = args
+	return f.preVoteReply
 }
 
 func (f *fakeRaftNode) AppendEntries(args raft.AppendEntriesArgs) raft.AppendEntriesReply {
