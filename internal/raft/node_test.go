@@ -3649,3 +3649,154 @@ func TestCommittedConfigurationActivates(t *testing.T) {
 		)
 	}
 }
+
+func TestJointConfigurationTransition(t *testing.T) {
+	nodeA := NewRaftNode("A")
+	nodeB := NewRaftNode("B")
+	nodeC := NewRaftNode("C")
+
+	nodeA.SetPeers([]Peer{nodeB, nodeC})
+	nodeB.SetPeers([]Peer{nodeA, nodeC})
+	nodeC.SetPeers([]Peer{nodeA, nodeB})
+
+	if err := nodeA.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap node A membership: %v", err)
+	}
+
+	if err := nodeB.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap node B membership: %v", err)
+	}
+
+	if err := nodeC.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap node C membership: %v", err)
+	}
+
+	nodeA.runElection()
+
+	state := nodeA.State()
+
+	if state.Role != Leader {
+		t.Fatalf("expected A to become Leader, got %v", state.Role)
+	}
+
+	oldConfiguration := model.Configuration{
+		Voters: []model.NodeID{
+			"A",
+			"B",
+			"C",
+		},
+	}
+
+	newConfiguration := model.Configuration{
+		Voters: []model.NodeID{
+			"A",
+			"B",
+			"C",
+			"D",
+		},
+	}
+
+	enterJointData, err := EncodeEnterJointConfigurationEntry(
+		oldConfiguration,
+		newConfiguration,
+	)
+	if err != nil {
+		t.Fatalf("encode enter-joint configuration: %v", err)
+	}
+
+	enterJointIndex, err := nodeA.Propose(enterJointData)
+	if err != nil {
+		t.Fatalf("propose enter-joint configuration: %v", err)
+	}
+
+	state = nodeA.State()
+
+	if state.Volatile.CommitIndex < enterJointIndex {
+		t.Fatalf(
+			"enter-joint configuration should be committed: commit=%d index=%d",
+			state.Volatile.CommitIndex,
+			enterJointIndex,
+		)
+	}
+
+	joint := state.Persistent.Membership.Joint
+
+	if joint == nil {
+		t.Fatal("expected joint membership after EnterJoint")
+	}
+
+	if !reflect.DeepEqual(joint.Old, oldConfiguration) {
+		t.Fatalf(
+			"unexpected joint old configuration: expected=%+v actual=%+v",
+			oldConfiguration,
+			joint.Old,
+		)
+	}
+
+	if !reflect.DeepEqual(joint.New, newConfiguration) {
+		t.Fatalf(
+			"unexpected joint new configuration: expected=%+v actual=%+v",
+			newConfiguration,
+			joint.New,
+		)
+	}
+
+	if !reflect.DeepEqual(
+		state.Persistent.Membership.Current,
+		oldConfiguration,
+	) {
+		t.Fatalf(
+			"unexpected current configuration during joint consensus: expected=%+v actual=%+v",
+			oldConfiguration,
+			state.Persistent.Membership.Current,
+		)
+	}
+
+	leaveJointData, err := EncodeLeaveJointConfigurationEntry(
+		newConfiguration,
+	)
+	if err != nil {
+		t.Fatalf("encode leave-joint configuration: %v", err)
+	}
+
+	leaveJointIndex, err := nodeA.Propose(leaveJointData)
+	if err != nil {
+		t.Fatalf("propose leave-joint configuration: %v", err)
+	}
+
+	state = nodeA.State()
+
+	if state.Volatile.CommitIndex < leaveJointIndex {
+		t.Fatalf(
+			"leave-joint configuration should be committed: commit=%d index=%d",
+			state.Volatile.CommitIndex,
+			leaveJointIndex,
+		)
+	}
+
+	if !reflect.DeepEqual(
+		state.Persistent.Membership.Current,
+		newConfiguration,
+	) {
+		t.Fatalf(
+			"expected final configuration %v, got %v",
+			newConfiguration,
+			state.Persistent.Membership.Current,
+		)
+	}
+
+	if state.Persistent.Membership.Joint != nil {
+		t.Fatalf(
+			"expected joint membership to be cleared, got %+v",
+			state.Persistent.Membership.Joint,
+		)
+	}
+
+	if state.Volatile.LastApplied < leaveJointIndex {
+		t.Fatalf(
+			"leave-joint configuration was committed but not applied: last_applied=%d index=%d",
+			state.Volatile.LastApplied,
+			leaveJointIndex,
+		)
+	}
+}
