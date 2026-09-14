@@ -3057,6 +3057,32 @@ func TestProposeDiskFullStepsDownLeader(t *testing.T) {
 		)
 	}
 
+	// Direct election attempts must remain blocked while
+	// storage is unhealthy.
+	if _, err := node.startElection(); err == nil {
+		t.Fatal("expected election to remain blocked while storage is unhealthy")
+	}
+
+	if state := node.State(); state.Role != Follower {
+		t.Fatalf(
+			"expected node to remain follower, got %v",
+			state.Role,
+		)
+	}
+
+	// Verify the real election-timeout path also cannot
+	// transition the storage-blocked node back to Candidate.
+	node.SetElectionTimeout(1)
+
+	node.Tick()
+
+	if state := node.State(); state.Role != Follower {
+		t.Fatalf(
+			"expected node to remain follower after election timeout, got %v",
+			state.Role,
+		)
+	}
+
 	// Once stepped down, the node must reject new proposals.
 	_, err = node.Propose([]byte("second"))
 	if err == nil {

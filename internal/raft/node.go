@@ -42,9 +42,10 @@ type RaftNode struct {
 
 	snapshotRestore func(model.Snapshot) error
 
-	electionElapsed  int
-	electionTimeout  int
-	electionInFlight bool
+	electionElapsed     int
+	electionTimeout     int
+	electionInFlight    bool
+	storageWriteBlocked bool
 
 	heartbeatElapsed int
 	heartbeatTimeout int
@@ -166,6 +167,8 @@ func (n *RaftNode) becomeFollower(term Term) error {
 func (n *RaftNode) stepDownForStorageFailureLocked() {
 	n.state.Role = Follower
 	n.state.LeaderID = ""
+	n.storageWriteBlocked = true
+	n.electionElapsed = 0
 
 	n.metrics.SetRole(Follower)
 }
@@ -553,6 +556,25 @@ func (n *RaftNode) startElection() (Term, error) {
 
 	n.mu.Lock()
 
+	if n.storageWriteBlocked {
+		term := n.state.Persistent.CurrentTerm
+
+		n.mu.Unlock()
+
+		err := errors.New(
+			"election blocked: storage write is unhealthy",
+		)
+
+		logger.Warn(
+			"raft election rejected",
+			"term", term,
+			"reason", "storage_write_blocked",
+			"error", err,
+		)
+
+		return term, err
+	}
+
 	n.state.Role = Candidate
 	n.state.Persistent.CurrentTerm++
 	n.state.Persistent.VotedFor = n.id
@@ -740,6 +762,21 @@ func (n *RaftNode) handleVoteReply(
 }
 
 func (n *RaftNode) runElection() {
+	n.mu.RLock()
+
+	if n.storageWriteBlocked {
+		n.mu.RUnlock()
+
+		n.getLogger().Debug(
+			"raft election skipped",
+			"reason", "storage_write_blocked",
+		)
+
+		return
+	}
+
+	n.mu.RUnlock()
+
 	if !n.runPreVote() {
 		// The PreVote failed, so wait for another complete election
 		// timeout before retrying.
@@ -778,7 +815,6 @@ func (n *RaftNode) runElection() {
 	n.requestVotes()
 	n.tryBecomeLeader()
 }
-
 func (n *RaftNode) runPreVote() bool {
 	n.mu.RLock()
 
