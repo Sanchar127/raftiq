@@ -4318,3 +4318,128 @@ func TestAddMember(t *testing.T) {
 		)
 	}
 }
+
+func TestRemoveMember(t *testing.T) {
+	leader := NewRaftNode("A")
+	peerB := NewRaftNode("B")
+	peerC := NewRaftNode("C")
+	peerD := NewRaftNode("D")
+
+	transport := NewLocalTransport()
+
+	// Add all nodes to the transport.
+	for _, node := range []*RaftNode{
+		leader,
+		peerB,
+		peerC,
+		peerD,
+	} {
+		if err := transport.AddNode(node); err != nil {
+			t.Fatalf("add node to transport: %v", err)
+		}
+	}
+
+	// Existing cluster is A,B,C,D.
+	if err := leader.SetTransport(
+		transport,
+		[]NodeID{"B", "C", "D"},
+	); err != nil {
+		t.Fatalf("set leader transport: %v", err)
+	}
+
+	if err := peerB.SetTransport(
+		transport,
+		[]NodeID{"A", "C", "D"},
+	); err != nil {
+		t.Fatalf("set B transport: %v", err)
+	}
+
+	if err := peerC.SetTransport(
+		transport,
+		[]NodeID{"A", "B", "D"},
+	); err != nil {
+		t.Fatalf("set C transport: %v", err)
+	}
+
+	if err := peerD.SetTransport(
+		transport,
+		[]NodeID{"A", "B", "C"},
+	); err != nil {
+		t.Fatalf("set D transport: %v", err)
+	}
+
+	if err := leader.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
+	leader.mu.Lock()
+
+	leader.state.Role = Leader
+	leader.state.Persistent.CurrentTerm = 1
+
+	for _, peerID := range []NodeID{"B", "C", "D"} {
+		leader.initializeReplicationStateLocked(peerID)
+	}
+
+	leader.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		2*time.Second,
+	)
+	defer cancel()
+
+	if err := leader.RemoveMember(ctx, "D"); err != nil {
+		t.Fatalf("remove member D: %v", err)
+	}
+
+	state := leader.State()
+
+	// Final membership must be stable.
+	if state.Persistent.Membership.Joint != nil {
+		t.Fatal("expected final membership to be stable")
+	}
+
+	// Final membership must contain A,B,C.
+	expectedVoters := []NodeID{
+		"A",
+		"B",
+		"C",
+	}
+
+	if len(state.Persistent.Membership.Current.Voters) !=
+		len(expectedVoters) {
+		t.Fatalf(
+			"expected %d voters, got %d",
+			len(expectedVoters),
+			len(state.Persistent.Membership.Current.Voters),
+		)
+	}
+
+	for _, expectedID := range expectedVoters {
+		if !configurationContainsVoter(
+			state.Persistent.Membership.Current,
+			expectedID,
+		) {
+			t.Fatalf(
+				"expected voter %s in final membership",
+				expectedID,
+			)
+		}
+	}
+
+	// D must no longer be a voter.
+	if configurationContainsVoter(
+		state.Persistent.Membership.Current,
+		"D",
+	) {
+		t.Fatal("expected D to be removed from final membership")
+	}
+
+	// The final membership must exactly match A,B,C.
+	for _, voterID := range state.Persistent.Membership.Current.Voters {
+		if voterID == "D" {
+			t.Fatal("removed member D is still present")
+		}
+	}
+}

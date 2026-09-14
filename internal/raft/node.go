@@ -3416,3 +3416,157 @@ func (n *RaftNode) AddMember(
 
 	return nil
 }
+
+func (n *RaftNode) RemoveMember(
+	ctx context.Context,
+	peerID NodeID,
+) error {
+	if peerID == "" {
+		return errors.New("raft member ID is required")
+	}
+
+	n.mu.Lock()
+
+	if n.state.Role != Leader {
+		role := n.state.Role
+		n.mu.Unlock()
+
+		return fmt.Errorf(
+			"cannot remove member %s: node is not leader (role=%v)",
+			peerID,
+			role,
+		)
+	}
+
+	if peerID == n.id {
+		n.mu.Unlock()
+
+		return fmt.Errorf(
+			"cannot remove member %s: member is the local node",
+			peerID,
+		)
+	}
+
+	membership := n.state.Persistent.Membership
+
+	if membership.Joint != nil {
+		n.mu.Unlock()
+
+		return errors.New(
+			"cannot remove member while membership is in joint configuration",
+		)
+	}
+
+	if !membershipIsVoter(membership, peerID) {
+		n.mu.Unlock()
+
+		return fmt.Errorf(
+			"member %s is not a voter",
+			peerID,
+		)
+	}
+
+	oldConfiguration := membership.Current
+
+	if len(oldConfiguration.Voters) <= 1 {
+		n.mu.Unlock()
+
+		return errors.New(
+			"cannot remove the last voter",
+		)
+	}
+
+	newVoters := make([]NodeID, 0, len(oldConfiguration.Voters)-1)
+
+	for _, voterID := range oldConfiguration.Voters {
+		if voterID != peerID {
+			newVoters = append(newVoters, voterID)
+		}
+	}
+
+	newConfiguration := model.Configuration{
+		Voters: newVoters,
+	}
+
+	n.mu.Unlock()
+
+	enterJointData, err := EncodeEnterJointConfigurationEntry(
+		oldConfiguration,
+		newConfiguration,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"encode enter-joint configuration for member %s: %w",
+			peerID,
+			err,
+		)
+	}
+
+	enterJointIndex, err := n.Propose(enterJointData)
+	if err != nil {
+		return fmt.Errorf(
+			"propose enter-joint configuration for member %s: %w",
+			peerID,
+			err,
+		)
+	}
+
+	if err := n.waitForApplied(ctx, enterJointIndex); err != nil {
+		return fmt.Errorf(
+			"wait for enter-joint configuration at index %d: %w",
+			enterJointIndex,
+			err,
+		)
+	}
+
+	leaveJointData, err := EncodeLeaveJointConfigurationEntry(
+		newConfiguration,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"encode leave-joint configuration for member %s: %w",
+			peerID,
+			err,
+		)
+	}
+
+	leaveJointIndex, err := n.Propose(leaveJointData)
+	if err != nil {
+		return fmt.Errorf(
+			"propose leave-joint configuration for member %s: %w",
+			peerID,
+			err,
+		)
+	}
+
+	if err := n.waitForApplied(ctx, leaveJointIndex); err != nil {
+		return fmt.Errorf(
+			"wait for leave-joint configuration at index %d: %w",
+			leaveJointIndex,
+			err,
+		)
+	}
+
+	n.mu.RLock()
+	finalMembership := n.state.Persistent.Membership
+	n.mu.RUnlock()
+
+	if finalMembership.Joint != nil {
+		return fmt.Errorf(
+			"member %s removed but membership is still joint",
+			peerID,
+		)
+	}
+
+	if configurationContainsVoter(
+		finalMembership.Current,
+		peerID,
+	) {
+		return fmt.Errorf(
+			"member %s is still present in final membership",
+			peerID,
+		)
+	}
+
+	return nil
+}
