@@ -3544,3 +3544,108 @@ func TestProposeConfigurationDoesNotActivateBeforeCommit(t *testing.T) {
 		)
 	}
 }
+
+func TestCommittedConfigurationActivates(t *testing.T) {
+	nodeA := NewRaftNode("A")
+	nodeB := NewRaftNode("B")
+	nodeC := NewRaftNode("C")
+
+	nodeA.SetPeers([]Peer{nodeB, nodeC})
+	nodeB.SetPeers([]Peer{nodeA, nodeC})
+	nodeC.SetPeers([]Peer{nodeA, nodeB})
+
+	if err := nodeA.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership A: %v", err)
+	}
+
+	if err := nodeB.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership B: %v", err)
+	}
+
+	if err := nodeC.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership C: %v", err)
+	}
+
+	nodeA.runElection()
+
+	state := nodeA.State()
+
+	if state.Role != Leader {
+		t.Fatalf(
+			"expected A to become Leader, got %v",
+			state.Role,
+		)
+	}
+
+	if state.LeaderID != "A" {
+		t.Fatalf(
+			"expected leader A, got %q",
+			state.LeaderID,
+		)
+	}
+
+	nextConfiguration := model.Configuration{
+		Voters: []model.NodeID{
+			"A",
+			"B",
+			"C",
+			"D",
+		},
+	}
+
+	index, err := nodeA.ProposeConfiguration(nextConfiguration)
+	if err != nil {
+		t.Fatalf("propose configuration: %v", err)
+	}
+
+	state = nodeA.State()
+
+	if state.Volatile.CommitIndex < index {
+		t.Fatalf(
+			"configuration entry should be committed: commit=%d index=%d",
+			state.Volatile.CommitIndex,
+			index,
+		)
+	}
+
+	if !reflect.DeepEqual(
+		state.Persistent.Membership.Current,
+		nextConfiguration,
+	) {
+		entry, ok := nodeA.log.Get(index)
+
+		t.Fatalf(
+			"committed configuration was not activated: "+
+				"expected=%+v actual=%+v "+
+				"commit=%d last_applied=%d index=%d entry_exists=%t is_config=%t entry_data=%x",
+			nextConfiguration,
+			state.Persistent.Membership.Current,
+			state.Volatile.CommitIndex,
+			state.Volatile.LastApplied,
+			index,
+			ok,
+			ok && IsConfigurationEntry(entry.Data),
+			func() []byte {
+				if !ok {
+					return nil
+				}
+				return entry.Data
+			}(),
+		)
+	}
+
+	if state.Persistent.Membership.Joint != nil {
+		t.Fatalf(
+			"stable configuration unexpectedly has joint membership: %+v",
+			state.Persistent.Membership.Joint,
+		)
+	}
+
+	if state.Volatile.LastApplied < index {
+		t.Fatalf(
+			"configuration entry was committed but not applied: last_applied=%d index=%d",
+			state.Volatile.LastApplied,
+			index,
+		)
+	}
+}
