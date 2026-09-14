@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/sanchar127/raftiq/internal/model"
@@ -65,7 +66,7 @@ func TestWALStoragePersistsAcrossReopen(t *testing.T) {
 		t.Fatalf("LoadState() error = %v", err)
 	}
 
-	if gotState != state {
+	if !reflect.DeepEqual(gotState, state) {
 		t.Fatalf("LoadState() = %+v, want %+v", gotState, state)
 	}
 
@@ -210,7 +211,7 @@ func TestWALStorageRecoversValidRecordsBeforeTruncatedTail(t *testing.T) {
 		t.Fatalf("LoadState() error = %v", err)
 	}
 
-	if gotState != state {
+	if !reflect.DeepEqual(gotState, state) {
 		t.Fatalf("LoadState() = %+v, want %+v", gotState, state)
 	}
 
