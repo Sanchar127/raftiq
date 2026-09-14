@@ -432,6 +432,15 @@ func (n *RaftNode) recordVote(
 		return false
 	}
 
+	// Only voters in the active membership can contribute
+	// to an election quorum.
+	if !membershipIsVoter(
+		n.state.Persistent.Membership,
+		peerID,
+	) {
+		return false
+	}
+
 	if _, alreadyReceived := n.state.Election.VotesReceived[peerID]; alreadyReceived {
 		return false
 	}

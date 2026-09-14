@@ -314,6 +314,17 @@ func TestCandidateVotesForItself(t *testing.T) {
 func TestRecordVote(t *testing.T) {
 	node := NewRaftNode("A")
 
+	node.mu.Lock()
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{
+				"A",
+				"B",
+			},
+		},
+	}
+	node.mu.Unlock()
+
 	_, err := node.startElection()
 	if err != nil {
 		t.Fatalf("start election: %v", err)
