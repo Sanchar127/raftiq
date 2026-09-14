@@ -1386,17 +1386,74 @@ func (n *RaftNode) ApplyCh() <-chan LogEntry {
 func (n *RaftNode) applyConfigurationEntryLocked(
 	entry LogEntry,
 ) error {
-	configuration, err := DecodeConfigurationEntry(entry.Data)
-	if err != nil {
+	if len(entry.Data) < 6 {
 		return fmt.Errorf(
-			"decode configuration entry at index %d: %w",
+			"configuration entry at index %d is truncated",
 			entry.Index,
-			err,
 		)
 	}
 
-	nextMembership := model.Membership{
-		Current: configuration,
+	entryType := entry.Data[5]
+
+	var nextMembership model.Membership
+
+	switch entryType {
+	case configurationEntryTypeStable:
+		configuration, err := DecodeConfigurationEntry(entry.Data)
+		if err != nil {
+			return fmt.Errorf(
+				"decode stable configuration entry at index %d: %w",
+				entry.Index,
+				err,
+			)
+		}
+
+		nextMembership = model.Membership{
+			Current: configuration,
+			Joint:   nil,
+		}
+
+	case configurationEntryTypeEnterJoint:
+		oldConfiguration, newConfiguration, err :=
+			DecodeEnterJointConfigurationEntry(entry.Data)
+		if err != nil {
+			return fmt.Errorf(
+				"decode enter-joint configuration entry at index %d: %w",
+				entry.Index,
+				err,
+			)
+		}
+
+		nextMembership = model.Membership{
+			Current: oldConfiguration,
+			Joint: &model.JointConfiguration{
+				Old: oldConfiguration,
+				New: newConfiguration,
+			},
+		}
+
+	case configurationEntryTypeLeaveJoint:
+		newConfiguration, err :=
+			DecodeLeaveJointConfigurationEntry(entry.Data)
+		if err != nil {
+			return fmt.Errorf(
+				"decode leave-joint configuration entry at index %d: %w",
+				entry.Index,
+				err,
+			)
+		}
+
+		nextMembership = model.Membership{
+			Current: newConfiguration,
+			Joint:   nil,
+		}
+
+	default:
+		return fmt.Errorf(
+			"unknown configuration entry type %d at index %d",
+			entryType,
+			entry.Index,
+		)
 	}
 
 	nextState := n.state.Persistent
