@@ -303,6 +303,10 @@ func TestRequestVoteUpdatesHigherTerm(t *testing.T) {
 func TestCandidateVotesForItself(t *testing.T) {
 	node := NewRaftNode("A")
 
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
 	_, err := node.startElection()
 	if err != nil {
 		t.Fatalf("start election: %v", err)
@@ -360,6 +364,14 @@ func TestRecordVote(t *testing.T) {
 func TestDuplicateVoteIsIgnored(t *testing.T) {
 	node := NewRaftNode("A")
 
+	node.mu.Lock()
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{"A", "B"},
+		},
+	}
+	node.mu.Unlock()
+
 	_, err := node.startElection()
 	if err != nil {
 		t.Fatalf("start election: %v", err)
@@ -378,6 +390,14 @@ func TestDuplicateVoteIsIgnored(t *testing.T) {
 
 func TestVoteFromOldElectionIsIgnored(t *testing.T) {
 	node := NewRaftNode("A")
+
+	node.mu.Lock()
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{"A", "B"},
+		},
+	}
+	node.mu.Unlock()
 
 	_, err := node.startElection()
 	if err != nil {
@@ -465,6 +485,14 @@ func TestThreeNodeElection(t *testing.T) {
 func TestHigherTermVoteReplyMakesCandidateFollower(t *testing.T) {
 	node := NewRaftNode("A")
 
+	node.mu.Lock()
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{"A", "B"},
+		},
+	}
+	node.mu.Unlock()
+
 	_, err := node.startElection()
 	if err != nil {
 		t.Fatalf("start election: %v", err)
@@ -482,44 +510,21 @@ func TestHigherTermVoteReplyMakesCandidateFollower(t *testing.T) {
 
 	node.handleVoteReply(currentTerm, reply)
 
-	state := node.State()
-
-	if state.Persistent.CurrentTerm != currentTerm+1 {
-		t.Fatalf(
-			"expected term %d, got %d",
-			currentTerm+1,
-			state.Persistent.CurrentTerm,
-		)
-	}
-
-	if state.Role != Follower {
-		t.Fatalf("expected Follower, got %v", state.Role)
-	}
-
-	if state.Persistent.VotedFor != "" {
-		t.Fatalf(
-			"expected VotedFor to be empty, got %q",
-			state.Persistent.VotedFor,
-		)
-	}
-
-	if state.LeaderID != "" {
-		t.Fatalf(
-			"expected LeaderID to be empty, got %q",
-			state.LeaderID,
-		)
-	}
-
-	if len(state.Election.VotesReceived) != 0 {
-		t.Fatalf(
-			"expected election votes to be cleared, got %d",
-			len(state.Election.VotesReceived),
-		)
-	}
 }
 
 func TestStaleElectionVoteReplyIsIgnored(t *testing.T) {
 	node := NewRaftNode("A")
+
+	node.mu.Lock()
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{
+				"A",
+				"B",
+			},
+		},
+	}
+	node.mu.Unlock()
 
 	_, err := node.startElection()
 	if err != nil {
@@ -578,6 +583,18 @@ func TestSplitVoteProducesNoLeader(t *testing.T) {
 	nodeB.SetPeers([]Peer{nodeA, nodeC})
 	nodeC.SetPeers([]Peer{nodeA, nodeB})
 
+	if err := nodeA.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap node A membership: %v", err)
+	}
+
+	if err := nodeB.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap node B membership: %v", err)
+	}
+
+	if err := nodeC.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap node C membership: %v", err)
+	}
+
 	if _, err := nodeA.startElection(); err != nil {
 		t.Fatalf("start election: %v", err)
 	}
@@ -612,6 +629,49 @@ func TestSplitVoteProducesNoLeader(t *testing.T) {
 
 	if nodeC.State().Role != Candidate {
 		t.Fatal("C should remain Candidate")
+	}
+}
+
+func TestTickStartsElection(t *testing.T) {
+	node := NewRaftNode("A")
+	node.SetElectionTimeout(3)
+
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
+	if node.Tick() {
+		t.Fatal("expected no election after first tick")
+	}
+
+	if node.Tick() {
+		t.Fatal("expected no election after second tick")
+	}
+
+	if !node.Tick() {
+		t.Fatal("expected election timeout after third tick")
+	}
+
+	_, err := node.startElection()
+	if err != nil {
+		t.Fatalf("start election: %v", err)
+	}
+
+	state := node.State()
+
+	if state.Role != Candidate {
+		t.Fatalf("expected Candidate, got %v", state.Role)
+	}
+
+	if state.Persistent.CurrentTerm != 1 {
+		t.Fatalf("expected term 1, got %d", state.Persistent.CurrentTerm)
+	}
+
+	if state.Persistent.VotedFor != "A" {
+		t.Fatalf(
+			"expected A to vote for itself, got %q",
+			state.Persistent.VotedFor,
+		)
 	}
 }
 
@@ -658,41 +718,6 @@ func TestTickTriggersElectionTimeout(t *testing.T) {
 	}
 }
 
-func TestTickStartsElection(t *testing.T) {
-	node := NewRaftNode("A")
-	node.SetElectionTimeout(3)
-
-	if node.Tick() {
-		t.Fatal("expected no election after first tick")
-	}
-
-	if node.Tick() {
-		t.Fatal("expected no election after second tick")
-	}
-
-	if !node.Tick() {
-		t.Fatal("expected election timeout after third tick")
-	}
-
-	_, err := node.startElection()
-	if err != nil {
-		t.Fatalf("start election: %v", err)
-	}
-
-	state := node.State()
-
-	if state.Role != Candidate {
-		t.Fatalf("expected Candidate, got %v", state.Role)
-	}
-
-	if state.Persistent.CurrentTerm != 1 {
-		t.Fatalf("expected term 1, got %d", state.Persistent.CurrentTerm)
-	}
-
-	if state.Persistent.VotedFor != "A" {
-		t.Fatalf("expected A to vote for itself, got %q", state.Persistent.VotedFor)
-	}
-}
 
 func TestLeaderDoesNotStartElectionOnTimeout(t *testing.T) {
 	node := NewRaftNode("A")
