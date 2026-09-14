@@ -2911,6 +2911,7 @@ func TestReadIndexNoQuorum(t *testing.T) {
 		t.Fatal("expected ReadIndex to fail without quorum")
 	}
 }
+
 func TestReadIndexHigherTermReply(t *testing.T) {
 	leader := NewRaftNode("A")
 	followerB := NewRaftNode("B")
@@ -2960,5 +2961,105 @@ func TestReadIndexHigherTermReply(t *testing.T) {
 			"expected term 2 after higher-term reply, got %d",
 			state.Persistent.CurrentTerm,
 		)
+	}
+}
+
+type diskFullStorage struct {
+	diskFull bool
+}
+
+func (s *diskFullStorage) SaveState(model.PersistentState) error {
+	return nil
+}
+
+func (s *diskFullStorage) LoadState() (model.PersistentState, error) {
+	return model.PersistentState{}, nil
+}
+
+func (s *diskFullStorage) AppendEntries([]model.LogEntry) error {
+	return nil
+}
+
+func (s *diskFullStorage) ReplaceSuffix(
+	model.LogIndex,
+	[]model.LogEntry,
+) error {
+	return nil
+}
+
+func (s *diskFullStorage) LoadEntries() ([]model.LogEntry, error) {
+	return nil, nil
+}
+
+func (s *diskFullStorage) SaveSnapshot(model.Snapshot) error {
+	return nil
+}
+
+func (s *diskFullStorage) LoadSnapshot() (model.Snapshot, error) {
+	return model.Snapshot{}, nil
+}
+
+func (s *diskFullStorage) Sync() error {
+	if s.diskFull {
+		return storage.ErrWALDiskFull
+	}
+
+	return nil
+}
+
+func (s *diskFullStorage) Close() error {
+	return nil
+}
+
+func TestProposeDiskFullStepsDownLeader(t *testing.T) {
+	store := &diskFullStorage{}
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	if err != nil {
+		t.Fatalf("NewRaftNodeWithStorage() error: %v", err)
+	}
+
+	if _, err := node.startElection(); err != nil {
+		t.Fatalf("start election: %v", err)
+	}
+
+	node.becomeLeader()
+
+	if state := node.State(); state.Role != Leader {
+		t.Fatalf(
+			"expected node to be leader, got %v",
+			state.Role,
+		)
+	}
+
+	// Simulate the WAL becoming full after the node
+	// has already become leader.
+	store.diskFull = true
+
+	_, err = node.Propose([]byte("hello"))
+	if err == nil {
+		t.Fatal("expected Propose() to fail when WAL is full")
+	}
+
+	if !errors.Is(err, storage.ErrWALDiskFull) {
+		t.Fatalf(
+			"expected ErrWALDiskFull, got %v",
+			err,
+		)
+	}
+
+	state := node.State()
+
+	if state.Role != Follower {
+		t.Fatalf(
+			"expected leader to step down to follower, got %v",
+			state.Role,
+		)
+	}
+
+	// Once stepped down, the node must reject new proposals.
+	_, err = node.Propose([]byte("second"))
+	if err == nil {
+		t.Fatal("expected proposal to be rejected after step-down")
 	}
 }
