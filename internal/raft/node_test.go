@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -4441,5 +4442,196 @@ func TestRemoveMember(t *testing.T) {
 		if voterID == "D" {
 			t.Fatal("removed member D is still present")
 		}
+	}
+}
+
+func TestRemoveMemberRejectsLastVoter(t *testing.T) {
+	node := NewRaftNode("A")
+
+	if err := node.SetTransport(
+		NewLocalTransport(),
+		nil,
+	); err != nil {
+		t.Fatalf("set transport: %v", err)
+	}
+
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
+	node.mu.Lock()
+	node.state.Role = Leader
+	node.state.Persistent.CurrentTerm = 1
+	node.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
+	defer cancel()
+
+	err := node.RemoveMember(ctx, "A")
+	if err == nil {
+		t.Fatal("expected removing last voter to fail")
+	}
+
+	if !strings.Contains(err.Error(), "local node") {
+		t.Fatalf(
+			"expected local-node error, got %v",
+			err,
+		)
+	}
+}
+
+func TestRemoveMemberRejectsNonVoter(t *testing.T) {
+	node := NewRaftNode("A")
+
+	peer := NewRaftNode("B")
+	transport := NewLocalTransport()
+
+	if err := transport.AddNode(node); err != nil {
+		t.Fatalf("add A: %v", err)
+	}
+
+	if err := transport.AddNode(peer); err != nil {
+		t.Fatalf("add B: %v", err)
+	}
+
+	if err := node.SetTransport(
+		transport,
+		[]NodeID{"B"},
+	); err != nil {
+		t.Fatalf("set transport: %v", err)
+	}
+
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
+	node.mu.Lock()
+	node.state.Role = Leader
+	node.state.Persistent.CurrentTerm = 1
+	node.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
+	defer cancel()
+
+	err := node.RemoveMember(ctx, "C")
+	if err == nil {
+		t.Fatal("expected removing non-voter to fail")
+	}
+
+	if !strings.Contains(err.Error(), "is not a voter") {
+		t.Fatalf(
+			"expected non-voter error, got %v",
+			err,
+		)
+	}
+}
+
+func TestRemoveMemberRejectsJointConfiguration(t *testing.T) {
+	node := NewRaftNode("A")
+
+	node.mu.Lock()
+
+	node.state.Role = Leader
+	node.state.Persistent.CurrentTerm = 1
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{"A", "B", "C"},
+		},
+		Joint: &model.JointConfiguration{
+			Old: model.Configuration{
+				Voters: []NodeID{"A", "B", "C"},
+			},
+			New: model.Configuration{
+				Voters: []NodeID{"A", "B"},
+			},
+		},
+	}
+
+	node.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
+	defer cancel()
+
+	err := node.RemoveMember(ctx, "C")
+	if err == nil {
+		t.Fatal("expected removal during joint configuration to fail")
+	}
+
+	if !strings.Contains(err.Error(), "joint configuration") {
+		t.Fatalf(
+			"expected joint-configuration error, got %v",
+			err,
+		)
+	}
+}
+
+func TestRemoveMemberRejectsFollower(t *testing.T) {
+	node := NewRaftNode("A")
+
+	node.mu.Lock()
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{"A", "B", "C"},
+		},
+	}
+	node.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
+	defer cancel()
+
+	err := node.RemoveMember(ctx, "B")
+	if err == nil {
+		t.Fatal("expected follower removal to fail")
+	}
+
+	if !strings.Contains(err.Error(), "not leader") {
+		t.Fatalf(
+			"expected not-leader error, got %v",
+			err,
+		)
+	}
+}
+
+func TestRemoveMemberRejectsSelf(t *testing.T) {
+	node := NewRaftNode("A")
+
+	node.mu.Lock()
+	node.state.Role = Leader
+	node.state.Persistent.CurrentTerm = 1
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{"A", "B", "C"},
+		},
+	}
+	node.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
+	defer cancel()
+
+	err := node.RemoveMember(ctx, "A")
+	if err == nil {
+		t.Fatal("expected removing self to fail")
+	}
+
+	if !strings.Contains(err.Error(), "local node") {
+		t.Fatalf(
+			"expected local-node error, got %v",
+			err,
+		)
 	}
 }
