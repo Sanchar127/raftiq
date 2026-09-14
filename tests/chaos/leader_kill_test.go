@@ -147,6 +147,19 @@ func newLeaderKillCluster(t *testing.T) *leaderKillCluster {
 		}
 	}
 
+	// SetTransport configures communication topology only.
+	// BootstrapMembership establishes the actual Raft consensus
+	// membership used for elections and quorum decisions.
+	for _, node := range nodes {
+		if err := node.BootstrapMembership(); err != nil {
+			t.Fatalf(
+				"bootstrap membership for node %s: %v",
+				node.ID(),
+				err,
+			)
+		}
+	}
+
 	return &leaderKillCluster{
 		transport: transport,
 		nodes:     nodes,

@@ -196,6 +196,19 @@ func newFollowerKillCluster(t *testing.T) *followerKillCluster {
 		}
 	}
 
+	// Bootstrap the same 3-node membership on every node before starting
+	// Raft. SetTransport() only configures communication topology; it does
+	// not define the consensus membership.
+	for _, node := range nodes {
+		if err := node.BootstrapMembership(); err != nil {
+			t.Fatalf(
+				"bootstrap membership for node %s: %v",
+				node.ID(),
+				err,
+			)
+		}
+	}
+
 	return &followerKillCluster{
 		transport: transport,
 		nodes:     nodes,
