@@ -191,6 +191,21 @@ func newRaceStressCluster(t *testing.T) *raceStressCluster {
 		}
 	}
 
+	// SetTransport() defines communication topology only.
+	// BootstrapMembership() establishes the Raft consensus membership.
+	//
+	// Every node must have the same 3-node membership so elections and
+	// commit decisions require a real majority of 2/3.
+	for _, node := range cluster.nodes {
+		if err := node.BootstrapMembership(); err != nil {
+			t.Fatalf(
+				"bootstrap membership for %s: %v",
+				node.ID(),
+				err,
+			)
+		}
+	}
+
 	return cluster
 }
 
