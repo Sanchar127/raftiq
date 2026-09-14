@@ -395,6 +395,17 @@ func newTestRaftApplier(
 	t.Helper()
 
 	node := raft.NewRaftNode("node-1")
+
+	// This helper starts a single-node Raft cluster.
+	// Bootstrap membership before Start so node-1 is an eligible voter
+	// and can become leader with a one-node quorum.
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf(
+			"BootstrapMembership() error = %v",
+			err,
+		)
+	}
+
 	store := kv.NewStore()
 	applier := kv.NewApplier(store)
 
