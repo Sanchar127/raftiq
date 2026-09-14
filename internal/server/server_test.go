@@ -6,28 +6,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sanchar127/raftiq/internal/lock"
-
 	"github.com/sanchar127/raftiq/internal/kv"
+	"github.com/sanchar127/raftiq/internal/lock"
 	"github.com/sanchar127/raftiq/internal/raft"
+	"github.com/stretchr/testify/require"
 )
 
 func TestServerStartsAndStops(t *testing.T) {
 	raftNode := raft.NewRaftNode("A")
-	store := kv.NewStore()
+	require.NoError(t, raftNode.BootstrapMembership())
 
+	store := kv.NewStore()
 	server := NewServer(raftNode, store)
 
 	server.Start()
 	server.Stop()
 }
 
-func TestServerGetReturnsReplicatedValue(t *testing.T) {
+func TestServerGetReturnsValue(t *testing.T) {
 	nodeA := raft.NewRaftNode("A")
-	nodeB := raft.NewRaftNode("B")
-	nodeC := raft.NewRaftNode("C")
-
-	nodeA.SetPeers([]raft.Peer{nodeB, nodeC})
+	require.NoError(t, nodeA.BootstrapMembership())
 
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
@@ -53,7 +51,10 @@ func TestServerGetReturnsReplicatedValue(t *testing.T) {
 		t.Fatalf("Propose() returned error: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
 	defer cancel()
 
 	state := nodeA.State()
@@ -77,7 +78,11 @@ func TestServerGetReturnsReplicatedValue(t *testing.T) {
 	}
 
 	if string(value) != "raftiq" {
-		t.Fatalf("expected value %q, got %q", "raftiq", string(value))
+		t.Fatalf(
+			"expected value %q, got %q",
+			"raftiq",
+			string(value),
+		)
 	}
 }
 
@@ -94,15 +99,15 @@ func waitForLeader(t *testing.T, node *raft.RaftNode) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	t.Fatalf("node %s did not become leader", node.ID())
+	t.Fatalf(
+		"node %s did not become leader",
+		node.ID(),
+	)
 }
 
 func TestServerPutAndGet(t *testing.T) {
 	nodeA := raft.NewRaftNode("A")
-	nodeB := raft.NewRaftNode("B")
-	nodeC := raft.NewRaftNode("C")
-
-	nodeA.SetPeers([]raft.Peer{nodeB, nodeC})
+	require.NoError(t, nodeA.BootstrapMembership())
 
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
@@ -115,16 +120,32 @@ func TestServerPutAndGet(t *testing.T) {
 
 	waitForLeader(t, nodeA)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
 	defer cancel()
 
-	if err := server.Put(ctx, "name", []byte("raftiq")); err != nil {
-		t.Fatalf("Put() returned error: %v", err)
+	if err := server.Put(
+		ctx,
+		"name",
+		[]byte("raftiq"),
+	); err != nil {
+		t.Fatalf(
+			"Put() returned error: %v",
+			err,
+		)
 	}
 
-	value, ok, err := server.Get(ctx, "name")
+	value, ok, err := server.Get(
+		ctx,
+		"name",
+	)
 	if err != nil {
-		t.Fatalf("Get() returned error: %v", err)
+		t.Fatalf(
+			"Get() returned error: %v",
+			err,
+		)
 	}
 
 	if !ok {
@@ -132,16 +153,17 @@ func TestServerPutAndGet(t *testing.T) {
 	}
 
 	if string(value) != "raftiq" {
-		t.Fatalf("expected value %q, got %q", "raftiq", string(value))
+		t.Fatalf(
+			"expected value %q, got %q",
+			"raftiq",
+			string(value),
+		)
 	}
 }
 
 func TestServerDeleteAndGet(t *testing.T) {
 	nodeA := raft.NewRaftNode("A")
-	nodeB := raft.NewRaftNode("B")
-	nodeC := raft.NewRaftNode("C")
-
-	nodeA.SetPeers([]raft.Peer{nodeB, nodeC})
+	require.NoError(t, nodeA.BootstrapMembership())
 
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
@@ -154,32 +176,55 @@ func TestServerDeleteAndGet(t *testing.T) {
 
 	waitForLeader(t, nodeA)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
 	defer cancel()
 
-	if err := server.Put(ctx, "name", []byte("raftiq")); err != nil {
-		t.Fatalf("Put() returned error: %v", err)
+	if err := server.Put(
+		ctx,
+		"name",
+		[]byte("raftiq"),
+	); err != nil {
+		t.Fatalf(
+			"Put() returned error: %v",
+			err,
+		)
 	}
 
-	if err := server.Delete(ctx, "name"); err != nil {
-		t.Fatalf("Delete() returned error: %v", err)
+	if err := server.Delete(
+		ctx,
+		"name",
+	); err != nil {
+		t.Fatalf(
+			"Delete() returned error: %v",
+			err,
+		)
 	}
 
-	value, ok, err := server.Get(ctx, "name")
+	value, ok, err := server.Get(
+		ctx,
+		"name",
+	)
 	if err != nil {
-		t.Fatalf("Get() returned error: %v", err)
+		t.Fatalf(
+			"Get() returned error: %v",
+			err,
+		)
 	}
 
 	if ok {
-		t.Fatalf("expected key to be deleted, got value %q", value)
+		t.Fatalf(
+			"expected key to be deleted, got value %q",
+			value,
+		)
 	}
 }
+
 func TestServerAcquireLock(t *testing.T) {
 	nodeA := raft.NewRaftNode("A")
-	nodeB := raft.NewRaftNode("B")
-	nodeC := raft.NewRaftNode("C")
-
-	nodeA.SetPeers([]raft.Peer{nodeB, nodeC})
+	require.NoError(t, nodeA.BootstrapMembership())
 
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
@@ -205,15 +250,24 @@ func TestServerAcquireLock(t *testing.T) {
 		5000,
 	)
 	if err != nil {
-		t.Fatalf("AcquireLock() returned error: %v", err)
+		t.Fatalf(
+			"AcquireLock() returned error: %v",
+			err,
+		)
 	}
 
 	if grant.Key != "job:1" {
-		t.Fatalf("unexpected key: %q", grant.Key)
+		t.Fatalf(
+			"unexpected key: %q",
+			grant.Key,
+		)
 	}
 
 	if grant.OwnerID != "worker-A" {
-		t.Fatalf("unexpected owner: %q", grant.OwnerID)
+		t.Fatalf(
+			"unexpected owner: %q",
+			grant.OwnerID,
+		)
 	}
 
 	if grant.FencingToken != 1 {
@@ -224,16 +278,13 @@ func TestServerAcquireLock(t *testing.T) {
 	}
 
 	if grant.ExpiresAt <= time.Now().UnixNano() {
-		t.Fatalf("lock expiration is not in the future")
+		t.Fatal("lock expiration is not in the future")
 	}
 }
 
 func TestServerAcquireLockBusy(t *testing.T) {
 	nodeA := raft.NewRaftNode("A")
-	nodeB := raft.NewRaftNode("B")
-	nodeC := raft.NewRaftNode("C")
-
-	nodeA.SetPeers([]raft.Peer{nodeB, nodeC})
+	require.NoError(t, nodeA.BootstrapMembership())
 
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
@@ -259,11 +310,17 @@ func TestServerAcquireLockBusy(t *testing.T) {
 		5000,
 	)
 	if err != nil {
-		t.Fatalf("first AcquireLock() returned error: %v", err)
+		t.Fatalf(
+			"first AcquireLock() returned error: %v",
+			err,
+		)
 	}
 
 	if first.FencingToken != 1 {
-		t.Fatalf("unexpected first token: %d", first.FencingToken)
+		t.Fatalf(
+			"unexpected first token: %d",
+			first.FencingToken,
+		)
 	}
 
 	_, err = server.AcquireLock(
@@ -301,10 +358,7 @@ func TestServerAcquireLockBusy(t *testing.T) {
 
 func TestServerAcquireLockFencingTokensAreGlobal(t *testing.T) {
 	nodeA := raft.NewRaftNode("A")
-	nodeB := raft.NewRaftNode("B")
-	nodeC := raft.NewRaftNode("C")
-
-	nodeA.SetPeers([]raft.Peer{nodeB, nodeC})
+	require.NoError(t, nodeA.BootstrapMembership())
 
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
@@ -330,7 +384,10 @@ func TestServerAcquireLockFencingTokensAreGlobal(t *testing.T) {
 		5000,
 	)
 	if err != nil {
-		t.Fatalf("first AcquireLock() returned error: %v", err)
+		t.Fatalf(
+			"first AcquireLock() returned error: %v",
+			err,
+		)
 	}
 
 	second, err := server.AcquireLock(
@@ -340,7 +397,10 @@ func TestServerAcquireLockFencingTokensAreGlobal(t *testing.T) {
 		5000,
 	)
 	if err != nil {
-		t.Fatalf("second AcquireLock() returned error: %v", err)
+		t.Fatalf(
+			"second AcquireLock() returned error: %v",
+			err,
+		)
 	}
 
 	if first.FencingToken != 1 {
@@ -376,7 +436,10 @@ func TestStoreExpireLock(t *testing.T) {
 		10,
 	)
 	if err != nil {
-		t.Fatalf("acquire lock: %v", err)
+		t.Fatalf(
+			"acquire lock: %v",
+			err,
+		)
 	}
 
 	if !ok {
@@ -395,7 +458,10 @@ func TestStoreExpireLock(t *testing.T) {
 		1,
 	)
 	if err != nil {
-		t.Fatalf("expire lock: %v", err)
+		t.Fatalf(
+			"expire lock: %v",
+			err,
+		)
 	}
 
 	if !ok {
@@ -424,7 +490,10 @@ func TestStoreExpireLockRejectsStaleToken(t *testing.T) {
 		10,
 	)
 	if err != nil {
-		t.Fatalf("first acquire: %v", err)
+		t.Fatalf(
+			"first acquire: %v",
+			err,
+		)
 	}
 
 	if !ok {
@@ -436,7 +505,10 @@ func TestStoreExpireLockRejectsStaleToken(t *testing.T) {
 		first.FencingToken,
 	)
 	if err != nil {
-		t.Fatalf("first expire: %v", err)
+		t.Fatalf(
+			"first expire: %v",
+			err,
+		)
 	}
 
 	if !ok {
@@ -450,7 +522,10 @@ func TestStoreExpireLockRejectsStaleToken(t *testing.T) {
 		20,
 	)
 	if err != nil {
-		t.Fatalf("second acquire: %v", err)
+		t.Fatalf(
+			"second acquire: %v",
+			err,
+		)
 	}
 
 	if !ok {
@@ -470,11 +545,16 @@ func TestStoreExpireLockRejectsStaleToken(t *testing.T) {
 		first.FencingToken,
 	)
 	if err != nil {
-		t.Fatalf("stale expire: %v", err)
+		t.Fatalf(
+			"stale expire: %v",
+			err,
+		)
 	}
 
 	if expired {
-		t.Fatal("stale expiration must not remove the new lock")
+		t.Fatal(
+			"stale expiration must not remove the new lock",
+		)
 	}
 
 	current, ok := store.GetLock("job-1")
@@ -500,10 +580,7 @@ func TestStoreExpireLockRejectsStaleToken(t *testing.T) {
 
 func TestServerLockExpiresAutomatically(t *testing.T) {
 	nodeA := raft.NewRaftNode("A")
-	nodeB := raft.NewRaftNode("B")
-	nodeC := raft.NewRaftNode("C")
-
-	nodeA.SetPeers([]raft.Peer{nodeB, nodeC})
+	require.NoError(t, nodeA.BootstrapMembership())
 
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
@@ -529,7 +606,10 @@ func TestServerLockExpiresAutomatically(t *testing.T) {
 		100,
 	)
 	if err != nil {
-		t.Fatalf("AcquireLock() returned error: %v", err)
+		t.Fatalf(
+			"AcquireLock() returned error: %v",
+			err,
+		)
 	}
 
 	if first.FencingToken != 1 {
@@ -554,10 +634,7 @@ func TestServerLockExpiresAutomatically(t *testing.T) {
 
 func TestServerExpiredLockCanBeReacquired(t *testing.T) {
 	nodeA := raft.NewRaftNode("A")
-	nodeB := raft.NewRaftNode("B")
-	nodeC := raft.NewRaftNode("C")
-
-	nodeA.SetPeers([]raft.Peer{nodeB, nodeC})
+	require.NoError(t, nodeA.BootstrapMembership())
 
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
@@ -583,7 +660,10 @@ func TestServerExpiredLockCanBeReacquired(t *testing.T) {
 		100,
 	)
 	if err != nil {
-		t.Fatalf("first AcquireLock(): %v", err)
+		t.Fatalf(
+			"first AcquireLock(): %v",
+			err,
+		)
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -607,7 +687,10 @@ func TestServerExpiredLockCanBeReacquired(t *testing.T) {
 		1000,
 	)
 	if err != nil {
-		t.Fatalf("second AcquireLock(): %v", err)
+		t.Fatalf(
+			"second AcquireLock(): %v",
+			err,
+		)
 	}
 
 	if second.OwnerID != "worker-B" {
@@ -628,10 +711,7 @@ func TestServerExpiredLockCanBeReacquired(t *testing.T) {
 
 func TestServerRejectsZombieWorkerWithStaleFencingToken(t *testing.T) {
 	nodeA := raft.NewRaftNode("A")
-	nodeB := raft.NewRaftNode("B")
-	nodeC := raft.NewRaftNode("C")
-
-	nodeA.SetPeers([]raft.Peer{nodeB, nodeC})
+	require.NoError(t, nodeA.BootstrapMembership())
 
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
@@ -657,7 +737,10 @@ func TestServerRejectsZombieWorkerWithStaleFencingToken(t *testing.T) {
 		100,
 	)
 	if err != nil {
-		t.Fatalf("first AcquireLock(): %v", err)
+		t.Fatalf(
+			"first AcquireLock(): %v",
+			err,
+		)
 	}
 
 	if first.FencingToken != 1 {
@@ -673,7 +756,10 @@ func TestServerRejectsZombieWorkerWithStaleFencingToken(t *testing.T) {
 		[]byte("worker-a-result"),
 		first.FencingToken,
 	); err != nil {
-		t.Fatalf("worker-A FencedPut(): %v", err)
+		t.Fatalf(
+			"worker-A FencedPut(): %v",
+			err,
+		)
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -697,7 +783,10 @@ func TestServerRejectsZombieWorkerWithStaleFencingToken(t *testing.T) {
 		1000,
 	)
 	if err != nil {
-		t.Fatalf("second AcquireLock(): %v", err)
+		t.Fatalf(
+			"second AcquireLock(): %v",
+			err,
+		)
 	}
 
 	if second.FencingToken != 2 {
@@ -726,7 +815,10 @@ func TestServerRejectsZombieWorkerWithStaleFencingToken(t *testing.T) {
 		[]byte("worker-b-result"),
 		second.FencingToken,
 	); err != nil {
-		t.Fatalf("worker-B FencedPut(): %v", err)
+		t.Fatalf(
+			"worker-B FencedPut(): %v",
+			err,
+		)
 	}
 
 	value, ok := store.GetFenced("job:1")
@@ -752,10 +844,7 @@ func TestServerRejectsZombieWorkerWithStaleFencingToken(t *testing.T) {
 
 func TestServerGetDoesNotAppendRaftLogEntry(t *testing.T) {
 	nodeA := raft.NewRaftNode("A")
-	nodeB := raft.NewRaftNode("B")
-	nodeC := raft.NewRaftNode("C")
-
-	nodeA.SetPeers([]raft.Peer{nodeB, nodeC})
+	require.NoError(t, nodeA.BootstrapMembership())
 
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
@@ -768,18 +857,34 @@ func TestServerGetDoesNotAppendRaftLogEntry(t *testing.T) {
 
 	waitForLeader(t, nodeA)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
 	defer cancel()
 
-	if err := server.Put(ctx, "name", []byte("raftiq")); err != nil {
-		t.Fatalf("Put() returned error: %v", err)
+	if err := server.Put(
+		ctx,
+		"name",
+		[]byte("raftiq"),
+	); err != nil {
+		t.Fatalf(
+			"Put() returned error: %v",
+			err,
+		)
 	}
 
 	before := nodeA.Log().LastIndex()
 
-	value, ok, err := server.Get(ctx, "name")
+	value, ok, err := server.Get(
+		ctx,
+		"name",
+	)
 	if err != nil {
-		t.Fatalf("Get() returned error: %v", err)
+		t.Fatalf(
+			"Get() returned error: %v",
+			err,
+		)
 	}
 
 	if !ok {
@@ -787,7 +892,11 @@ func TestServerGetDoesNotAppendRaftLogEntry(t *testing.T) {
 	}
 
 	if string(value) != "raftiq" {
-		t.Fatalf("expected value %q, got %q", "raftiq", string(value))
+		t.Fatalf(
+			"expected value %q, got %q",
+			"raftiq",
+			string(value),
+		)
 	}
 
 	after := nodeA.Log().LastIndex()
