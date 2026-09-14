@@ -4113,3 +4113,208 @@ func TestWaitForApplied(t *testing.T) {
 		t.Fatalf("wait for applied: %v", err)
 	}
 }
+
+func TestAddMember(t *testing.T) {
+	leader := NewRaftNode("A")
+	peerB := NewRaftNode("B")
+	peerC := NewRaftNode("C")
+	newPeer := NewRaftNode("D")
+
+	transport := NewLocalTransport()
+
+	if err := transport.AddNode(leader); err != nil {
+		t.Fatalf("add leader A to transport: %v", err)
+	}
+
+	if err := transport.AddNode(peerB); err != nil {
+		t.Fatalf("add B to transport: %v", err)
+	}
+
+	if err := transport.AddNode(peerC); err != nil {
+		t.Fatalf("add C to transport: %v", err)
+	}
+
+	if err := transport.AddNode(newPeer); err != nil {
+		t.Fatalf("add D to transport: %v", err)
+	}
+
+	// Bootstrap the original cluster as A,B,C.
+	// D is reachable through the transport but is not yet
+	// registered as a Raft peer or voter.
+	if err := leader.SetTransport(
+		transport,
+		[]NodeID{"B", "C"},
+	); err != nil {
+		t.Fatalf("set leader transport: %v", err)
+	}
+
+	if err := peerB.SetTransport(
+		transport,
+		[]NodeID{"A", "C"},
+	); err != nil {
+		t.Fatalf("set B transport: %v", err)
+	}
+
+	if err := peerC.SetTransport(
+		transport,
+		[]NodeID{"A", "B"},
+	); err != nil {
+		t.Fatalf("set C transport: %v", err)
+	}
+
+	if err := newPeer.SetTransport(
+		transport,
+		[]NodeID{"A", "B", "C"},
+	); err != nil {
+		t.Fatalf("set D transport: %v", err)
+	}
+
+	if err := leader.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap leader membership: %v", err)
+	}
+
+	// D becomes a communication peer only after the initial
+	// membership has been established.
+	if err := leader.RegisterPeer("D"); err != nil {
+		t.Fatalf("register D: %v", err)
+	}
+
+	leader.mu.Lock()
+
+	leader.state.Role = Leader
+	leader.state.Persistent.CurrentTerm = 1
+
+	for _, peerID := range []NodeID{"B", "C"} {
+		leader.initializeReplicationStateLocked(peerID)
+	}
+
+	leader.initializeNewPeerReplicationStateLocked("D")
+
+	leader.mu.Unlock()
+
+	entries := []LogEntry{
+		{
+			Index: 1,
+			Term:  1,
+			Data:  []byte("entry-1"),
+		},
+		{
+			Index: 2,
+			Term:  1,
+			Data:  []byte("entry-2"),
+		},
+		{
+			Index: 3,
+			Term:  1,
+			Data:  []byte("entry-3"),
+		},
+	}
+
+	for _, entry := range entries {
+		if err := leader.log.Append(entry); err != nil {
+			t.Fatalf(
+				"append leader entry %d: %v",
+				entry.Index,
+				err,
+			)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		2*time.Second,
+	)
+	defer cancel()
+
+	if err := leader.AddMember(ctx, "D"); err != nil {
+		t.Fatalf("add member D: %v", err)
+	}
+
+	state := leader.State()
+
+	if state.Persistent.Membership.Joint != nil {
+		t.Fatal("expected final membership to be stable")
+	}
+
+	expectedVoters := []NodeID{
+		"A",
+		"B",
+		"C",
+		"D",
+	}
+
+	if len(state.Persistent.Membership.Current.Voters) !=
+		len(expectedVoters) {
+		t.Fatalf(
+			"expected %d voters, got %d",
+			len(expectedVoters),
+			len(state.Persistent.Membership.Current.Voters),
+		)
+	}
+
+	for _, expectedID := range expectedVoters {
+		if !configurationContainsVoter(
+			state.Persistent.Membership.Current,
+			expectedID,
+		) {
+			t.Fatalf(
+				"expected voter %s in final membership",
+				expectedID,
+			)
+		}
+	}
+
+	if got := newPeer.log.LastIndex(); got < 3 {
+		t.Fatalf(
+			"expected new peer D last index >= 3, got %d",
+			got,
+		)
+	}
+
+	for _, expected := range entries {
+		entry, ok := newPeer.log.Get(expected.Index)
+		if !ok {
+			t.Fatalf(
+				"new peer D missing log entry %d",
+				expected.Index,
+			)
+		}
+
+		if entry.Term != expected.Term {
+			t.Fatalf(
+				"entry %d: expected term %d, got %d",
+				expected.Index,
+				expected.Term,
+				entry.Term,
+			)
+		}
+
+		if string(entry.Data) != string(expected.Data) {
+			t.Fatalf(
+				"entry %d: expected data %q, got %q",
+				expected.Index,
+				expected.Data,
+				entry.Data,
+			)
+		}
+	}
+
+	leader.mu.RLock()
+	matchIndex := leader.state.Leader.MatchIndex["D"]
+	nextIndex := leader.state.Leader.NextIndex["D"]
+	leader.mu.RUnlock()
+
+	if matchIndex < 3 {
+		t.Fatalf(
+			"expected MatchIndex[D] >= 3, got %d",
+			matchIndex,
+		)
+	}
+
+	if nextIndex < 4 {
+		t.Fatalf(
+			"expected NextIndex[D] >= 4, got %d",
+			nextIndex,
+		)
+	}
+}
