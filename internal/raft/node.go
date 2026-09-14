@@ -163,6 +163,13 @@ func (n *RaftNode) becomeFollower(term Term) error {
 	return nil
 }
 
+func (n *RaftNode) stepDownForStorageFailureLocked() {
+	n.state.Role = Follower
+	n.state.LeaderID = ""
+
+	n.metrics.SetRole(Follower)
+}
+
 func (n *RaftNode) becomeLeaderLocked() {
 	n.state.Role = Leader
 	n.state.LeaderID = n.id
@@ -199,7 +206,6 @@ func (n *RaftNode) becomeLeader() {
 		"peer_count", peerCount,
 	)
 }
-
 func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 	n.mu.Lock()
 
@@ -250,6 +256,24 @@ func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 	}
 
 	if err := n.storage.Sync(); err != nil {
+		if errors.Is(err, storage.ErrWALDiskFull) {
+			n.stepDownForStorageFailureLocked()
+
+			n.mu.Unlock()
+
+			n.getLogger().Error(
+				"raft leader stepped down due to WAL disk full",
+				"index", index,
+				"term", entry.Term,
+				"error", err,
+			)
+
+			return 0, fmt.Errorf(
+				"storage disk full: %w",
+				err,
+			)
+		}
+
 		n.mu.Unlock()
 
 		n.getLogger().Error(
