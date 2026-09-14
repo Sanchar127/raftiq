@@ -306,6 +306,14 @@ func main() {
 		peerIDs,
 	)
 
+	if err := node.BootstrapMembership(); err != nil {
+		logger.Error(
+			"failed to bootstrap Raft membership",
+			"error", err,
+		)
+		os.Exit(1)
+	}
+
 	// -------------------------------------------------------------------------
 	// Raft gRPC server.
 	// -------------------------------------------------------------------------

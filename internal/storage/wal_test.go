@@ -113,6 +113,137 @@ func TestWALStoragePersistsAcrossReopen(t *testing.T) {
 	}
 }
 
+func TestWALStoragePersistsMembershipAcrossReopen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq-membership.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("OpenWAL() error = %v", err)
+	}
+
+	state := model.PersistentState{
+		CurrentTerm: 11,
+		VotedFor:    "node-2",
+		Membership: model.Membership{
+			Current: model.Configuration{
+				Voters: []model.NodeID{
+					"node-1",
+					"node-2",
+					"node-3",
+				},
+			},
+		},
+	}
+
+	if err := storage.SaveState(state); err != nil {
+		_ = storage.Close()
+		t.Fatalf("SaveState() error = %v", err)
+	}
+
+	if err := storage.Sync(); err != nil {
+		_ = storage.Close()
+		t.Fatalf("Sync() error = %v", err)
+	}
+
+	if err := storage.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("reopen WAL error = %v", err)
+	}
+	defer reopened.Close()
+
+	got, err := reopened.LoadState()
+	if err != nil {
+		t.Fatalf("LoadState() error = %v", err)
+	}
+
+	if !reflect.DeepEqual(got, state) {
+		t.Fatalf(
+			"LoadState() = %+v, want %+v",
+			got,
+			state,
+		)
+	}
+}
+
+func TestWALStoragePersistsJointMembershipAcrossReopen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq-joint-membership.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("OpenWAL() error = %v", err)
+	}
+
+	state := model.PersistentState{
+		CurrentTerm: 12,
+		VotedFor:    "node-1",
+		Membership: model.Membership{
+			Current: model.Configuration{
+				Voters: []model.NodeID{
+					"node-1",
+					"node-2",
+					"node-3",
+				},
+			},
+			Joint: &model.JointConfiguration{
+				Old: model.Configuration{
+					Voters: []model.NodeID{
+						"node-1",
+						"node-2",
+						"node-3",
+					},
+				},
+				New: model.Configuration{
+					Voters: []model.NodeID{
+						"node-1",
+						"node-2",
+						"node-3",
+						"node-4",
+					},
+				},
+			},
+		},
+	}
+
+	if err := storage.SaveState(state); err != nil {
+		_ = storage.Close()
+		t.Fatalf("SaveState() error = %v", err)
+	}
+
+	if err := storage.Sync(); err != nil {
+		_ = storage.Close()
+		t.Fatalf("Sync() error = %v", err)
+	}
+
+	if err := storage.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("reopen WAL error = %v", err)
+	}
+	defer reopened.Close()
+
+	got, err := reopened.LoadState()
+	if err != nil {
+		t.Fatalf("LoadState() error = %v", err)
+	}
+
+	if !reflect.DeepEqual(got, state) {
+		t.Fatalf(
+			"LoadState() = %+v, want %+v",
+			got,
+			state,
+		)
+	}
+}
+
 func TestWALStorageCreatesFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nested", "raftiq.wal")

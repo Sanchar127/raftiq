@@ -117,6 +117,61 @@ func (n *RaftNode) SetTransport(
 	return nil
 }
 
+func (n *RaftNode) BootstrapMembership() error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	// A persisted membership is authoritative. Never overwrite it
+	// from the current transport topology.
+	if len(n.state.Persistent.Membership.Current.Voters) > 0 ||
+		n.state.Persistent.Membership.Joint != nil {
+		return nil
+	}
+
+	voters := make([]NodeID, 0, len(n.peerIDs)+1)
+	seen := make(map[NodeID]struct{}, len(n.peerIDs)+1)
+
+	addVoter := func(id NodeID) {
+		if id == "" {
+			return
+		}
+
+		if _, exists := seen[id]; exists {
+			return
+		}
+
+		seen[id] = struct{}{}
+		voters = append(voters, id)
+	}
+
+	addVoter(n.id)
+
+	for _, peerID := range n.peerIDs {
+		addVoter(peerID)
+	}
+
+	if len(voters) == 0 {
+		return errors.New("raft membership cannot be bootstrapped without voters")
+	}
+
+	n.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: voters,
+		},
+	}
+
+	if err := n.persistStateLocked(); err != nil {
+		return fmt.Errorf("bootstrap membership: %w", err)
+	}
+
+	n.getLogger().Info(
+		"raft membership bootstrapped",
+		"voters", voters,
+	)
+
+	return nil
+}
+
 func (n *RaftNode) transportSnapshot() (Transport, []NodeID) {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
