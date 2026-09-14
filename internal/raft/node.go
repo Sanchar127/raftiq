@@ -398,6 +398,20 @@ func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 	return index, nil
 }
 
+func (n *RaftNode) ProposeConfiguration(
+	configuration model.Configuration,
+) (LogIndex, error) {
+	data, err := EncodeConfigurationEntry(configuration)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"encode configuration proposal: %w",
+			err,
+		)
+	}
+
+	return n.Propose(data)
+}
+
 func (n *RaftNode) isCandidateLogUpToDate(
 	lastLogIndex LogIndex,
 	lastLogTerm Term,
