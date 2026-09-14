@@ -13,10 +13,8 @@ import (
 
 func TestClientKVOperations(t *testing.T) {
 	nodeA := raft.NewRaftNode("A")
-	nodeB := raft.NewRaftNode("B")
-	nodeC := raft.NewRaftNode("C")
 
-	nodeA.SetPeers([]raft.Peer{nodeB, nodeC})
+	require.NoError(t, nodeA.BootstrapMembership())
 
 	store := kv.NewStore()
 	srv := server.NewServer(nodeA, store)
