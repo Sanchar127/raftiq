@@ -245,7 +245,7 @@ func TestFollowerRecovery(t *testing.T) {
 		)
 	}
 
-	// Verify the recovered node has both the pre-failure and post-failure
+	// The recovered node must have both the pre-failure and post-failure
 	// entries. This proves it retained its durable prefix and caught up with
 	// entries committed while it was offline.
 	cluster.waitForLogEntry(
@@ -380,6 +380,19 @@ func newRecoveryCluster(t *testing.T) *recoveryCluster {
 		); err != nil {
 			t.Fatalf(
 				"set transport for node %s: %v",
+				node.ID(),
+				err,
+			)
+		}
+	}
+
+	// Bootstrap the initial three-node voter configuration. Membership is
+	// consensus state, while SetTransport above only configures communication
+	// topology.
+	for _, node := range nodes {
+		if err := node.BootstrapMembership(); err != nil {
+			t.Fatalf(
+				"bootstrap membership for node %s: %v",
 				node.ID(),
 				err,
 			)
