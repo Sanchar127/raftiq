@@ -216,6 +216,10 @@ func TestHashWorkerSelectorReturnsConfiguredWorker(t *testing.T) {
 
 func TestSchedulerSchedulesDueJob(t *testing.T) {
 	node := raft.NewRaftNode("A")
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("BootstrapMembership() error = %v", err)
+	}
+
 	store := kv.NewStore()
 	applier := kv.NewApplier(store)
 
@@ -297,6 +301,10 @@ func TestSchedulerSchedulesDueJob(t *testing.T) {
 
 func TestSchedulerIgnoresFutureJob(t *testing.T) {
 	node := raft.NewRaftNode("A")
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("BootstrapMembership() error = %v", err)
+	}
+
 	store := kv.NewStore()
 	applier := kv.NewApplier(store)
 
@@ -461,6 +469,10 @@ func TestSchedulerRunStopsOnCancellation(t *testing.T) {
 
 func TestSchedulerHandlesClaimConflict(t *testing.T) {
 	node := raft.NewRaftNode("A")
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("BootstrapMembership() error = %v", err)
+	}
+
 	store := kv.NewStore()
 	applier := kv.NewApplier(store)
 
@@ -550,6 +562,10 @@ func TestSchedulerHandlesClaimConflict(t *testing.T) {
 
 func TestSchedulerReclaimsExpiredScheduledJob(t *testing.T) {
 	node := raft.NewRaftNode("A")
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("BootstrapMembership() error = %v", err)
+	}
+
 	store := kv.NewStore()
 	applier := kv.NewApplier(store)
 
@@ -649,6 +665,10 @@ func TestSchedulerReclaimsExpiredScheduledJob(t *testing.T) {
 
 func TestSchedulerReclaimsExpiredRunningJob(t *testing.T) {
 	node := raft.NewRaftNode("A")
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("BootstrapMembership() error = %v", err)
+	}
+
 	store := kv.NewStore()
 	applier := kv.NewApplier(store)
 
@@ -684,8 +704,6 @@ func TestSchedulerReclaimsExpiredRunningJob(t *testing.T) {
 		t.Fatalf("CreateJob() error = %v", err)
 	}
 
-	// Claim with a lease that is still valid at `now` so the
-	// transition to Running can succeed.
 	expiresAt := now + time.Minute.Nanoseconds()
 
 	claimed, err := store.ClaimJob(
@@ -722,7 +740,6 @@ func TestSchedulerReclaimsExpiredRunningJob(t *testing.T) {
 
 	waitForSchedulerLeader(t, node)
 
-	// Reclaim at a moment after the lease has expired.
 	reclaimAt := expiresAt + 1
 
 	if err := scheduler.reclaimExpiredJobs(ctx, reclaimAt); err != nil {
@@ -759,6 +776,10 @@ func TestSchedulerReclaimsExpiredRunningJob(t *testing.T) {
 
 func TestSchedulerDoesNotReclaimUnexpiredJob(t *testing.T) {
 	node := raft.NewRaftNode("A")
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("BootstrapMembership() error = %v", err)
+	}
+
 	store := kv.NewStore()
 	applier := kv.NewApplier(store)
 
@@ -844,6 +865,10 @@ func TestSchedulerDoesNotReclaimUnexpiredJob(t *testing.T) {
 
 func TestSchedulerReclaimedJobGetsNewFencingToken(t *testing.T) {
 	node := raft.NewRaftNode("A")
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("BootstrapMembership() error = %v", err)
+	}
+
 	store := kv.NewStore()
 	applier := kv.NewApplier(store)
 
@@ -954,6 +979,10 @@ func TestSchedulerReclaimedJobGetsNewFencingToken(t *testing.T) {
 
 func TestSchedulerStaleReclaimCannotRemoveNewClaim(t *testing.T) {
 	node := raft.NewRaftNode("A")
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("BootstrapMembership() error = %v", err)
+	}
+
 	store := kv.NewStore()
 	applier := kv.NewApplier(store)
 
