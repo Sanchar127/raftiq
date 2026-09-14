@@ -164,6 +164,13 @@ func TestBecomeFollower(t *testing.T) {
 func TestRequestVoteGrantsVote(t *testing.T) {
 	node := NewRaftNode("node-1")
 
+	node.mu.Lock()
+	node.state.Persistent.Membership.Current.Voters = []NodeID{
+		"node-1",
+		"node-2",
+	}
+	node.mu.Unlock()
+
 	reply := node.RequestVote(RequestVoteArgs{
 		Term:         1,
 		CandidateID:  "node-2",
@@ -182,6 +189,14 @@ func TestRequestVoteGrantsVote(t *testing.T) {
 
 func TestRequestVoteRejectsSecondCandidate(t *testing.T) {
 	node := NewRaftNode("node-1")
+
+	node.mu.Lock()
+	node.state.Persistent.Membership.Current.Voters = []NodeID{
+		"node-1",
+		"node-2",
+		"node-3",
+	}
+	node.mu.Unlock()
 
 	first := node.RequestVote(RequestVoteArgs{
 		Term:        1,
@@ -205,6 +220,10 @@ func TestRequestVoteRejectsSecondCandidate(t *testing.T) {
 func TestRequestVoteRejectsOlderTerm(t *testing.T) {
 	node := NewRaftNode("node-1")
 
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
 	_, err := node.startElection()
 	if err != nil {
 		t.Fatalf("start election: %v", err)
@@ -226,6 +245,17 @@ func TestRequestVoteRejectsOlderTerm(t *testing.T) {
 
 func TestRequestVoteUpdatesHigherTerm(t *testing.T) {
 	node := NewRaftNode("node-1")
+
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
+	node.mu.Lock()
+	node.state.Persistent.Membership.Current.Voters = []NodeID{
+		"node-1",
+		"node-2",
+	}
+	node.mu.Unlock()
 
 	_, err := node.startElection()
 	if err != nil {
@@ -251,7 +281,10 @@ func TestRequestVoteUpdatesHigherTerm(t *testing.T) {
 	}
 
 	if state.Role != Follower {
-		t.Fatalf("expected follower role, got %v", state.Role)
+		t.Fatalf(
+			"expected follower role, got %v",
+			state.Role,
+		)
 	}
 }
 
@@ -722,6 +755,13 @@ func TestRequestVoteResetsElectionTimer(t *testing.T) {
 	node := NewRaftNode("A")
 	node.SetElectionTimeout(10)
 
+	node.mu.Lock()
+	node.state.Persistent.Membership.Current.Voters = []NodeID{
+		"A",
+		"B",
+	}
+	node.mu.Unlock()
+
 	node.Tick()
 	node.Tick()
 
@@ -749,7 +789,10 @@ func TestRequestVoteResetsElectionTimer(t *testing.T) {
 	node.mu.RUnlock()
 
 	if elapsedAfter != 0 {
-		t.Fatalf("expected election timer to reset to 0, got %d", elapsedAfter)
+		t.Fatalf(
+			"expected election timer to reset to 0, got %d",
+			elapsedAfter,
+		)
 	}
 }
 
@@ -1411,6 +1454,14 @@ func TestRequestVoteHigherTermPersistsAcrossRestart(t *testing.T) {
 	node.mu.Lock()
 	node.state.Persistent.CurrentTerm = 2
 	node.state.Persistent.VotedFor = "old-candidate"
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{
+				"node-1",
+				"node-2",
+			},
+		},
+	}
 
 	if err := node.persistStateLocked(); err != nil {
 		node.mu.Unlock()
@@ -1451,8 +1502,14 @@ func TestRequestVoteHigherTermPersistsAcrossRestart(t *testing.T) {
 	if state.Role != Follower {
 		t.Fatalf("expected restored node to be follower, got %v", state.Role)
 	}
-}
 
+	if !membershipIsVoter(
+		state.Persistent.Membership,
+		"node-2",
+	) {
+		t.Fatal("expected node-2 to remain a voter after restart")
+	}
+}
 func TestAppendEntriesHigherTermPersistsAcrossRestart(t *testing.T) {
 	store := storage.NewMemoryStorage()
 
@@ -3154,4 +3211,35 @@ func TestProposeDiskFullStepsDownLeader(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected proposal to be rejected after step-down")
 	}
+}
+func TestStartElectionRejectsNonVoter(t *testing.T) {
+	store := storage.NewMemoryStorage()
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	require.NoError(t, err)
+
+	node.mu.Lock()
+	node.state.Persistent.CurrentTerm = 7
+	node.state.Persistent.VotedFor = ""
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{
+				"node-2",
+				"node-3",
+			},
+		},
+	}
+	node.mu.Unlock()
+
+	term, err := node.startElection()
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not a voter")
+	require.Equal(t, Term(7), term)
+
+	state := node.State()
+
+	require.Equal(t, Follower, state.Role)
+	require.Equal(t, Term(7), state.Persistent.CurrentTerm)
+	require.Empty(t, state.Persistent.VotedFor)
 }

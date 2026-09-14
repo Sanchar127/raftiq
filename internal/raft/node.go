@@ -398,116 +398,6 @@ func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 	return index, nil
 }
 
-func (n *RaftNode) RequestVote(args RequestVoteArgs) (reply RequestVoteReply) {
-	logger := n.getLogger()
-
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	defer func() {
-		n.metrics.IncVoteRequests()
-
-		if reply.VoteGranted {
-			n.metrics.IncVotesGranted()
-		}
-	}()
-
-	reply = RequestVoteReply{
-		Term:    n.state.Persistent.CurrentTerm,
-		VoterID: n.id,
-	}
-
-	if args.Term < n.state.Persistent.CurrentTerm {
-		logger.Debug(
-			"vote denied",
-			"candidate_id", args.CandidateID,
-			"request_term", args.Term,
-			"current_term", n.state.Persistent.CurrentTerm,
-			"reason", "stale_term",
-		)
-
-		return reply
-	}
-
-	if args.Term > n.state.Persistent.CurrentTerm {
-		n.state.Persistent.CurrentTerm = args.Term
-		n.state.Role = Follower
-		n.state.Persistent.VotedFor = ""
-		n.state.LeaderID = ""
-
-		if err := n.persistStateLocked(); err != nil {
-			reply.Term = n.state.Persistent.CurrentTerm
-
-			logger.Error(
-				"failed to persist higher-term vote state",
-				"candidate_id", args.CandidateID,
-				"term", args.Term,
-				"error", err,
-			)
-
-			return reply
-		}
-		n.updateStateMetricsLocked()
-	}
-
-	reply.Term = n.state.Persistent.CurrentTerm
-
-	if n.state.Persistent.VotedFor != "" &&
-		n.state.Persistent.VotedFor != args.CandidateID {
-		logger.Debug(
-			"vote denied",
-			"candidate_id", args.CandidateID,
-			"term", reply.Term,
-			"reason", "already_voted",
-		)
-
-		return reply
-	}
-
-	if !n.isCandidateLogUpToDate(
-		args.LastLogIndex,
-		args.LastLogTerm,
-	) {
-		logger.Debug(
-			"vote denied",
-			"candidate_id", args.CandidateID,
-			"term", reply.Term,
-			"reason", "candidate_log_outdated",
-			"candidate_last_log_index", args.LastLogIndex,
-			"candidate_last_log_term", args.LastLogTerm,
-		)
-
-		return reply
-	}
-
-	n.state.Persistent.VotedFor = args.CandidateID
-
-	if err := n.persistStateLocked(); err != nil {
-		reply.Term = n.state.Persistent.CurrentTerm
-
-		logger.Error(
-			"failed to persist granted vote",
-			"candidate_id", args.CandidateID,
-			"term", reply.Term,
-			"error", err,
-		)
-
-		return reply
-	}
-
-	reply.Term = n.state.Persistent.CurrentTerm
-	reply.VoteGranted = true
-	n.electionElapsed = 0
-
-	logger.Debug(
-		"vote granted",
-		"candidate_id", args.CandidateID,
-		"term", reply.Term,
-	)
-
-	return reply
-}
-
 func (n *RaftNode) isCandidateLogUpToDate(
 	lastLogIndex LogIndex,
 	lastLogTerm Term,
@@ -616,6 +506,34 @@ func (n *RaftNode) startElection() (Term, error) {
 
 	n.mu.Lock()
 
+	// A node that is not part of the active voting configuration
+	// must never start an election.
+	if !membershipIsVoter(
+		n.state.Persistent.Membership,
+		n.id,
+	) {
+		term := n.state.Persistent.CurrentTerm
+
+		n.mu.Unlock()
+
+		err := fmt.Errorf(
+			"election rejected: node %s is not a voter",
+			n.id,
+		)
+
+		logger.Warn(
+			"raft election rejected",
+			"node_id", n.id,
+			"term", term,
+			"reason", "non_voter",
+			"error", err,
+		)
+
+		return term, err
+	}
+
+	// Do not modify persistent election state when storage is
+	// known to be unhealthy.
 	if n.storageWriteBlocked {
 		term := n.state.Persistent.CurrentTerm
 
@@ -635,16 +553,15 @@ func (n *RaftNode) startElection() (Term, error) {
 		return term, err
 	}
 
+	// Become a candidate and start a new election term.
 	n.state.Role = Candidate
 	n.state.Persistent.CurrentTerm++
 	n.state.Persistent.VotedFor = n.id
 	n.state.LeaderID = ""
 
-	// The election timeout has now been consumed by the election
-	// attempt. A failed PreVote is handled separately and resets
-	// the timer before another attempt.
 	n.electionElapsed = 0
 
+	// A candidate votes for itself.
 	n.state.Election.VotesReceived = map[NodeID]struct{}{
 		n.id: {},
 	}
@@ -652,6 +569,7 @@ func (n *RaftNode) startElection() (Term, error) {
 	n.electionStartedAt = time.Now()
 	n.metrics.IncElections()
 
+	// Persist the new term and self-vote before sending RequestVote RPCs.
 	if err := n.persistStateLocked(); err != nil {
 		n.finishElectionLocked("failed")
 
@@ -660,7 +578,7 @@ func (n *RaftNode) startElection() (Term, error) {
 		n.mu.Unlock()
 
 		logger.Error(
-			"failed to persist election state",
+			"raft election failed to persist state",
 			"term", term,
 			"error", err,
 		)
@@ -686,6 +604,23 @@ func (n *RaftNode) startElection() (Term, error) {
 
 func (n *RaftNode) requestVotes() {
 	n.mu.RLock()
+
+	// Only an eligible voter can participate as an election candidate.
+	if n.state.Role != Candidate ||
+		!membershipIsVoter(
+			n.state.Persistent.Membership,
+			n.id,
+		) {
+		n.mu.RUnlock()
+
+		n.getLogger().Debug(
+			"raft vote requests skipped",
+			"node_id", n.id,
+			"reason", "not_eligible_candidate",
+		)
+
+		return
+	}
 
 	term := n.state.Persistent.CurrentTerm
 	lastLogIndex := n.log.LastIndex()
@@ -737,6 +672,145 @@ func (n *RaftNode) requestVotes() {
 
 		n.handleVoteReply(term, reply)
 	}
+}
+
+func (n *RaftNode) RequestVote(
+	args RequestVoteArgs,
+) (reply RequestVoteReply) {
+	logger := n.getLogger()
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	defer func() {
+		n.metrics.IncVoteRequests()
+
+		if reply.VoteGranted {
+			n.metrics.IncVotesGranted()
+		}
+	}()
+
+	reply = RequestVoteReply{
+		Term:    n.state.Persistent.CurrentTerm,
+		VoterID: n.id,
+	}
+
+	// Reject requests from an older term.
+	if args.Term < n.state.Persistent.CurrentTerm {
+		logger.Debug(
+			"vote denied",
+			"candidate_id", args.CandidateID,
+			"request_term", args.Term,
+			"current_term", n.state.Persistent.CurrentTerm,
+			"reason", "stale_term",
+		)
+
+		return reply
+	}
+
+	// A higher-term request advances our term and makes us a follower.
+	if args.Term > n.state.Persistent.CurrentTerm {
+		n.state.Persistent.CurrentTerm = args.Term
+		n.state.Role = Follower
+		n.state.Persistent.VotedFor = ""
+		n.state.LeaderID = ""
+
+		if err := n.persistStateLocked(); err != nil {
+			reply.Term = n.state.Persistent.CurrentTerm
+
+			logger.Error(
+				"failed to persist higher-term vote state",
+				"candidate_id", args.CandidateID,
+				"term", args.Term,
+				"error", err,
+			)
+
+			return reply
+		}
+
+		n.updateStateMetricsLocked()
+	}
+
+	reply.Term = n.state.Persistent.CurrentTerm
+
+	// Only nodes in the active voting configuration can
+	// participate as election candidates.
+	if !membershipIsVoter(
+		n.state.Persistent.Membership,
+		args.CandidateID,
+	) {
+		logger.Debug(
+			"vote denied",
+			"candidate_id", args.CandidateID,
+			"request_term", args.Term,
+			"current_term", n.state.Persistent.CurrentTerm,
+			"reason", "candidate_not_voter",
+		)
+
+		return reply
+	}
+
+	// We can vote only once per term, unless we already voted
+	// for this same candidate.
+	if n.state.Persistent.VotedFor != "" &&
+		n.state.Persistent.VotedFor != args.CandidateID {
+		logger.Debug(
+			"vote denied",
+			"candidate_id", args.CandidateID,
+			"request_term", args.Term,
+			"current_term", n.state.Persistent.CurrentTerm,
+			"reason", "already_voted",
+			"voted_for", n.state.Persistent.VotedFor,
+		)
+
+		return reply
+	}
+
+	// Candidate's log must be at least as up-to-date as ours.
+	if !n.isCandidateLogUpToDate(
+		args.LastLogIndex,
+		args.LastLogTerm,
+	) {
+		logger.Debug(
+			"vote denied",
+			"candidate_id", args.CandidateID,
+			"request_term", args.Term,
+			"current_term", n.state.Persistent.CurrentTerm,
+			"reason", "candidate_log_outdated",
+			"last_log_index", args.LastLogIndex,
+			"last_log_term", args.LastLogTerm,
+		)
+
+		return reply
+	}
+
+	n.state.Persistent.VotedFor = args.CandidateID
+
+	if err := n.persistStateLocked(); err != nil {
+		reply.Term = n.state.Persistent.CurrentTerm
+
+		logger.Error(
+			"failed to persist vote",
+			"candidate_id", args.CandidateID,
+			"term", n.state.Persistent.CurrentTerm,
+			"error", err,
+		)
+
+		return reply
+	}
+
+	reply.Term = n.state.Persistent.CurrentTerm
+	reply.VoteGranted = true
+
+	n.electionElapsed = 0
+
+	logger.Debug(
+		"vote granted",
+		"candidate_id", args.CandidateID,
+		"term", n.state.Persistent.CurrentTerm,
+	)
+
+	return reply
 }
 
 func (n *RaftNode) handleVoteReply(

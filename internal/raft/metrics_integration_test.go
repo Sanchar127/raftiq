@@ -15,6 +15,16 @@ func TestRequestVoteMetrics(t *testing.T) {
 	metrics := observability.NewMetrics(registry, "test-node")
 
 	node := raft.NewRaftNode("node-1")
+
+	peer := raft.NewRaftNode("node-2")
+	node.SetPeers([]raft.Peer{
+		peer,
+	})
+
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
 	node.SetMetrics(observability.NewRaftMetrics("node-1", metrics))
 
 	reply := node.RequestVote(raft.RequestVoteArgs{
@@ -62,6 +72,19 @@ func TestRequestVoteMetricsRejectedVote(t *testing.T) {
 	metrics := observability.NewMetrics(registry, "test-node")
 
 	node := raft.NewRaftNode("node-1")
+
+	peer2 := raft.NewRaftNode("node-2")
+	peer3 := raft.NewRaftNode("node-3")
+
+	node.SetPeers([]raft.Peer{
+		peer2,
+		peer3,
+	})
+
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
 	node.SetMetrics(observability.NewRaftMetrics("node-1", metrics))
 
 	first := node.RequestVote(raft.RequestVoteArgs{

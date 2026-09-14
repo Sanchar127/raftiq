@@ -47,3 +47,40 @@ func membershipHasQuorum(
 		votes,
 	)
 }
+func membershipIsVoter(
+	membership model.Membership,
+	nodeID NodeID,
+) bool {
+	if nodeID == "" {
+		return false
+	}
+
+	if membership.Joint != nil {
+		return configurationContainsVoter(
+			membership.Joint.Old,
+			nodeID,
+		) ||
+			configurationContainsVoter(
+				membership.Joint.New,
+				nodeID,
+			)
+	}
+
+	return configurationContainsVoter(
+		membership.Current,
+		nodeID,
+	)
+}
+
+func configurationContainsVoter(
+	configuration model.Configuration,
+	nodeID NodeID,
+) bool {
+	for _, voterID := range configuration.Voters {
+		if voterID == nodeID {
+			return true
+		}
+	}
+
+	return false
+}
