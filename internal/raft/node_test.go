@@ -3800,3 +3800,43 @@ func TestJointConfigurationTransition(t *testing.T) {
 		)
 	}
 }
+
+func TestInitializeReplicationStateLocked(t *testing.T) {
+	node := NewRaftNode("A")
+
+	if err := node.Log().Append(LogEntry{
+		Index: 1,
+		Term:  1,
+		Data:  []byte("one"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := node.Log().Append(LogEntry{
+		Index: 2,
+		Term:  1,
+		Data:  []byte("two"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	node.mu.Lock()
+	node.initializeReplicationStateLocked("D")
+	node.mu.Unlock()
+
+	state := node.State()
+
+	if state.Leader.NextIndex["D"] != 3 {
+		t.Fatalf(
+			"expected D NextIndex=3, got %d",
+			state.Leader.NextIndex["D"],
+		)
+	}
+
+	if state.Leader.MatchIndex["D"] != 0 {
+		t.Fatalf(
+			"expected D MatchIndex=0, got %d",
+			state.Leader.MatchIndex["D"],
+		)
+	}
+}

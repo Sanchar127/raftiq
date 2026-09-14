@@ -231,6 +231,15 @@ func (n *RaftNode) stepDownForStorageFailureLocked() {
 	n.metrics.SetRole(Follower)
 }
 
+func (n *RaftNode) initializeReplicationStateLocked(
+	peerID NodeID,
+) {
+	nextIndex := n.log.LastIndex() + 1
+
+	n.state.Leader.NextIndex[peerID] = nextIndex
+	n.state.Leader.MatchIndex[peerID] = 0
+}
+
 func (n *RaftNode) becomeLeaderLocked() {
 	n.state.Role = Leader
 	n.state.LeaderID = n.id
@@ -241,11 +250,8 @@ func (n *RaftNode) becomeLeaderLocked() {
 	n.metrics.IncLeaderChanges()
 	n.updateStateMetricsLocked()
 
-	nextIndex := n.log.LastIndex() + 1
-
 	for _, peerID := range n.peerIDs {
-		n.state.Leader.NextIndex[peerID] = nextIndex
-		n.state.Leader.MatchIndex[peerID] = 0
+		n.initializeReplicationStateLocked(peerID)
 	}
 }
 
