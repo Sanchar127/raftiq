@@ -10,9 +10,11 @@ import (
 )
 
 const (
-	configurationEntryMagic   uint32 = 0x52434647 // "RCFG"
-	configurationEntryVersion byte   = 1
-	configurationEntryType    byte   = 1
+	configurationEntryMagic          uint32 = 0x52434647 // "RCFG"
+	configurationEntryVersion        byte   = 1
+	configurationEntryTypeStable     byte   = 1
+	configurationEntryTypeEnterJoint byte   = 2
+	configurationEntryTypeLeaveJoint byte   = 3
 
 	configurationEntryHeaderSize = 4 + 1 + 1 + 4
 
@@ -21,16 +23,28 @@ const (
 	maxConfigurationPayload = 1 << 20
 )
 
+type configurationEntry struct {
+	EntryType byte
+	Old       model.Configuration
+	New       model.Configuration
+}
+
 // EncodeConfigurationEntry encodes a stable Raft voter configuration
 // into a dedicated Raft configuration-entry envelope.
-func EncodeConfigurationEntry(configuration model.Configuration) ([]byte, error) {
+func EncodeConfigurationEntry(
+	configuration model.Configuration,
+) ([]byte, error) {
 	if err := validateConfiguration(configuration); err != nil {
 		return nil, err
 	}
 
 	var buf bytes.Buffer
 
-	if err := binary.Write(&buf, binary.BigEndian, configurationEntryMagic); err != nil {
+	if err := binary.Write(
+		&buf,
+		binary.BigEndian,
+		configurationEntryMagic,
+	); err != nil {
 		return nil, fmt.Errorf("encode configuration magic: %w", err)
 	}
 
@@ -38,36 +52,18 @@ func EncodeConfigurationEntry(configuration model.Configuration) ([]byte, error)
 		return nil, fmt.Errorf("encode configuration version: %w", err)
 	}
 
-	if err := buf.WriteByte(configurationEntryType); err != nil {
+	if err := buf.WriteByte(configurationEntryTypeStable); err != nil {
 		return nil, fmt.Errorf("encode configuration entry type: %w", err)
 	}
 
-	if err := binary.Write(
-		&buf,
-		binary.BigEndian,
-		uint32(len(configuration.Voters)),
-	); err != nil {
-		return nil, fmt.Errorf("encode voter count: %w", err)
-	}
-
-	for _, voterID := range configuration.Voters {
-		id := []byte(voterID)
-
-		if err := binary.Write(
-			&buf,
-			binary.BigEndian,
-			uint32(len(id)),
-		); err != nil {
-			return nil, fmt.Errorf("encode voter ID length: %w", err)
-		}
-
-		if _, err := buf.Write(id); err != nil {
-			return nil, fmt.Errorf("encode voter ID: %w", err)
-		}
+	if err := encodeConfigurationPayload(&buf, configuration); err != nil {
+		return nil, err
 	}
 
 	if buf.Len() > maxConfigurationPayload {
-		return nil, errors.New("configuration entry exceeds maximum payload size")
+		return nil, errors.New(
+			"configuration entry exceeds maximum payload size",
+		)
 	}
 
 	return buf.Bytes(), nil
@@ -126,7 +122,7 @@ func DecodeConfigurationEntry(data []byte) (model.Configuration, error) {
 		)
 	}
 
-	if entryType != configurationEntryType {
+	if entryType != configurationEntryTypeStable {
 		return model.Configuration{}, fmt.Errorf(
 			"unexpected configuration entry type: %d",
 			entryType,
@@ -274,6 +270,123 @@ func validateConfiguration(configuration model.Configuration) error {
 		}
 
 		seen[voterID] = struct{}{}
+	}
+
+	return nil
+}
+func EncodeEnterJointConfigurationEntry(
+	oldConfiguration model.Configuration,
+	newConfiguration model.Configuration,
+) ([]byte, error) {
+	if err := validateConfiguration(oldConfiguration); err != nil {
+		return nil, fmt.Errorf("validate old configuration: %w", err)
+	}
+
+	if err := validateConfiguration(newConfiguration); err != nil {
+		return nil, fmt.Errorf("validate new configuration: %w", err)
+	}
+
+	var buf bytes.Buffer
+
+	if err := binary.Write(
+		&buf,
+		binary.BigEndian,
+		configurationEntryMagic,
+	); err != nil {
+		return nil, fmt.Errorf("encode configuration magic: %w", err)
+	}
+
+	if err := buf.WriteByte(configurationEntryVersion); err != nil {
+		return nil, fmt.Errorf("encode configuration version: %w", err)
+	}
+
+	if err := buf.WriteByte(configurationEntryTypeEnterJoint); err != nil {
+		return nil, fmt.Errorf("encode configuration entry type: %w", err)
+	}
+
+	if err := encodeConfigurationPayload(&buf, oldConfiguration); err != nil {
+		return nil, fmt.Errorf("encode old configuration: %w", err)
+	}
+
+	if err := encodeConfigurationPayload(&buf, newConfiguration); err != nil {
+		return nil, fmt.Errorf("encode new configuration: %w", err)
+	}
+
+	if buf.Len() > maxConfigurationPayload {
+		return nil, errors.New(
+			"joint configuration entry exceeds maximum payload size",
+		)
+	}
+
+	return buf.Bytes(), nil
+}
+func EncodeLeaveJointConfigurationEntry(
+	newConfiguration model.Configuration,
+) ([]byte, error) {
+	if err := validateConfiguration(newConfiguration); err != nil {
+		return nil, fmt.Errorf(
+			"validate new configuration: %w",
+			err,
+		)
+	}
+
+	var buf bytes.Buffer
+
+	if err := binary.Write(
+		&buf,
+		binary.BigEndian,
+		configurationEntryMagic,
+	); err != nil {
+		return nil, fmt.Errorf("encode configuration magic: %w", err)
+	}
+
+	if err := buf.WriteByte(configurationEntryVersion); err != nil {
+		return nil, fmt.Errorf("encode configuration version: %w", err)
+	}
+
+	if err := buf.WriteByte(configurationEntryTypeLeaveJoint); err != nil {
+		return nil, fmt.Errorf("encode configuration entry type: %w", err)
+	}
+
+	if err := encodeConfigurationPayload(&buf, newConfiguration); err != nil {
+		return nil, fmt.Errorf("encode new configuration: %w", err)
+	}
+
+	if buf.Len() > maxConfigurationPayload {
+		return nil, errors.New(
+			"leave-joint configuration entry exceeds maximum payload size",
+		)
+	}
+
+	return buf.Bytes(), nil
+}
+
+func encodeConfigurationPayload(
+	buf *bytes.Buffer,
+	configuration model.Configuration,
+) error {
+	if err := binary.Write(
+		buf,
+		binary.BigEndian,
+		uint32(len(configuration.Voters)),
+	); err != nil {
+		return fmt.Errorf("encode voter count: %w", err)
+	}
+
+	for _, voterID := range configuration.Voters {
+		id := []byte(voterID)
+
+		if err := binary.Write(
+			buf,
+			binary.BigEndian,
+			uint32(len(id)),
+		); err != nil {
+			return fmt.Errorf("encode voter ID length: %w", err)
+		}
+
+		if _, err := buf.Write(id); err != nil {
+			return fmt.Errorf("encode voter ID: %w", err)
+		}
 	}
 
 	return nil
