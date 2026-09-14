@@ -343,6 +343,10 @@ func TestCandidateBecomesLeaderAfterMajority(t *testing.T) {
 		NewRaftNode("C"),
 	})
 
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
 	_, err := node.startElection()
 	if err != nil {
 		t.Fatalf("start election: %v", err)
@@ -377,6 +381,10 @@ func TestThreeNodeElection(t *testing.T) {
 	nodeC := NewRaftNode("C")
 
 	nodeA.SetPeers([]Peer{nodeB, nodeC})
+
+	if err := nodeA.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
 
 	nodeA.runElection()
 
@@ -667,6 +675,10 @@ func TestElectionTimeoutStartsElection(t *testing.T) {
 		[]NodeID{"B", "C"},
 	); err != nil {
 		t.Fatalf("set transport: %v", err)
+	}
+
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
 	}
 
 	if node.Tick() {
@@ -2036,6 +2048,8 @@ func TestRaftNodeStartDrivesElection(t *testing.T) {
 	node := NewRaftNode("node-1")
 
 	node.SetElectionTimeout(3)
+
+	require.NoError(t, node.BootstrapMembership())
 
 	require.NoError(t, node.Start())
 	defer node.Stop()

@@ -118,13 +118,15 @@ func (n *RaftNode) SetTransport(
 }
 
 func (n *RaftNode) BootstrapMembership() error {
+	logger := n.getLogger()
+
 	n.mu.Lock()
-	defer n.mu.Unlock()
 
 	// A persisted membership is authoritative. Never overwrite it
 	// from the current transport topology.
 	if len(n.state.Persistent.Membership.Current.Voters) > 0 ||
 		n.state.Persistent.Membership.Joint != nil {
+		n.mu.Unlock()
 		return nil
 	}
 
@@ -135,22 +137,20 @@ func (n *RaftNode) BootstrapMembership() error {
 		if id == "" {
 			return
 		}
-
 		if _, exists := seen[id]; exists {
 			return
 		}
-
 		seen[id] = struct{}{}
 		voters = append(voters, id)
 	}
 
 	addVoter(n.id)
-
 	for _, peerID := range n.peerIDs {
 		addVoter(peerID)
 	}
 
 	if len(voters) == 0 {
+		n.mu.Unlock()
 		return errors.New("raft membership cannot be bootstrapped without voters")
 	}
 
@@ -161,10 +161,13 @@ func (n *RaftNode) BootstrapMembership() error {
 	}
 
 	if err := n.persistStateLocked(); err != nil {
+		n.mu.Unlock()
 		return fmt.Errorf("bootstrap membership: %w", err)
 	}
 
-	n.getLogger().Info(
+	n.mu.Unlock()
+
+	logger.Info(
 		"raft membership bootstrapped",
 		"voters", voters,
 	)
@@ -879,14 +882,16 @@ func (n *RaftNode) runPreVote() bool {
 	candidateID := n.id
 	transport := n.transport
 	peerIDs := append([]NodeID(nil), n.peerIDs...)
+	membership := n.state.Persistent.Membership
 
 	n.mu.RUnlock()
 
-	// A single-node cluster already has a majority.
-	votes := 1
-	requiredVotes := majority(len(peerIDs) + 1)
+	votes := map[NodeID]struct{}{
+		candidateID: {},
+	}
 
-	if votes >= requiredVotes {
+	// A single-node/current-membership quorum may already be satisfied.
+	if membershipHasQuorum(membership, votes) {
 		return true
 	}
 
@@ -934,14 +939,13 @@ func (n *RaftNode) runPreVote() bool {
 			continue
 		}
 
-		votes++
+		votes[peerID] = struct{}{}
 
-		if votes >= requiredVotes {
+		if membershipHasQuorum(membership, votes) {
 			n.getLogger().Debug(
 				"raft prevote won",
 				"term", term,
-				"votes", votes,
-				"required_votes", requiredVotes,
+				"votes", len(votes),
 			)
 
 			return true
@@ -951,13 +955,11 @@ func (n *RaftNode) runPreVote() bool {
 	n.getLogger().Debug(
 		"raft prevote lost",
 		"term", term,
-		"votes", votes,
-		"required_votes", requiredVotes,
+		"votes", len(votes),
 	)
 
 	return false
 }
-
 func (n *RaftNode) Tick() bool {
 	electionDue, heartbeatDue := n.tick()
 
