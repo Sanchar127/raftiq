@@ -994,6 +994,19 @@ func (n *RaftNode) runPreVote() bool {
 
 	n.mu.RUnlock()
 
+	// Only a node in the active voting configuration
+	// can participate as an election candidate.
+	if !membershipIsVoter(membership, candidateID) {
+		n.getLogger().Debug(
+			"raft prevote skipped",
+			"node_id", candidateID,
+			"term", term,
+			"reason", "candidate_not_voter",
+		)
+
+		return false
+	}
+
 	votes := map[NodeID]struct{}{
 		candidateID: {},
 	}
@@ -2688,6 +2701,15 @@ func (n *RaftNode) PreVote(args PreVoteArgs) PreVoteReply {
 		return reply
 	}
 
+	// Only candidates in the active voting configuration
+	// can participate in pre-voting.
+	if !membershipIsVoter(
+		n.state.Persistent.Membership,
+		args.CandidateID,
+	) {
+		return reply
+	}
+
 	// A PreVote never changes persistent term/vote state.
 	if args.Term < n.state.Persistent.CurrentTerm {
 		return reply
@@ -2695,15 +2717,6 @@ func (n *RaftNode) PreVote(args PreVoteArgs) PreVoteReply {
 
 	// If we recently heard from a valid leader, do not allow an
 	// isolated/stale candidate to start another election.
-	//
-	// electionElapsed is deliberately not reset by tick() when the
-	// timeout is reached. This allows the voter to distinguish:
-	//
-	//   electionElapsed < electionTimeout
-	//       -> leader contact is still recent
-	//
-	//   electionElapsed >= electionTimeout
-	//       -> leader contact has expired
 	if n.state.LeaderID != "" &&
 		n.electionElapsed < n.electionTimeout {
 		return reply

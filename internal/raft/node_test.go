@@ -2666,6 +2666,17 @@ func (t *blockingTransport) InstallSnapshot(
 func TestPreVoteGrantsVoteForUpToDateCandidate(t *testing.T) {
 	node := NewRaftNode("node-1")
 
+	node.mu.Lock()
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{
+				"node-1",
+				"node-2",
+			},
+		},
+	}
+	node.mu.Unlock()
+
 	reply := node.PreVote(PreVoteArgs{
 		Term:         1,
 		CandidateID:  "node-2",
@@ -2689,6 +2700,17 @@ func TestPreVoteGrantsVoteForUpToDateCandidate(t *testing.T) {
 func TestPreVoteRejectsOlderTerm(t *testing.T) {
 	node := NewRaftNode("node-1")
 
+	node.mu.Lock()
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{
+				"node-1",
+				"node-2",
+			},
+		},
+	}
+	node.mu.Unlock()
+
 	_, err := node.startElection()
 	if err != nil {
 		t.Fatalf("start election: %v", err)
@@ -2708,8 +2730,76 @@ func TestPreVoteRejectsOlderTerm(t *testing.T) {
 	}
 }
 
+func TestPreVoteRejectsNonVoter(t *testing.T) {
+	node := NewRaftNode("node-1")
+
+	node.mu.Lock()
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{
+				"node-1",
+				"node-2",
+			},
+		},
+	}
+	node.mu.Unlock()
+
+	reply := node.PreVote(PreVoteArgs{
+		Term:         1,
+		CandidateID:  "node-3",
+		LastLogIndex: 0,
+		LastLogTerm:  0,
+	})
+
+	if reply.VoteGranted {
+		t.Fatal("expected PreVote from non-voter to be rejected")
+	}
+
+	if reply.VoterID != "node-1" {
+		t.Fatalf(
+			"expected voter ID node-1, got %q",
+			reply.VoterID,
+		)
+	}
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 0 {
+		t.Fatalf(
+			"expected term to remain 0, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != "" {
+		t.Fatalf(
+			"expected VotedFor to remain empty, got %q",
+			state.Persistent.VotedFor,
+		)
+	}
+}
+
 func TestPreVoteDoesNotChangeTermOrVote(t *testing.T) {
 	node := NewRaftNode("node-1")
+
+	node.mu.Lock()
+
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{
+				"node-1",
+				"node-2",
+			},
+		},
+	}
+
+	node.state.Persistent.CurrentTerm = 0
+	node.state.Persistent.VotedFor = ""
+	node.state.Role = Follower
+	node.state.LeaderID = ""
+	node.electionElapsed = node.electionTimeout
+
+	node.mu.Unlock()
 
 	before := node.State()
 
@@ -2726,6 +2816,7 @@ func TestPreVoteDoesNotChangeTermOrVote(t *testing.T) {
 
 	after := node.State()
 
+	// PreVote must not change the persistent term.
 	if after.Persistent.CurrentTerm != before.Persistent.CurrentTerm {
 		t.Fatalf(
 			"pre-vote changed term: before=%d after=%d",
@@ -2734,6 +2825,7 @@ func TestPreVoteDoesNotChangeTermOrVote(t *testing.T) {
 		)
 	}
 
+	// PreVote must not change the persistent vote.
 	if after.Persistent.VotedFor != before.Persistent.VotedFor {
 		t.Fatalf(
 			"pre-vote changed VotedFor: before=%q after=%q",
@@ -2742,11 +2834,21 @@ func TestPreVoteDoesNotChangeTermOrVote(t *testing.T) {
 		)
 	}
 
+	// PreVote must not change the node's role.
 	if after.Role != before.Role {
 		t.Fatalf(
 			"pre-vote changed role: before=%v after=%v",
 			before.Role,
 			after.Role,
+		)
+	}
+
+	// PreVote must not establish or change a leader.
+	if after.LeaderID != before.LeaderID {
+		t.Fatalf(
+			"pre-vote changed LeaderID: before=%q after=%q",
+			before.LeaderID,
+			after.LeaderID,
 		)
 	}
 }
@@ -2825,10 +2927,24 @@ func TestPreVoteRejectsWhenRecentLeaderExists(t *testing.T) {
 		t.Fatalf("expected PreVote not to reset election timer, got %d", elapsed)
 	}
 }
+
 func TestPreVoteGrantsAfterElectionTimeout(t *testing.T) {
 	node := NewRaftNode("node-2")
 	node.SetElectionTimeout(10)
 
+	node.mu.Lock()
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{
+				"node-1",
+				"node-2",
+				"node-3",
+			},
+		},
+	}
+	node.mu.Unlock()
+
+	// Simulate a heartbeat from the current leader.
 	appendReply := node.AppendEntries(AppendEntriesArgs{
 		Term:     1,
 		LeaderID: "node-1",
@@ -2854,14 +2970,30 @@ func TestPreVoteGrantsAfterElectionTimeout(t *testing.T) {
 		t.Fatal("expected PreVote to be granted after election timeout")
 	}
 
+	// PreVote must never change the persistent term.
 	state := node.State()
 
 	if state.Persistent.CurrentTerm != 1 {
-		t.Fatalf("expected term to remain 1, got %d", state.Persistent.CurrentTerm)
+		t.Fatalf(
+			"expected term to remain 1, got %d",
+			state.Persistent.CurrentTerm,
+		)
 	}
 
+	// PreVote must not change the known leader.
 	if state.LeaderID != "node-1" {
-		t.Fatalf("expected leader ID to remain node-1, got %q", state.LeaderID)
+		t.Fatalf(
+			"expected leader ID to remain node-1, got %q",
+			state.LeaderID,
+		)
+	}
+
+	// PreVote must not change the node's role.
+	if state.Role != Follower {
+		t.Fatalf(
+			"expected node to remain Follower, got %v",
+			state.Role,
+		)
 	}
 }
 
