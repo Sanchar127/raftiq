@@ -29,6 +29,10 @@ func TestZombieWorkerCannotCompleteReclaimedJob(t *testing.T) {
 	node := raft.NewRaftNode("node-1")
 	applier := kv.NewApplier(store)
 
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap raft membership: %v", err)
+	}
+
 	if err := node.Start(); err != nil {
 		t.Fatalf("start raft node: %v", err)
 	}
