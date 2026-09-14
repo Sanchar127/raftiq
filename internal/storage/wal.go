@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sanchar127/raftiq/internal/model"
@@ -27,8 +28,11 @@ const (
 )
 
 var (
-	ErrClosedStorage = errors.New("WAL storage is closed")
-	ErrInvalidLog    = errors.New("invalid Raft log")
+	ErrInvalidLog  = errors.New("invalid log")
+	ErrWALCorrupt  = errors.New("wal corrupt")
+	ErrWALVersion  = errors.New("unsupported wal version")
+	ErrWALDiskFull = errors.New("wal disk full")
+	ErrClosedStorage = errors.New("error in closed storage")
 )
 
 type WALStorage struct {
@@ -494,6 +498,10 @@ func (s *WALStorage) Sync() (err error) {
 	}
 
 	if err = s.file.Sync(); err != nil {
+		if errors.Is(err, syscall.ENOSPC) {
+			return fmt.Errorf("%w: %w", ErrWALDiskFull, err)
+		}
+
 		return fmt.Errorf("sync WAL: %w", err)
 	}
 
