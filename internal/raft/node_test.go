@@ -3923,3 +3923,51 @@ func TestRegisterPeerRejectsSelf(t *testing.T) {
 		t.Fatal("expected self registration to fail")
 	}
 }
+
+func TestNewPeerReachableBeforeMembershipChange(t *testing.T) {
+	nodeA := NewRaftNode("A")
+	nodeD := NewRaftNode("D")
+
+	transport := NewLocalTransport()
+
+	if err := transport.AddNode(nodeD); err != nil {
+		t.Fatalf("add node D to transport: %v", err)
+	}
+
+	if err := nodeA.SetTransport(
+		transport,
+		[]NodeID{},
+	); err != nil {
+		t.Fatalf("set transport: %v", err)
+	}
+
+	if err := nodeA.RegisterPeer("D"); err != nil {
+		t.Fatalf("register peer D: %v", err)
+	}
+
+	args := AppendEntriesArgs{
+		Term:         1,
+		LeaderID:     "A",
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+		LeaderCommit: 0,
+	}
+
+	ctx := context.Background()
+
+	reply, err := transport.AppendEntries(
+		ctx,
+		"D",
+		args,
+	)
+	if err != nil {
+		t.Fatalf("append entries to new peer D: %v", err)
+	}
+
+	if reply.Term != 1 {
+		t.Fatalf(
+			"expected D reply term 1, got %d",
+			reply.Term,
+		)
+	}
+}
