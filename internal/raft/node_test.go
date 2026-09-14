@@ -642,6 +642,10 @@ func TestLeaderDoesNotStartElectionOnTimeout(t *testing.T) {
 	node := NewRaftNode("A")
 	node.SetPeers([]Peer{})
 
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
 	_, err := node.startElection()
 	if err != nil {
 		t.Fatalf("start election: %v", err)

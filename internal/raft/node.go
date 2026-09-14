@@ -555,11 +555,14 @@ func majority(clusterSize int) int {
 	return clusterSize/2 + 1
 }
 
-func (n *RaftNode) hasElectionMajority(clusterSize int) bool {
+func (n *RaftNode) hasElectionMajority() bool {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 
-	return len(n.state.Election.VotesReceived) >= majority(clusterSize)
+	return membershipHasQuorum(
+		n.state.Persistent.Membership,
+		n.state.Election.VotesReceived,
+	)
 }
 
 func (n *RaftNode) tryBecomeLeader() bool {
@@ -572,10 +575,10 @@ func (n *RaftNode) tryBecomeLeader() bool {
 		return false
 	}
 
-	clusterSize := len(n.peerIDs) + 1
-	requiredVotes := clusterSize/2 + 1
-
-	if len(n.state.Election.VotesReceived) < requiredVotes {
+	if !membershipHasQuorum(
+		n.state.Persistent.Membership,
+		n.state.Election.VotesReceived,
+	) {
 		n.mu.Unlock()
 		return false
 	}
@@ -591,7 +594,6 @@ func (n *RaftNode) tryBecomeLeader() bool {
 		"raft election won",
 		"term", term,
 		"votes", votes,
-		"required_votes", requiredVotes,
 	)
 
 	return true
@@ -677,7 +679,6 @@ func (n *RaftNode) startElection() (Term, error) {
 		"raft election started",
 		"term", term,
 		"peer_count", peerCount,
-		"required_votes", majority(peerCount+1),
 	)
 
 	return term, nil
