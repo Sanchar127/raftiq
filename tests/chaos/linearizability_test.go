@@ -112,7 +112,12 @@ func runConcurrentHistory(
 ) []linearizabilityOperation {
 	t.Helper()
 
-	history := make([]linearizabilityOperation, 0, linearizabilityClients*linearizabilityOperations)
+	history := make(
+		[]linearizabilityOperation,
+		0,
+		linearizabilityClients*linearizabilityOperations,
+	)
+
 	var historyMu sync.Mutex
 
 	startBarrier := make(chan struct{})
@@ -292,7 +297,11 @@ func assertLinearizableHistory(
 	//              A must be before B
 	//
 	// Concurrent operations may be ordered either way.
-	successful := make([]linearizabilityOperation, 0, len(sorted))
+	successful := make(
+		[]linearizabilityOperation,
+		0,
+		len(sorted),
+	)
 
 	for _, operation := range sorted {
 		if operation.Err == nil {
@@ -459,6 +468,19 @@ func newLinearizabilityCluster(t *testing.T) *linearizabilityCluster {
 		); err != nil {
 			t.Fatalf(
 				"set transport for node %s: %v",
+				node.ID(),
+				err,
+			)
+		}
+	}
+
+	// This is a genuine three-node Raft cluster. Membership is now
+	// persisted separately from transport topology, so every node must
+	// bootstrap the initial static voter configuration before starting.
+	for _, node := range nodes {
+		if err := node.BootstrapMembership(); err != nil {
+			t.Fatalf(
+				"bootstrap membership for node %s: %v",
 				node.ID(),
 				err,
 			)
