@@ -117,6 +117,29 @@ func (n *RaftNode) SetTransport(
 	return nil
 }
 
+func (n *RaftNode) RegisterPeer(peerID NodeID) error {
+	if peerID == "" {
+		return errors.New("raft peer ID is required")
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if peerID == n.id {
+		return fmt.Errorf("cannot register self as peer")
+	}
+
+	for _, existingID := range n.peerIDs {
+		if existingID == peerID {
+			return fmt.Errorf("raft peer %s already registered", peerID)
+		}
+	}
+
+	n.peerIDs = append(n.peerIDs, peerID)
+
+	return nil
+}
+
 func (n *RaftNode) BootstrapMembership() error {
 	logger := n.getLogger()
 

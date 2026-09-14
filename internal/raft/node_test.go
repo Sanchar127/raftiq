@@ -3840,3 +3840,86 @@ func TestInitializeReplicationStateLocked(t *testing.T) {
 		)
 	}
 }
+
+func TestInitializeNewPeerReplicationStateLocked(t *testing.T) {
+	node := NewRaftNode("A")
+
+	node.log.Append(LogEntry{
+		Index: 1,
+		Term:  1,
+		Data:  []byte("entry-1"),
+	})
+	node.log.Append(LogEntry{
+		Index: 2,
+		Term:  1,
+		Data:  []byte("entry-2"),
+	})
+
+	node.mu.Lock()
+	node.state.Role = Leader
+	node.initializeNewPeerReplicationStateLocked("D")
+	node.mu.Unlock()
+
+	node.mu.RLock()
+	nextIndex := node.state.Leader.NextIndex["D"]
+	matchIndex := node.state.Leader.MatchIndex["D"]
+	node.mu.RUnlock()
+
+	if nextIndex != 1 {
+		t.Fatalf(
+			"expected new peer D NextIndex=1, got %d",
+			nextIndex,
+		)
+	}
+
+	if matchIndex != 0 {
+		t.Fatalf(
+			"expected new peer D MatchIndex=0, got %d",
+			matchIndex,
+		)
+	}
+}
+func TestRegisterPeer(t *testing.T) {
+	node := NewRaftNode("A")
+
+	if err := node.RegisterPeer("D"); err != nil {
+		t.Fatalf("register peer: %v", err)
+	}
+
+	node.mu.RLock()
+	defer node.mu.RUnlock()
+
+	if len(node.peerIDs) != 1 {
+		t.Fatalf(
+			"expected 1 peer, got %d",
+			len(node.peerIDs),
+		)
+	}
+
+	if node.peerIDs[0] != "D" {
+		t.Fatalf(
+			"expected peer D, got %q",
+			node.peerIDs[0],
+		)
+	}
+}
+
+func TestRegisterPeerRejectsDuplicate(t *testing.T) {
+	node := NewRaftNode("A")
+
+	if err := node.RegisterPeer("D"); err != nil {
+		t.Fatalf("register peer: %v", err)
+	}
+
+	if err := node.RegisterPeer("D"); err == nil {
+		t.Fatal("expected duplicate peer registration to fail")
+	}
+}
+
+func TestRegisterPeerRejectsSelf(t *testing.T) {
+	node := NewRaftNode("A")
+
+	if err := node.RegisterPeer("A"); err == nil {
+		t.Fatal("expected self registration to fail")
+	}
+}
