@@ -2630,6 +2630,7 @@ func (n *RaftNode) ReadIndex(ctx context.Context) (model.LogIndex, error) {
 	commitIndex := n.state.Volatile.CommitIndex
 	transport := n.transport
 	peerIDs := append([]NodeID(nil), n.peerIDs...)
+	membership := n.state.Persistent.Membership
 
 	// Raft §8 requires the leader to have committed an entry from
 	// its current term before serving linearizable reads.
@@ -2654,18 +2655,20 @@ func (n *RaftNode) ReadIndex(ctx context.Context) (model.LogIndex, error) {
 	}
 
 	// The leader counts as one acknowledgement.
-	clusterSize := len(peerIDs) + 1
-	requiredAcks := majority(clusterSize)
-	acks := 1
+	acks := map[NodeID]struct{}{
+		n.id: {},
+	}
 
-	// Single-node cluster.
-	if acks >= requiredAcks {
+	// A single-node cluster, or a configuration where the leader
+	// already satisfies the quorum by itself.
+	if membershipHasQuorum(membership, acks) {
 		return commitIndex, nil
 	}
 
 	type result struct {
-		reply AppendEntriesReply
-		err   error
+		peerID NodeID
+		reply  AppendEntriesReply
+		err    error
 	}
 
 	results := make(chan result, len(peerIDs))
@@ -2684,6 +2687,7 @@ func (n *RaftNode) ReadIndex(ctx context.Context) (model.LogIndex, error) {
 
 				select {
 				case results <- result{
+					peerID: peerID,
 					err: errors.New(
 						"raft: leadership lost before ReadIndex RPC",
 					),
@@ -2706,6 +2710,7 @@ func (n *RaftNode) ReadIndex(ctx context.Context) (model.LogIndex, error) {
 
 				select {
 				case results <- result{
+					peerID: peerID,
 					err: fmt.Errorf(
 						"peer %s has no replication state",
 						peerID,
@@ -2728,6 +2733,7 @@ func (n *RaftNode) ReadIndex(ctx context.Context) (model.LogIndex, error) {
 
 					select {
 					case results <- result{
+						peerID: peerID,
 						err: fmt.Errorf(
 							"previous log entry %d for peer %s not found",
 							prevIndex,
@@ -2766,8 +2772,9 @@ func (n *RaftNode) ReadIndex(ctx context.Context) (model.LogIndex, error) {
 
 			select {
 			case results <- result{
-				reply: reply,
-				err:   err,
+				peerID: peerID,
+				reply:  reply,
+				err:    err,
 			}:
 			case <-ctx.Done():
 			}
@@ -2810,9 +2817,9 @@ func (n *RaftNode) ReadIndex(ctx context.Context) (model.LogIndex, error) {
 				continue
 			}
 
-			acks++
+			acks[r.peerID] = struct{}{}
 
-			if acks < requiredAcks {
+			if !membershipHasQuorum(membership, acks) {
 				continue
 			}
 

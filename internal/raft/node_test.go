@@ -2800,6 +2800,10 @@ func TestPreVoteGrantsAfterElectionTimeout(t *testing.T) {
 func TestReadIndexSingleNode(t *testing.T) {
 	node := NewRaftNode("A")
 
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
 	if err := node.Log().Append(LogEntry{
 		Index: 1,
 		Term:  1,
@@ -2833,7 +2837,10 @@ func TestReadIndexSingleNode(t *testing.T) {
 		entry.Term,
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
 	defer cancel()
 
 	index, err := node.ReadIndex(ctx)
@@ -2845,12 +2852,20 @@ func TestReadIndexSingleNode(t *testing.T) {
 		t.Fatalf("expected ReadIndex=1, got %d", index)
 	}
 }
+
 func TestReadIndexQuorum(t *testing.T) {
 	leader := NewRaftNode("A")
 	followerB := NewRaftNode("B")
 	followerC := NewRaftNode("C")
 
-	leader.SetPeers([]Peer{followerB, followerC})
+	leader.SetPeers([]Peer{
+		followerB,
+		followerC,
+	})
+
+	if err := leader.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap leader membership: %v", err)
+	}
 
 	if err := leader.Log().Append(LogEntry{
 		Index: 1,
@@ -2872,7 +2887,10 @@ func TestReadIndexQuorum(t *testing.T) {
 
 	// Give the followers the same committed entry so the
 	// AppendEntries ReadIndex probes succeed.
-	for _, follower := range []*RaftNode{followerB, followerC} {
+	for _, follower := range []*RaftNode{
+		followerB,
+		followerC,
+	} {
 		if err := follower.Log().Append(LogEntry{
 			Index: 1,
 			Term:  1,
@@ -2887,7 +2905,10 @@ func TestReadIndexQuorum(t *testing.T) {
 		follower.mu.Unlock()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
 	defer cancel()
 
 	index, err := leader.ReadIndex(ctx)
@@ -2905,7 +2926,14 @@ func TestReadIndexNoQuorum(t *testing.T) {
 	followerB := NewRaftNode("B")
 	followerC := NewRaftNode("C")
 
-	leader.SetPeers([]Peer{followerB, followerC})
+	leader.SetPeers([]Peer{
+		followerB,
+		followerC,
+	})
+
+	if err := leader.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap leader membership: %v", err)
+	}
 
 	if err := leader.Log().Append(LogEntry{
 		Index: 1,
@@ -2925,7 +2953,10 @@ func TestReadIndexNoQuorum(t *testing.T) {
 	leader.state.Volatile.CommitIndex = 1
 	leader.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		100*time.Millisecond,
+	)
 	defer cancel()
 
 	_, err := leader.ReadIndex(ctx)
@@ -2939,7 +2970,14 @@ func TestReadIndexHigherTermReply(t *testing.T) {
 	followerB := NewRaftNode("B")
 	followerC := NewRaftNode("C")
 
-	leader.SetPeers([]Peer{followerB, followerC})
+	leader.SetPeers([]Peer{
+		followerB,
+		followerC,
+	})
+
+	if err := leader.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap leader membership: %v", err)
+	}
 
 	if err := leader.Log().Append(LogEntry{
 		Index: 1,
@@ -2964,7 +3002,10 @@ func TestReadIndexHigherTermReply(t *testing.T) {
 	followerB.state.Persistent.CurrentTerm = 2
 	followerB.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
 	defer cancel()
 
 	_, err := leader.ReadIndex(ctx)
@@ -2975,7 +3016,10 @@ func TestReadIndexHigherTermReply(t *testing.T) {
 	state := leader.State()
 
 	if state.Role != Follower {
-		t.Fatalf("expected leader to step down to Follower, got %v", state.Role)
+		t.Fatalf(
+			"expected leader to step down to Follower, got %v",
+			state.Role,
+		)
 	}
 
 	if state.Persistent.CurrentTerm != 2 {
