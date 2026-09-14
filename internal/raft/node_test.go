@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -3481,4 +3482,65 @@ func TestStartElectionRejectsNonVoter(t *testing.T) {
 	require.Equal(t, Follower, state.Role)
 	require.Equal(t, Term(7), state.Persistent.CurrentTerm)
 	require.Empty(t, state.Persistent.VotedFor)
+}
+
+func TestProposeConfigurationDoesNotActivateBeforeCommit(t *testing.T) {
+	nodeA := NewRaftNode("A")
+	nodeB := NewRaftNode("B")
+	nodeC := NewRaftNode("C")
+
+	nodeA.SetPeers([]Peer{nodeB, nodeC})
+	nodeB.SetPeers([]Peer{nodeA, nodeC})
+	nodeC.SetPeers([]Peer{nodeA, nodeB})
+
+	if err := nodeA.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap node A membership: %v", err)
+	}
+
+	if err := nodeB.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap node B membership: %v", err)
+	}
+
+	if err := nodeC.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap node C membership: %v", err)
+	}
+
+	nodeA.mu.Lock()
+	nodeA.state.Role = Leader
+	nodeA.state.Persistent.CurrentTerm = 1
+	nodeA.mu.Unlock()
+
+	before := nodeA.State().Persistent.Membership
+
+	nextConfiguration := model.Configuration{
+		Voters: []model.NodeID{
+			"A",
+			"B",
+			"C",
+			"D",
+		},
+	}
+
+	index, err := nodeA.ProposeConfiguration(nextConfiguration)
+	if err != nil {
+		t.Fatalf("propose configuration: %v", err)
+	}
+
+	state := nodeA.State()
+
+	if state.Volatile.CommitIndex >= index {
+		t.Fatalf(
+			"configuration entry should not be committed yet: commit=%d index=%d",
+			state.Volatile.CommitIndex,
+			index,
+		)
+	}
+
+	if !reflect.DeepEqual(state.Persistent.Membership, before) {
+		t.Fatalf(
+			"uncommitted configuration changed membership: before=%+v after=%+v",
+			before,
+			state.Persistent.Membership,
+		)
+	}
 }
