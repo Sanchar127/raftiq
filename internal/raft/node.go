@@ -3182,3 +3182,42 @@ func (n *RaftNode) catchUpPeer(
 		n.replicateTo(peerID)
 	}
 }
+
+func (n *RaftNode) waitForApplied(
+	ctx context.Context,
+	targetIndex LogIndex,
+) error {
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		n.mu.RLock()
+
+		lastApplied := n.state.Volatile.LastApplied
+		role := n.state.Role
+
+		n.mu.RUnlock()
+
+		if lastApplied >= targetIndex {
+			return nil
+		}
+
+		if role != Leader {
+			return fmt.Errorf(
+				"leader lost while waiting for index %d to apply: role=%v",
+				targetIndex,
+				role,
+			)
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf(
+				"timed out waiting for index %d to apply: %w",
+				targetIndex,
+				ctx.Err(),
+			)
+		case <-ticker.C:
+		}
+	}
+}

@@ -4094,3 +4094,22 @@ func TestCatchUpPeerReplicatesExistingLog(t *testing.T) {
 		)
 	}
 }
+
+func TestWaitForApplied(t *testing.T) {
+	node := NewRaftNode("A")
+
+	node.mu.Lock()
+	node.state.Role = Leader
+	node.state.Volatile.LastApplied = 3
+	node.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
+	defer cancel()
+
+	if err := node.waitForApplied(ctx, 3); err != nil {
+		t.Fatalf("wait for applied: %v", err)
+	}
+}
