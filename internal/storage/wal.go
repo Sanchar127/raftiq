@@ -28,17 +28,18 @@ const (
 )
 
 var (
-	ErrInvalidLog  = errors.New("invalid log")
-	ErrWALCorrupt  = errors.New("wal corrupt")
-	ErrWALVersion  = errors.New("unsupported wal version")
-	ErrWALDiskFull = errors.New("wal disk full")
+	ErrInvalidLog    = errors.New("invalid log")
+	ErrWALCorrupt    = errors.New("wal corrupt")
+	ErrWALVersion    = errors.New("unsupported wal version")
+	ErrWALDiskFull   = errors.New("wal disk full")
 	ErrClosedStorage = errors.New("error in closed storage")
 )
 
 type WALStorage struct {
 	mu sync.RWMutex
 
-	file *os.File
+	file   *os.File
+	syncFn func() error
 
 	state    model.PersistentState
 	entries  []model.LogEntry
@@ -62,6 +63,7 @@ func OpenWAL(path string) (*WALStorage, error) {
 
 	storage := &WALStorage{
 		file:    file,
+		syncFn:  file.Sync,
 		entries: make([]model.LogEntry, 0),
 		metrics: NoopStorageMetrics{},
 	}
@@ -497,7 +499,11 @@ func (s *WALStorage) Sync() (err error) {
 		return err
 	}
 
-	if err = s.file.Sync(); err != nil {
+	if s.syncFn == nil {
+		s.syncFn = s.file.Sync
+	}
+
+	if err = s.syncFn(); err != nil {
 		if errors.Is(err, syscall.ENOSPC) {
 			return fmt.Errorf("%w: %w", ErrWALDiskFull, err)
 		}

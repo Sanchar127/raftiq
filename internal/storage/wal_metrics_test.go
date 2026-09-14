@@ -2,6 +2,7 @@ package storage
 
 import (
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -265,4 +266,23 @@ func TestWALStorageSetMetricsNilRestoresNoop(t *testing.T) {
 		0,
 		metrics.operationCount(StorageOperationSaveState),
 	)
+}
+
+func TestWALStorageSyncDiskFull(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/raftiq.wal"
+
+	storage, err := OpenWAL(path)
+	require.NoError(t, err)
+	defer storage.Close()
+
+	storage.syncFn = func() error {
+		return syscall.ENOSPC
+	}
+
+	err = storage.Sync()
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrWALDiskFull)
+	require.ErrorIs(t, err, syscall.ENOSPC)
 }
