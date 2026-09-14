@@ -70,6 +70,10 @@ func TestNewRaftNode(t *testing.T) {
 func TestBecomeLeader(t *testing.T) {
 	node := NewRaftNode("node-1")
 
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
 	_, err := node.startElection()
 	if err != nil {
 		t.Fatalf("start election: %v", err)
@@ -93,6 +97,10 @@ func TestBecomeLeader(t *testing.T) {
 
 func TestBecomeCandidate(t *testing.T) {
 	node := NewRaftNode("node-1")
+
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
 
 	_, err := node.startElection()
 	if err != nil {
@@ -123,12 +131,17 @@ func TestBecomeCandidate(t *testing.T) {
 func TestBecomeFollower(t *testing.T) {
 	node := NewRaftNode("node-1")
 
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
 	_, err := node.startElection()
 	if err != nil {
 		t.Fatalf("start election: %v", err)
 	}
 
 	node.becomeLeader()
+
 	if err := node.becomeFollower(2); err != nil {
 		t.Fatalf("become follower: %v", err)
 	}
@@ -160,7 +173,6 @@ func TestBecomeFollower(t *testing.T) {
 		)
 	}
 }
-
 func TestRequestVoteGrantsVote(t *testing.T) {
 	node := NewRaftNode("node-1")
 
