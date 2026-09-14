@@ -457,9 +457,19 @@ func TestThreeNodeElection(t *testing.T) {
 	nodeC := NewRaftNode("C")
 
 	nodeA.SetPeers([]Peer{nodeB, nodeC})
+	nodeB.SetPeers([]Peer{nodeA, nodeC})
+	nodeC.SetPeers([]Peer{nodeA, nodeB})
 
 	if err := nodeA.BootstrapMembership(); err != nil {
-		t.Fatalf("bootstrap membership: %v", err)
+		t.Fatalf("bootstrap membership A: %v", err)
+	}
+
+	if err := nodeB.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership B: %v", err)
+	}
+
+	if err := nodeC.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership C: %v", err)
 	}
 
 	nodeA.runElection()
@@ -718,7 +728,6 @@ func TestTickTriggersElectionTimeout(t *testing.T) {
 	}
 }
 
-
 func TestLeaderDoesNotStartElectionOnTimeout(t *testing.T) {
 	node := NewRaftNode("A")
 	node.SetPeers([]Peer{})
@@ -891,6 +900,10 @@ func TestAppendEntriesRejectsOlderTerm(t *testing.T) {
 	node := NewRaftNode("B")
 	node.SetElectionTimeout(10)
 
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
 	node.Tick()
 	node.Tick()
 
@@ -922,7 +935,10 @@ func TestAppendEntriesRejectsOlderTerm(t *testing.T) {
 	}
 
 	if state.LeaderID != "A" {
-		t.Fatalf("expected leader A to remain unchanged, got %q", state.LeaderID)
+		t.Fatalf(
+			"expected leader A to remain unchanged, got %q",
+			state.LeaderID,
+		)
 	}
 
 	node.mu.RLock()
@@ -930,7 +946,10 @@ func TestAppendEntriesRejectsOlderTerm(t *testing.T) {
 	node.mu.RUnlock()
 
 	if elapsed != 2 {
-		t.Fatalf("expected election timer to remain 2, got %d", elapsed)
+		t.Fatalf(
+			"expected election timer to remain 2, got %d",
+			elapsed,
+		)
 	}
 }
 
@@ -1085,6 +1104,10 @@ func TestAppendEntriesAppliesCommittedEntry(t *testing.T) {
 func TestProposeAsLeader(t *testing.T) {
 	node := NewRaftNode("node-1")
 
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
 	_, err := node.startElection()
 	if err != nil {
 		t.Fatalf("start election: %v", err)
@@ -1121,6 +1144,14 @@ func TestLeaderBacktracksNextIndexOnReplicationFailure(t *testing.T) {
 
 	leader.SetPeers([]Peer{follower})
 	follower.SetPeers([]Peer{leader})
+
+	if err := leader.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap leader membership: %v", err)
+	}
+
+	if err := follower.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap follower membership: %v", err)
+	}
 
 	if _, err := leader.startElection(); err != nil {
 		t.Fatalf("start election: %v", err)
@@ -1294,6 +1325,10 @@ func TestProposeReplicatesAndCommits(t *testing.T) {
 func TestHeartbeatDueOnlyForLeader(t *testing.T) {
 	node := NewRaftNode("A")
 
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
 	if node.heartbeatDue() {
 		t.Fatal("follower should not send heartbeat")
 	}
@@ -1316,6 +1351,14 @@ func TestHeartbeatResetsFollowerElectionTimer(t *testing.T) {
 
 	leader.SetPeers([]Peer{follower})
 	follower.SetPeers([]Peer{leader})
+
+	if err := leader.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap leader membership: %v", err)
+	}
+
+	if err := follower.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap follower membership: %v", err)
+	}
 
 	if _, err := leader.startElection(); err != nil {
 		t.Fatalf("start election: %v", err)
@@ -1363,6 +1406,14 @@ func TestLeaderTickSendsHeartbeat(t *testing.T) {
 	leader.SetPeers([]Peer{follower})
 	follower.SetPeers([]Peer{leader})
 
+	if err := leader.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap leader membership: %v", err)
+	}
+
+	if err := follower.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap follower membership: %v", err)
+	}
+
 	if _, err := leader.startElection(); err != nil {
 		t.Fatalf("start election: %v", err)
 	}
@@ -1408,7 +1459,6 @@ func TestLeaderTickSendsHeartbeat(t *testing.T) {
 		)
 	}
 }
-
 func TestFollowerRejectsStaleHeartbeat(t *testing.T) {
 	follower := NewRaftNode("follower")
 
@@ -2461,6 +2511,10 @@ func TestRaftNodeRPCTimeout(t *testing.T) {
 		t.Fatalf("set transport: %v", err)
 	}
 
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
 	if err := node.SetRPCTimeout(50 * time.Millisecond); err != nil {
 		t.Fatalf("set RPC timeout: %v", err)
 	}
@@ -3322,6 +3376,10 @@ func TestProposeDiskFullStepsDownLeader(t *testing.T) {
 		t.Fatalf("NewRaftNodeWithStorage() error: %v", err)
 	}
 
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
 	if _, err := node.startElection(); err != nil {
 		t.Fatalf("start election: %v", err)
 	}
@@ -3392,6 +3450,7 @@ func TestProposeDiskFullStepsDownLeader(t *testing.T) {
 		t.Fatal("expected proposal to be rejected after step-down")
 	}
 }
+
 func TestStartElectionRejectsNonVoter(t *testing.T) {
 	store := storage.NewMemoryStorage()
 
