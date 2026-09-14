@@ -850,6 +850,7 @@ func (n *RaftNode) handleVoteReply(
 
 			return
 		}
+
 		n.updateStateMetricsLocked()
 		n.mu.Unlock()
 
@@ -886,6 +887,29 @@ func (n *RaftNode) handleVoteReply(
 			"term", electionTerm,
 		)
 
+		return
+	}
+
+	// Only voters in the active membership can contribute
+	// to the election quorum.
+	if !membershipIsVoter(
+		n.state.Persistent.Membership,
+		reply.VoterID,
+	) {
+		n.mu.Unlock()
+
+		logger.Debug(
+			"vote ignored",
+			"voter_id", reply.VoterID,
+			"term", electionTerm,
+			"reason", "voter_not_in_membership",
+		)
+
+		return
+	}
+
+	if _, alreadyReceived := n.state.Election.VotesReceived[reply.VoterID]; alreadyReceived {
+		n.mu.Unlock()
 		return
 	}
 
