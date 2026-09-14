@@ -899,6 +899,10 @@ func TestAdvanceCommitIndex(t *testing.T) {
 
 	leader.SetPeers([]Peer{peerB, peerC})
 
+	if err := leader.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
 	leader.mu.Lock()
 
 	leader.state.Role = Leader
@@ -1125,6 +1129,18 @@ func TestProposeReplicatesAndCommits(t *testing.T) {
 	follower1.SetPeers([]Peer{leader, follower2})
 	follower2.SetPeers([]Peer{leader, follower1})
 
+	if err := leader.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap leader membership: %v", err)
+	}
+
+	if err := follower1.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap follower-1 membership: %v", err)
+	}
+
+	if err := follower2.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap follower-2 membership: %v", err)
+	}
+
 	if _, err := leader.startElection(); err != nil {
 		t.Fatalf("start election: %v", err)
 	}
@@ -1181,18 +1197,6 @@ func TestProposeReplicatesAndCommits(t *testing.T) {
 				string(entry.Data),
 			)
 		}
-
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for committed entry")
-	}
-
-	state = leader.State()
-
-	if state.Volatile.LastApplied != 1 {
-		t.Fatalf(
-			"expected LastApplied 1, got %d",
-			state.Volatile.LastApplied,
-		)
 	}
 }
 

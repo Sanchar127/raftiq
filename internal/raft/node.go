@@ -1502,24 +1502,24 @@ func (n *RaftNode) advanceCommitIndexLocked() bool {
 	}
 
 	oldCommitIndex := n.state.Volatile.CommitIndex
-
-	clusterSize := len(n.peerIDs) + 1
-	majority := clusterSize/2 + 1
+	membership := n.state.Persistent.Membership
 
 	for index := n.state.Volatile.CommitIndex + 1; index <= n.log.LastIndex(); index++ {
 		if n.logTerm(index) != n.state.Persistent.CurrentTerm {
 			continue
 		}
 
-		replicated := 1
+		replicated := map[NodeID]struct{}{
+			n.id: {},
+		}
 
 		for _, peerID := range n.peerIDs {
 			if n.state.Leader.MatchIndex[peerID] >= index {
-				replicated++
+				replicated[peerID] = struct{}{}
 			}
 		}
 
-		if replicated >= majority {
+		if membershipHasQuorum(membership, replicated) {
 			n.state.Volatile.CommitIndex = index
 		}
 	}
