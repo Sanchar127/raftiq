@@ -1383,6 +1383,46 @@ func (n *RaftNode) ApplyCh() <-chan LogEntry {
 	return n.applyCh
 }
 
+func (n *RaftNode) applyConfigurationEntryLocked(
+	entry LogEntry,
+) error {
+	configuration, err := DecodeConfigurationEntry(entry.Data)
+	if err != nil {
+		return fmt.Errorf(
+			"decode configuration entry at index %d: %w",
+			entry.Index,
+			err,
+		)
+	}
+
+	nextMembership := model.Membership{
+		Current: configuration,
+	}
+
+	nextState := n.state.Persistent
+	nextState.Membership = nextMembership
+
+	if err := n.storage.SaveState(nextState); err != nil {
+		return fmt.Errorf(
+			"persist membership at index %d: %w",
+			entry.Index,
+			err,
+		)
+	}
+
+	if err := n.storage.Sync(); err != nil {
+		return fmt.Errorf(
+			"sync membership at index %d: %w",
+			entry.Index,
+			err,
+		)
+	}
+
+	n.state.Persistent.Membership = nextMembership
+
+	return nil
+}
+
 func (n *RaftNode) applyCommitted() {
 	n.applyMu.Lock()
 	defer n.applyMu.Unlock()
