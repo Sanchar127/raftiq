@@ -329,6 +329,27 @@ func newNetworkPartitionCluster(t *testing.T) *networkPartitionCluster {
 		}
 	}
 
+	// SetTransport() configures communication topology only.
+	// BootstrapMembership() establishes the actual Raft consensus
+	// membership used by elections and quorum calculations.
+	//
+	// All three nodes must bootstrap the same membership:
+	//
+	//   node-1 -> {node-1, node-2, node-3}
+	//   node-2 -> {node-1, node-2, node-3}
+	//   node-3 -> {node-1, node-2, node-3}
+	//
+	// This preserves the real 3-node quorum of 2/3.
+	for _, node := range nodes {
+		if err := node.BootstrapMembership(); err != nil {
+			t.Fatalf(
+				"bootstrap membership for node %s: %v",
+				node.ID(),
+				err,
+			)
+		}
+	}
+
 	return &networkPartitionCluster{
 		transport: transport,
 		nodes:     nodes,
