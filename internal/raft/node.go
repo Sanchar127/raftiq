@@ -240,6 +240,13 @@ func (n *RaftNode) initializeReplicationStateLocked(
 	n.state.Leader.MatchIndex[peerID] = 0
 }
 
+func (n *RaftNode) initializeNewPeerReplicationStateLocked(
+	peerID NodeID,
+) {
+	n.state.Leader.NextIndex[peerID] = 1
+	n.state.Leader.MatchIndex[peerID] = 0
+}
+
 func (n *RaftNode) becomeLeaderLocked() {
 	n.state.Role = Leader
 	n.state.LeaderID = n.id
@@ -3109,4 +3116,46 @@ func (n *RaftNode) ReadIndex(ctx context.Context) (model.LogIndex, error) {
 	}
 
 	return 0, errors.New("raft: ReadIndex quorum unavailable")
+}
+
+func (n *RaftNode) catchUpPeer(
+	ctx context.Context,
+	peerID NodeID,
+	targetIndex LogIndex,
+) error {
+	for {
+		n.mu.RLock()
+
+		if n.state.Role != Leader {
+			role := n.state.Role
+			n.mu.RUnlock()
+
+			return fmt.Errorf(
+				"leader lost while catching up peer %s: role=%v",
+				peerID,
+				role,
+			)
+		}
+
+		matchIndex := n.state.Leader.MatchIndex[peerID]
+
+		n.mu.RUnlock()
+
+		if matchIndex >= targetIndex {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf(
+				"timed out catching up peer %s to index %d: %w",
+				peerID,
+				targetIndex,
+				ctx.Err(),
+			)
+		default:
+		}
+
+		n.replicateTo(peerID)
+	}
 }
