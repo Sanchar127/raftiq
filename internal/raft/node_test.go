@@ -3971,3 +3971,126 @@ func TestNewPeerReachableBeforeMembershipChange(t *testing.T) {
 		)
 	}
 }
+
+func TestCatchUpPeerReplicatesExistingLog(t *testing.T) {
+	leader := NewRaftNode("A")
+	newPeer := NewRaftNode("D")
+
+	transport := NewLocalTransport()
+
+	if err := transport.AddNode(newPeer); err != nil {
+		t.Fatalf("add new peer D to transport: %v", err)
+	}
+
+	if err := leader.SetTransport(
+		transport,
+		[]NodeID{},
+	); err != nil {
+		t.Fatalf("set leader transport: %v", err)
+	}
+
+	if err := leader.RegisterPeer("D"); err != nil {
+		t.Fatalf("register peer D: %v", err)
+	}
+
+	entries := []LogEntry{
+		{
+			Index: 1,
+			Term:  1,
+			Data:  []byte("entry-1"),
+		},
+		{
+			Index: 2,
+			Term:  1,
+			Data:  []byte("entry-2"),
+		},
+		{
+			Index: 3,
+			Term:  1,
+			Data:  []byte("entry-3"),
+		},
+	}
+
+	for _, entry := range entries {
+		if err := leader.log.Append(entry); err != nil {
+			t.Fatalf(
+				"append leader entry %d: %v",
+				entry.Index,
+				err,
+			)
+		}
+	}
+
+	leader.mu.Lock()
+
+	leader.state.Role = Leader
+	leader.state.Persistent.CurrentTerm = 1
+
+	leader.initializeNewPeerReplicationStateLocked("D")
+
+	leader.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
+	defer cancel()
+
+	if err := leader.catchUpPeer(ctx, "D", 3); err != nil {
+		t.Fatalf("catch up peer D: %v", err)
+	}
+
+	if got := newPeer.log.LastIndex(); got != 3 {
+		t.Fatalf(
+			"expected peer D last index 3, got %d",
+			got,
+		)
+	}
+
+	for _, expected := range entries {
+		entry, ok := newPeer.log.Get(expected.Index)
+		if !ok {
+			t.Fatalf(
+				"peer D missing log entry %d",
+				expected.Index,
+			)
+		}
+
+		if entry.Term != expected.Term {
+			t.Fatalf(
+				"entry %d: expected term %d, got %d",
+				expected.Index,
+				expected.Term,
+				entry.Term,
+			)
+		}
+
+		if string(entry.Data) != string(expected.Data) {
+			t.Fatalf(
+				"entry %d: expected data %q, got %q",
+				expected.Index,
+				expected.Data,
+				entry.Data,
+			)
+		}
+	}
+
+	leader.mu.RLock()
+	matchIndex := leader.state.Leader.MatchIndex["D"]
+	nextIndex := leader.state.Leader.NextIndex["D"]
+	leader.mu.RUnlock()
+
+	if matchIndex != 3 {
+		t.Fatalf(
+			"expected leader MatchIndex[D]=3, got %d",
+			matchIndex,
+		)
+	}
+
+	if nextIndex != 4 {
+		t.Fatalf(
+			"expected leader NextIndex[D]=4, got %d",
+			nextIndex,
+		)
+	}
+}
