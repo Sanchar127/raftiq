@@ -4971,3 +4971,147 @@ func TestRemovedLeaderCannotPreVote(t *testing.T) {
 		)
 	}
 }
+
+func TestAddMemberFailsSafelyWhenNewPeerBecomesUnreachable(t *testing.T) {
+	leader := NewRaftNode("A")
+	peerB := NewRaftNode("B")
+	peerC := NewRaftNode("C")
+	newPeer := NewRaftNode("D")
+
+	transport := NewLocalTransport()
+
+	for _, node := range []*RaftNode{
+		leader,
+		peerB,
+		peerC,
+		newPeer,
+	} {
+		if err := transport.AddNode(node); err != nil {
+			t.Fatalf("add node to transport: %v", err)
+		}
+	}
+
+	// D is reachable through the transport, but it is not yet
+	// registered as a Raft peer or included in membership.
+	if err := leader.SetTransport(
+		transport,
+		[]NodeID{"B", "C"},
+	); err != nil {
+		t.Fatalf("set leader transport: %v", err)
+	}
+
+	if err := peerB.SetTransport(
+		transport,
+		[]NodeID{"A", "C"},
+	); err != nil {
+		t.Fatalf("set B transport: %v", err)
+	}
+
+	if err := peerC.SetTransport(
+		transport,
+		[]NodeID{"A", "B"},
+	); err != nil {
+		t.Fatalf("set C transport: %v", err)
+	}
+
+	if err := newPeer.SetTransport(
+		transport,
+		[]NodeID{"A", "B", "C"},
+	); err != nil {
+		t.Fatalf("set D transport: %v", err)
+	}
+
+	if err := leader.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap leader membership: %v", err)
+	}
+
+	// D becomes a communication peer without becoming a voter.
+	if err := leader.RegisterPeer("D"); err != nil {
+		t.Fatalf("register D: %v", err)
+	}
+
+	leader.mu.Lock()
+
+	leader.state.Role = Leader
+	leader.state.Persistent.CurrentTerm = 1
+
+	for _, peerID := range []NodeID{"B", "C"} {
+		leader.initializeReplicationStateLocked(peerID)
+	}
+
+	leader.initializeNewPeerReplicationStateLocked("D")
+
+	leader.mu.Unlock()
+
+	// D is unreachable before AddMember starts.
+	//
+	// The initial catch-up still succeeds because A and D both
+	// have an empty log, so D is already caught up to index 0.
+	transport.Block("A", "D")
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		2*time.Second,
+	)
+	defer cancel()
+
+	err := leader.AddMember(ctx, "D")
+	if err == nil {
+		t.Fatal(
+			"expected AddMember to fail when new peer D is unreachable",
+		)
+	}
+
+	state := leader.State()
+
+	// EnterJoint must have committed using the surviving quorum:
+	//
+	// Old configuration: A,B,C
+	// New configuration: A,B,C,D
+	//
+	// A,B,C satisfy both quorums, so EnterJoint can commit even
+	// though D is unreachable.
+	//
+	// However, LeaveJoint must not be committed because D cannot
+	// be caught up.
+	if state.Persistent.Membership.Joint == nil {
+		t.Fatal(
+			"expected membership to remain joint after AddMember failure",
+		)
+	}
+
+	joint := state.Persistent.Membership.Joint
+
+	// Verify the old configuration.
+	for _, voterID := range []NodeID{"A", "B", "C"} {
+		if !configurationContainsVoter(
+			joint.Old,
+			voterID,
+		) {
+			t.Fatalf(
+				"expected %s in old joint configuration",
+				voterID,
+			)
+		}
+	}
+
+	// D must remain in the pending new configuration.
+	if !configurationContainsVoter(
+		joint.New,
+		"D",
+	) {
+		t.Fatal(
+			"expected D to remain in pending new configuration",
+		)
+	}
+
+	// The stable configuration must still be the old configuration.
+	if configurationContainsVoter(
+		state.Persistent.Membership.Current,
+		"D",
+	) {
+		t.Fatal(
+			"D must not appear in stable current configuration",
+		)
+	}
+}
