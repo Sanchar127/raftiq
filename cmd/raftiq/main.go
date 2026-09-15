@@ -15,6 +15,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
 	"github.com/sanchar127/raftiq/internal/kv"
 	"github.com/sanchar127/raftiq/internal/observability"
@@ -32,8 +34,12 @@ func (p peerFlag) String() string {
 	}
 
 	values := make([]string, 0, len(p))
+
 	for id, address := range p {
-		values = append(values, fmt.Sprintf("%s=%s", id, address))
+		values = append(
+			values,
+			fmt.Sprintf("%s=%s", id, address),
+		)
 	}
 
 	return strings.Join(values, ",")
@@ -53,11 +59,13 @@ func (p peerFlag) Set(value string) error {
 
 	for _, entry := range entries {
 		entry = strings.TrimSpace(entry)
+
 		if entry == "" {
 			continue
 		}
 
 		parts := strings.SplitN(entry, "=", 2)
+
 		if len(parts) != 2 {
 			return fmt.Errorf(
 				"invalid peer %q: expected id=host:port",
@@ -69,7 +77,10 @@ func (p peerFlag) Set(value string) error {
 		address := strings.TrimSpace(parts[1])
 
 		if id == "" {
-			return fmt.Errorf("invalid peer %q: empty node ID", entry)
+			return fmt.Errorf(
+				"invalid peer %q: empty node ID",
+				entry,
+			)
 		}
 
 		if address == "" {
@@ -104,6 +115,10 @@ type config struct {
 	heartbeat   time.Duration
 	election    time.Duration
 	logLevel    string
+
+	tlsCA   string
+	tlsCert string
+	tlsKey  string
 }
 
 func main() {
@@ -173,10 +188,35 @@ func main() {
 		"Log level: debug, info, warn, or error.",
 	)
 
+	flag.StringVar(
+		&cfg.tlsCA,
+		"tls-ca",
+		"",
+		"Path to the TLS CA certificate.",
+	)
+
+	flag.StringVar(
+		&cfg.tlsCert,
+		"tls-cert",
+		"",
+		"Path to the node TLS certificate.",
+	)
+
+	flag.StringVar(
+		&cfg.tlsKey,
+		"tls-key",
+		"",
+		"Path to the node TLS private key.",
+	)
+
 	flag.Parse()
 
 	if err := validateConfig(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "configuration error: %v\n", err)
+		fmt.Fprintf(
+			os.Stderr,
+			"configuration error: %v\n",
+			err,
+		)
 		os.Exit(2)
 	}
 
@@ -192,10 +232,63 @@ func main() {
 	)
 
 	// -------------------------------------------------------------------------
+	// TLS configuration.
+	// -------------------------------------------------------------------------
+
+	clientTLS, err := transport.LoadTLSClientConfig(
+		transport.TLSConfig{
+			CAFile:   cfg.tlsCA,
+			CertFile: cfg.tlsCert,
+			KeyFile:  cfg.tlsKey,
+		},
+	)
+	if err != nil {
+		logger.Error(
+			"failed to load Raft client TLS configuration",
+			"error", err,
+		)
+		os.Exit(1)
+	}
+
+	allowedPeerSANs := make(map[string]struct{})
+
+	for peerID := range cfg.peers {
+		if peerID == raft.NodeID(cfg.nodeID) {
+			continue
+		}
+
+		allowedPeerSANs[fmt.Sprintf("%s.raftiq", peerID)] = struct{}{}
+	}
+
+	serverTLS, err := transport.LoadTLSServerConfig(
+		transport.TLSConfig{
+			CAFile:   cfg.tlsCA,
+			CertFile: cfg.tlsCert,
+			KeyFile:  cfg.tlsKey,
+		},
+		allowedPeerSANs,
+	)
+	if err != nil {
+		logger.Error(
+			"failed to load Raft server TLS configuration",
+			"error", err,
+		)
+		os.Exit(1)
+	}
+
+	logger.Info(
+		"Raft mutual TLS configured",
+		"allowed_peer_sans", len(allowedPeerSANs),
+	)
+
+	// -------------------------------------------------------------------------
 	// Persistent storage.
 	// -------------------------------------------------------------------------
 
-	if err := os.MkdirAll(cfg.dataDir, 0o755); err != nil {
+	if err := os.MkdirAll(
+		cfg.dataDir,
+		0o755,
+	); err != nil {
 		logger.Error(
 			"failed to create data directory",
 			"error", err,
@@ -278,7 +371,23 @@ func main() {
 	raftTransport := transport.NewGRPCTransport()
 	raftTransport.SetLogger(logger)
 
-	peerIDs := make([]raft.NodeID, 0, len(cfg.peers))
+	if err := raftTransport.SetTLSConfig(
+		clientTLS,
+	); err != nil {
+		logger.Error(
+			"failed to configure Raft transport TLS",
+			"error", err,
+		)
+
+		raftTransport.Close()
+		os.Exit(1)
+	}
+
+	peerIDs := make(
+		[]raft.NodeID,
+		0,
+		len(cfg.peers),
+	)
 
 	for peerID, address := range cfg.peers {
 		if peerID == raft.NodeID(cfg.nodeID) {
@@ -295,10 +404,15 @@ func main() {
 				"address", address,
 				"error", err,
 			)
+
+			raftTransport.Close()
 			os.Exit(1)
 		}
 
-		peerIDs = append(peerIDs, peerID)
+		peerIDs = append(
+			peerIDs,
+			peerID,
+		)
 	}
 
 	node.SetTransport(
@@ -311,6 +425,8 @@ func main() {
 			"failed to bootstrap Raft membership",
 			"error", err,
 		)
+
+		raftTransport.Close()
 		os.Exit(1)
 	}
 
@@ -320,6 +436,9 @@ func main() {
 
 	raftGRPCServer, err := transport.NewServer(
 		cfg.raftAddr,
+		grpc.Creds(
+			credentials.NewTLS(serverTLS),
+		),
 	)
 	if err != nil {
 		logger.Error(
@@ -327,6 +446,8 @@ func main() {
 			"address", cfg.raftAddr,
 			"error", err,
 		)
+
+		raftTransport.Close()
 		os.Exit(1)
 	}
 
@@ -346,6 +467,7 @@ func main() {
 			raftGRPCServer,
 		)
 
+		raftTransport.Close()
 		os.Exit(1)
 	}
 
@@ -365,6 +487,7 @@ func main() {
 			raftGRPCServer,
 		)
 
+		raftTransport.Close()
 		os.Exit(1)
 	}
 
@@ -387,6 +510,7 @@ func main() {
 			raftGRPCServer,
 		)
 
+		raftTransport.Close()
 		os.Exit(1)
 	}
 
@@ -405,11 +529,13 @@ func main() {
 			logger,
 			kvGRPCServer,
 		)
+
 		shutdownTransportServer(
 			logger,
 			raftGRPCServer,
 		)
 
+		raftTransport.Close()
 		os.Exit(1)
 	}
 
@@ -427,11 +553,13 @@ func main() {
 			logger,
 			kvGRPCServer,
 		)
+
 		shutdownTransportServer(
 			logger,
 			raftGRPCServer,
 		)
 
+		raftTransport.Close()
 		os.Exit(1)
 	}
 
@@ -598,11 +726,15 @@ func validateConfig(cfg config) error {
 	}
 
 	if cfg.heartbeat <= 0 {
-		return errors.New("--heartbeat must be greater than zero")
+		return errors.New(
+			"--heartbeat must be greater than zero",
+		)
 	}
 
 	if cfg.election <= 0 {
-		return errors.New("--election must be greater than zero")
+		return errors.New(
+			"--election must be greater than zero",
+		)
 	}
 
 	if cfg.election <= cfg.heartbeat {
@@ -612,28 +744,55 @@ func validateConfig(cfg config) error {
 	}
 
 	if strings.TrimSpace(cfg.raftAddr) == "" {
-		return errors.New("--raft-addr cannot be empty")
+		return errors.New(
+			"--raft-addr cannot be empty",
+		)
 	}
 
 	if strings.TrimSpace(cfg.kvAddr) == "" {
-		return errors.New("--kv-addr cannot be empty")
+		return errors.New(
+			"--kv-addr cannot be empty",
+		)
 	}
 
 	if strings.TrimSpace(cfg.metricsAddr) == "" {
-		return errors.New("--metrics-addr cannot be empty")
+		return errors.New(
+			"--metrics-addr cannot be empty",
+		)
 	}
 
 	if strings.TrimSpace(cfg.dataDir) == "" {
-		return errors.New("--data-dir cannot be empty")
+		return errors.New(
+			"--data-dir cannot be empty",
+		)
 	}
 
-	switch strings.ToLower(strings.TrimSpace(cfg.logLevel)) {
+	switch strings.ToLower(
+		strings.TrimSpace(cfg.logLevel),
+	) {
 	case "debug", "info", "warn", "error":
+
 	default:
 		return fmt.Errorf(
 			"invalid --log-level %q: expected debug, info, warn, or error",
 			cfg.logLevel,
 		)
+	}
+
+	if strings.TrimSpace(cfg.tlsCA) == "" {
+		return errors.New("--tls-ca is required")
+	}
+
+	if strings.TrimSpace(cfg.tlsCert) == "" {
+		return errors.New("--tls-cert is required")
+	}
+
+	if strings.TrimSpace(cfg.tlsKey) == "" {
+		return errors.New("--tls-key is required")
+	}
+
+	if len(cfg.peers) == 0 {
+		return errors.New("--peers requires at least one peer")
 	}
 
 	return nil
@@ -642,7 +801,9 @@ func validateConfig(cfg config) error {
 func newLogger(level string) *slog.Logger {
 	var slogLevel slog.Level
 
-	switch strings.ToLower(strings.TrimSpace(level)) {
+	switch strings.ToLower(
+		strings.TrimSpace(level),
+	) {
 	case "debug":
 		slogLevel = slog.LevelDebug
 
