@@ -5312,3 +5312,349 @@ func TestRemoveMemberFailsSafelyDuringJointConsensus(t *testing.T) {
 		)
 	}
 }
+
+func TestLeaderFailureDuringJointConsensus(t *testing.T) {
+	leader := NewRaftNode("A")
+	peerB := NewRaftNode("B")
+	peerC := NewRaftNode("C")
+	peerD := NewRaftNode("D")
+
+	transport := NewLocalTransport()
+
+	for _, node := range []*RaftNode{
+		leader,
+		peerB,
+		peerC,
+		peerD,
+	} {
+		if err := transport.AddNode(node); err != nil {
+			t.Fatalf("add node to transport: %v", err)
+		}
+	}
+
+	leader.SetTransport(
+		transport,
+		[]NodeID{"B", "C", "D"},
+	)
+
+	peerB.SetTransport(
+		transport,
+		[]NodeID{"A", "C", "D"},
+	)
+
+	peerC.SetTransport(
+		transport,
+		[]NodeID{"A", "B", "D"},
+	)
+
+	peerD.SetTransport(
+		transport,
+		[]NodeID{"A", "B", "C"},
+	)
+
+	// Bootstrap the initial stable configuration.
+	if err := leader.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap leader membership: %v", err)
+	}
+
+	// Start A as the leader in term 1.
+	leader.mu.Lock()
+
+	leader.state.Role = Leader
+	leader.state.Persistent.CurrentTerm = 1
+
+	for _, peerID := range []NodeID{"B", "C", "D"} {
+		leader.initializeReplicationStateLocked(peerID)
+	}
+
+	leader.mu.Unlock()
+
+	// -----------------------------------------------------------------
+	// 1. Enter joint consensus.
+	//
+	// Old configuration: A B C D
+	// New configuration: A B C
+	//
+	// This represents removing D.
+	// -----------------------------------------------------------------
+
+	oldConfiguration := model.Configuration{
+		Voters: []NodeID{"A", "B", "C", "D"},
+	}
+
+	newConfiguration := model.Configuration{
+		Voters: []NodeID{"A", "B", "C"},
+	}
+
+	enterJointData, err := EncodeEnterJointConfigurationEntry(
+		oldConfiguration,
+		newConfiguration,
+	)
+	if err != nil {
+		t.Fatalf("encode enter-joint configuration: %v", err)
+	}
+
+	enterJointIndex, err := leader.Propose(enterJointData)
+	if err != nil {
+		t.Fatalf("propose enter-joint configuration: %v", err)
+	}
+
+	if err := leader.waitForApplied(
+		context.Background(),
+		enterJointIndex,
+	); err != nil {
+		t.Fatalf(
+			"wait for leader to apply enter-joint configuration: %v",
+			err,
+		)
+	}
+
+	leader.mu.RLock()
+
+	if leader.state.Persistent.Membership.Joint == nil {
+		leader.mu.RUnlock()
+
+		t.Fatal("leader did not enter joint configuration")
+	}
+
+	leader.mu.RUnlock()
+
+	// -----------------------------------------------------------------
+	// 2. Make B, C, and D receive the committed joint configuration.
+	//
+	// This is important for the failure scenario:
+	//
+	// A dies
+	// B becomes candidate
+	//
+	// Old quorum requires:
+	//     3/4 -> B + C + D
+	//
+	// Therefore C and D must have the same committed joint log entry
+	// and must be able to participate in the election.
+	// -----------------------------------------------------------------
+
+	for _, peerID := range []NodeID{"B", "C", "D"} {
+		heartbeatArgs, ok := leader.buildAppendEntries(peerID)
+		if !ok {
+			t.Fatalf(
+				"failed to build heartbeat for peer %s",
+				peerID,
+			)
+		}
+
+		// We only need the committed entry to reach the follower.
+		// The follower will apply it because LeaderCommit is carried
+		// by this AppendEntries RPC.
+		heartbeatArgs.Entries = nil
+
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			time.Second,
+		)
+
+		reply, err := transport.AppendEntries(
+			ctx,
+			peerID,
+			heartbeatArgs,
+		)
+
+		cancel()
+
+		if err != nil {
+			t.Fatalf(
+				"replicate committed joint configuration to %s: %v",
+				peerID,
+				err,
+			)
+		}
+
+		if !reply.Success {
+			t.Fatalf(
+				"peer %s rejected committed joint configuration: %+v",
+				peerID,
+				reply,
+			)
+		}
+	}
+
+	// -----------------------------------------------------------------
+	// 3. Verify all surviving voters have the joint configuration.
+	// -----------------------------------------------------------------
+
+	for _, node := range []*RaftNode{
+		peerB,
+		peerC,
+		peerD,
+	} {
+		node.mu.RLock()
+
+		membership := node.state.Persistent.Membership
+
+		if membership.Joint == nil {
+			node.mu.RUnlock()
+
+			t.Fatalf(
+				"node %s did not apply joint configuration",
+				node.id,
+			)
+		}
+
+		node.mu.RUnlock()
+	}
+
+	// -----------------------------------------------------------------
+	// 4. Simulate A completely failing.
+	//
+	// Block both directions so A cannot communicate with B/C/D.
+	// -----------------------------------------------------------------
+
+	transport.Block("A", "B")
+	transport.Block("A", "C")
+	transport.Block("A", "D")
+
+	transport.Block("B", "A")
+	transport.Block("C", "A")
+	transport.Block("D", "A")
+
+	// Simulate election timeout on surviving nodes.
+	for _, node := range []*RaftNode{
+		peerB,
+		peerC,
+		peerD,
+	} {
+		node.mu.Lock()
+
+		node.state.LeaderID = ""
+		node.electionElapsed = node.electionTimeout
+
+		node.mu.Unlock()
+	}
+
+	// -----------------------------------------------------------------
+	// 5. B must successfully pass PreVote.
+	//
+	// Joint quorum:
+	//
+	// Old: B + C + D = 3/4
+	// New: B + C     = 2/3
+	// -----------------------------------------------------------------
+
+	if !peerB.runPreVote() {
+		t.Fatal("B failed PreVote after A failure")
+	}
+
+	// -----------------------------------------------------------------
+	// 6. B starts a real election.
+	// -----------------------------------------------------------------
+
+	if _, err := peerB.startElection(); err != nil {
+		t.Fatalf(
+			"B failed to start election: %v",
+			err,
+		)
+	}
+
+	peerB.requestVotes()
+	peerB.tryBecomeLeader()
+
+	// -----------------------------------------------------------------
+	// 7. Verify B became leader while still in joint consensus.
+	// -----------------------------------------------------------------
+
+	bState := peerB.State()
+
+	if bState.Role != Leader {
+		t.Fatalf(
+			"expected B to become leader after A failure, got %v",
+			bState.Role,
+		)
+	}
+
+	if bState.Persistent.Membership.Joint == nil {
+		t.Fatal(
+			"B became leader without retaining joint configuration",
+		)
+	}
+
+	// -----------------------------------------------------------------
+	// 8. B commits LeaveJoint.
+	//
+	// Final configuration:
+	//     A B C
+	//
+	// D is removed.
+	// -----------------------------------------------------------------
+
+	leaveJointData, err := EncodeLeaveJointConfigurationEntry(
+		newConfiguration,
+	)
+	if err != nil {
+		t.Fatalf("encode leave-joint configuration: %v", err)
+	}
+
+	leaveJointIndex, err := peerB.Propose(leaveJointData)
+	if err != nil {
+		t.Fatalf(
+			"B failed to propose leave-joint configuration: %v",
+			err,
+		)
+	}
+
+	if err := peerB.waitForApplied(
+		context.Background(),
+		leaveJointIndex,
+	); err != nil {
+		t.Fatalf(
+			"wait for B to apply leave-joint configuration: %v",
+			err,
+		)
+	}
+
+	// -----------------------------------------------------------------
+	// 9. Verify final stable configuration.
+	// -----------------------------------------------------------------
+
+	bState = peerB.State()
+
+	if bState.Persistent.Membership.Joint != nil {
+		t.Fatal(
+			"expected B to leave joint configuration",
+		)
+	}
+
+	expectedVoters := []NodeID{
+		"A",
+		"B",
+		"C",
+	}
+
+	actualVoters := bState.Persistent.Membership.Current.Voters
+
+	if !reflect.DeepEqual(actualVoters, expectedVoters) {
+		t.Fatalf(
+			"unexpected final voters: got %v, want %v",
+			actualVoters,
+			expectedVoters,
+		)
+	}
+
+	for _, voterID := range expectedVoters {
+		if !configurationContainsVoter(
+			bState.Persistent.Membership.Current,
+			voterID,
+		) {
+			t.Fatalf(
+				"expected %s to remain a voter",
+				voterID,
+			)
+		}
+	}
+
+	if configurationContainsVoter(
+		bState.Persistent.Membership.Current,
+		"D",
+	) {
+		t.Fatal("D should have been removed from final configuration")
+	}
+}
