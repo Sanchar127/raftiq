@@ -1520,6 +1520,24 @@ func (n *RaftNode) applyConfigurationEntryLocked(
 
 	n.state.Persistent.Membership = nextMembership
 
+	// A leader remains active during joint consensus because the
+	// old configuration still includes the leader.
+	//
+	// Once the final stable configuration no longer contains the
+	// local node, the leader must step down.
+	if n.state.Role == Leader &&
+		nextMembership.Joint == nil &&
+		!membershipIsVoter(nextMembership, n.id) {
+		if err := n.becomeFollowerLocked(
+			n.state.Persistent.CurrentTerm,
+		); err != nil {
+			return fmt.Errorf(
+				"step down after membership removal: %w",
+				err,
+			)
+		}
+	}
+
 	return nil
 }
 
