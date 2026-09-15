@@ -5115,3 +5115,200 @@ func TestAddMemberFailsSafelyWhenNewPeerBecomesUnreachable(t *testing.T) {
 		)
 	}
 }
+
+type removeMemberFailureTransport struct {
+	*LocalTransport
+}
+
+func (t *removeMemberFailureTransport) AppendEntries(
+	ctx context.Context,
+	target NodeID,
+	args AppendEntriesArgs,
+) (AppendEntriesReply, error) {
+	// Once RemoveMember proposes LeaveJoint, make C and D
+	// unreachable for that specific configuration entry.
+	//
+	// EnterJoint is allowed through normally, so it can commit.
+	if target == "C" || target == "D" {
+		for _, entry := range args.Entries {
+			if IsConfigurationEntry(entry.Data) &&
+				len(entry.Data) >= 6 &&
+				entry.Data[5] == configurationEntryTypeLeaveJoint {
+				return AppendEntriesReply{}, fmt.Errorf(
+					"simulated LeaveJoint failure to peer %s",
+					target,
+				)
+			}
+		}
+	}
+
+	return t.LocalTransport.AppendEntries(
+		ctx,
+		target,
+		args,
+	)
+}
+
+func (t *removeMemberFailureTransport) RequestVote(
+	ctx context.Context,
+	target NodeID,
+	args RequestVoteArgs,
+) (RequestVoteReply, error) {
+	return t.LocalTransport.RequestVote(ctx, target, args)
+}
+
+func (t *removeMemberFailureTransport) PreVote(
+	ctx context.Context,
+	target NodeID,
+	args PreVoteArgs,
+) (PreVoteReply, error) {
+	return t.LocalTransport.PreVote(ctx, target, args)
+}
+
+func (t *removeMemberFailureTransport) InstallSnapshot(
+	ctx context.Context,
+	target NodeID,
+	args InstallSnapshotArgs,
+) (InstallSnapshotReply, error) {
+	return t.LocalTransport.InstallSnapshot(ctx, target, args)
+}
+
+func TestRemoveMemberFailsSafelyDuringJointConsensus(t *testing.T) {
+	leader := NewRaftNode("A")
+	peerB := NewRaftNode("B")
+	peerC := NewRaftNode("C")
+	peerD := NewRaftNode("D")
+
+	localTransport := NewLocalTransport()
+
+	for _, node := range []*RaftNode{
+		leader,
+		peerB,
+		peerC,
+		peerD,
+	} {
+		if err := localTransport.AddNode(node); err != nil {
+			t.Fatalf("add node to transport: %v", err)
+		}
+	}
+
+	// Wrap the local transport so that only LeaveJoint
+	// replication to C and D fails.
+	transport := &removeMemberFailureTransport{
+		LocalTransport: localTransport,
+	}
+
+	if err := leader.SetTransport(
+		transport,
+		[]NodeID{"B", "C", "D"},
+	); err != nil {
+		t.Fatalf("set leader transport: %v", err)
+	}
+
+	if err := peerB.SetTransport(
+		localTransport,
+		[]NodeID{"A", "C", "D"},
+	); err != nil {
+		t.Fatalf("set B transport: %v", err)
+	}
+
+	if err := peerC.SetTransport(
+		localTransport,
+		[]NodeID{"A", "B", "D"},
+	); err != nil {
+		t.Fatalf("set C transport: %v", err)
+	}
+
+	if err := peerD.SetTransport(
+		localTransport,
+		[]NodeID{"A", "B", "C"},
+	); err != nil {
+		t.Fatalf("set D transport: %v", err)
+	}
+
+	if err := leader.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap leader membership: %v", err)
+	}
+
+	leader.mu.Lock()
+
+	leader.state.Role = Leader
+	leader.state.Persistent.CurrentTerm = 1
+
+	for _, peerID := range []NodeID{"B", "C", "D"} {
+		leader.initializeReplicationStateLocked(peerID)
+	}
+
+	leader.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		2*time.Second,
+	)
+	defer cancel()
+
+	err := leader.RemoveMember(ctx, "D")
+	if err == nil {
+		t.Fatal(
+			"expected RemoveMember to fail when LeaveJoint cannot reach old quorum",
+		)
+	}
+
+	state := leader.State()
+
+	// EnterJoint must have been committed, but LeaveJoint must
+	// not have committed.
+	if state.Persistent.Membership.Joint == nil {
+		t.Fatal(
+			"expected membership to remain joint after RemoveMember failure",
+		)
+	}
+
+	joint := state.Persistent.Membership.Joint
+
+	// Old configuration must remain A,B,C,D.
+	for _, voterID := range []NodeID{"A", "B", "C", "D"} {
+		if !configurationContainsVoter(
+			joint.Old,
+			voterID,
+		) {
+			t.Fatalf(
+				"expected %s in old joint configuration",
+				voterID,
+			)
+		}
+	}
+
+	// New configuration must be A,B,C.
+	if configurationContainsVoter(
+		joint.New,
+		"D",
+	) {
+		t.Fatal(
+			"D must not appear in the pending new configuration",
+		)
+	}
+
+	for _, voterID := range []NodeID{"A", "B", "C"} {
+		if !configurationContainsVoter(
+			joint.New,
+			voterID,
+		) {
+			t.Fatalf(
+				"expected %s in new joint configuration",
+				voterID,
+			)
+		}
+	}
+
+	// Stable membership must still contain D because LeaveJoint
+	// was never committed.
+	if !configurationContainsVoter(
+		state.Persistent.Membership.Current,
+		"D",
+	) {
+		t.Fatal(
+			"D must remain in stable membership until LeaveJoint commits",
+		)
+	}
+}
