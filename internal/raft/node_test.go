@@ -4760,3 +4760,47 @@ func TestLeaderStepsDownAfterSelfRemoval(t *testing.T) {
 		t.Fatal("expected C to remain a voter")
 	}
 }
+
+func TestRemovedLeaderCannotStartElection(t *testing.T) {
+	node := NewRaftNode("A")
+
+	node.mu.Lock()
+
+	node.state.Role = Follower
+	node.state.Persistent.CurrentTerm = 1
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{"B", "C"},
+		},
+	}
+
+	node.mu.Unlock()
+
+	_, err := node.startElection()
+	if err == nil {
+		t.Fatal("expected removed leader to be rejected from election")
+	}
+
+	if !strings.Contains(err.Error(), "not a voter") {
+		t.Fatalf(
+			"expected not-a-voter error, got %v",
+			err,
+		)
+	}
+
+	state := node.State()
+
+	if state.Role != Follower {
+		t.Fatalf(
+			"expected node to remain follower, got %v",
+			state.Role,
+		)
+	}
+
+	if state.Persistent.CurrentTerm != 1 {
+		t.Fatalf(
+			"expected term to remain 1, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+}
