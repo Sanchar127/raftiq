@@ -4635,3 +4635,128 @@ func TestRemoveMemberRejectsSelf(t *testing.T) {
 		)
 	}
 }
+func TestLeaderStepsDownAfterSelfRemoval(t *testing.T) {
+	node := NewRaftNode("A")
+
+	oldConfiguration := model.Configuration{
+		Voters: []NodeID{"A", "B", "C"},
+	}
+
+	newConfiguration := model.Configuration{
+		Voters: []NodeID{"B", "C"},
+	}
+
+	node.mu.Lock()
+
+	node.state.Role = Leader
+	node.state.Persistent.CurrentTerm = 1
+	node.state.Persistent.Membership = model.Membership{
+		Current: oldConfiguration,
+		Joint:   nil,
+	}
+
+	node.mu.Unlock()
+
+	enterJointData, err := EncodeEnterJointConfigurationEntry(
+		oldConfiguration,
+		newConfiguration,
+	)
+	if err != nil {
+		t.Fatalf("encode enter-joint configuration: %v", err)
+	}
+
+	node.mu.Lock()
+
+	enterJointEntry := LogEntry{
+		Index: 1,
+		Term:  1,
+		Data:  enterJointData,
+	}
+
+	if err := node.applyConfigurationEntryLocked(
+		enterJointEntry,
+	); err != nil {
+		node.mu.Unlock()
+		t.Fatalf("apply enter-joint configuration: %v", err)
+	}
+
+	node.mu.Unlock()
+
+	state := node.State()
+
+	if state.Role != Leader {
+		t.Fatalf(
+			"expected leader to remain leader during joint configuration, got %v",
+			state.Role,
+		)
+	}
+
+	if state.Persistent.Membership.Joint == nil {
+		t.Fatal("expected membership to be joint")
+	}
+
+	leaveJointData, err := EncodeLeaveJointConfigurationEntry(
+		newConfiguration,
+	)
+	if err != nil {
+		t.Fatalf("encode leave-joint configuration: %v", err)
+	}
+
+	node.mu.Lock()
+
+	leaveJointEntry := LogEntry{
+		Index: 2,
+		Term:  1,
+		Data:  leaveJointData,
+	}
+
+	if err := node.applyConfigurationEntryLocked(
+		leaveJointEntry,
+	); err != nil {
+		node.mu.Unlock()
+		t.Fatalf("apply leave-joint configuration: %v", err)
+	}
+
+	node.mu.Unlock()
+
+	state = node.State()
+
+	if state.Role != Follower {
+		t.Fatalf(
+			"expected leader to step down after self-removal, got %v",
+			state.Role,
+		)
+	}
+
+	if state.LeaderID != "" {
+		t.Fatalf(
+			"expected LeaderID to be cleared after step-down, got %q",
+			state.LeaderID,
+		)
+	}
+
+	if state.Persistent.Membership.Joint != nil {
+		t.Fatal("expected final membership to be stable")
+	}
+
+	if configurationContainsVoter(
+		state.Persistent.Membership.Current,
+		"A",
+	) {
+		t.Fatal("expected A to be removed from final membership")
+	}
+
+	if !configurationContainsVoter(
+		state.Persistent.Membership.Current,
+		"B",
+	) {
+		t.Fatal("expected B to remain a voter")
+	}
+
+	if !configurationContainsVoter(
+		state.Persistent.Membership.Current,
+		"C",
+	) {
+		t.Fatal("expected C to remain a voter")
+	}
+}
