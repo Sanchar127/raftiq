@@ -230,6 +230,10 @@ func (n *RaftNode) becomeFollower(term Term) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	return n.becomeFollowerLocked(term)
+}
+
+func (n *RaftNode) becomeFollowerLocked(term Term) error {
 	n.state.Role = Follower
 	n.state.Persistent.CurrentTerm = term
 	n.state.Persistent.VotedFor = ""
@@ -237,7 +241,10 @@ func (n *RaftNode) becomeFollower(term Term) error {
 	n.electionElapsed = 0
 
 	if err := n.persistStateLocked(); err != nil {
-		return fmt.Errorf("persist follower transition: %w", err)
+		return fmt.Errorf(
+			"persist follower transition: %w",
+			err,
+		)
 	}
 
 	n.updateStateMetricsLocked()
