@@ -9,13 +9,14 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
-	"github.com/sanchar127/raftiq/internal/raft"
-	"github.com/stretchr/testify/require"
 	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/sanchar127/raftiq/internal/raft"
+	"github.com/stretchr/testify/require"
 )
 
 type testCertificateFiles struct {
