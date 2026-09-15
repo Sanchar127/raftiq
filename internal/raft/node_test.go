@@ -4804,3 +4804,92 @@ func TestRemovedLeaderCannotStartElection(t *testing.T) {
 		)
 	}
 }
+func TestRemovedLeaderCannotPreVote(t *testing.T) {
+	node := NewRaftNode("A")
+
+	oldConfiguration := model.Configuration{
+		Voters: []NodeID{"A", "B", "C"},
+	}
+
+	newConfiguration := model.Configuration{
+		Voters: []NodeID{"B", "C"},
+	}
+
+	node.mu.Lock()
+
+	node.state.Role = Leader
+	node.state.Persistent.CurrentTerm = 1
+	node.state.Persistent.Membership = model.Membership{
+		Current: oldConfiguration,
+	}
+
+	node.mu.Unlock()
+
+	enterJointData, err := EncodeEnterJointConfigurationEntry(
+		oldConfiguration,
+		newConfiguration,
+	)
+	if err != nil {
+		t.Fatalf("encode enter-joint configuration: %v", err)
+	}
+
+	node.mu.Lock()
+
+	if err := node.applyConfigurationEntryLocked(LogEntry{
+		Index: 1,
+		Term:  1,
+		Data:  enterJointData,
+	}); err != nil {
+		node.mu.Unlock()
+		t.Fatalf("apply enter-joint configuration: %v", err)
+	}
+
+	node.mu.Unlock()
+
+	leaveJointData, err := EncodeLeaveJointConfigurationEntry(
+		newConfiguration,
+	)
+	if err != nil {
+		t.Fatalf("encode leave-joint configuration: %v", err)
+	}
+
+	node.mu.Lock()
+
+	if err := node.applyConfigurationEntryLocked(LogEntry{
+		Index: 2,
+		Term:  1,
+		Data:  leaveJointData,
+	}); err != nil {
+		node.mu.Unlock()
+		t.Fatalf("apply leave-joint configuration: %v", err)
+	}
+
+	node.mu.Unlock()
+
+	state := node.State()
+
+	if state.Role != Follower {
+		t.Fatalf(
+			"expected removed leader to become follower, got %v",
+			state.Role,
+		)
+	}
+
+	reply := node.PreVote(PreVoteArgs{
+		Term:         state.Persistent.CurrentTerm + 1,
+		CandidateID:  "A",
+		LastLogIndex: 0,
+		LastLogTerm:  0,
+	})
+
+	if reply.VoteGranted {
+		t.Fatal("expected removed leader PreVote to be rejected")
+	}
+
+	if reply.VoterID != "A" {
+		t.Fatalf(
+			"expected voter ID A, got %q",
+			reply.VoterID,
+		)
+	}
+}
