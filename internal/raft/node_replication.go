@@ -110,6 +110,10 @@ func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
 
 	advanced := n.advanceCommitIndexLocked()
 
+	// Synchronize observability with the leader's updated
+	// log and commit state.
+	n.updateStateMetricsLocked()
+
 	transport := n.transport
 	peerIDs := append([]NodeID(nil), n.peerIDs...)
 	term := n.state.Persistent.CurrentTerm
@@ -359,9 +363,6 @@ func (n *RaftNode) AppendEntries(
 	n.state.LeaderID = args.LeaderID
 	n.electionElapsed = 0
 
-	// Synchronize runtime Raft state with observability.
-	n.updateStateMetricsLocked()
-
 	firstNew := -1
 	replaceFrom := model.LogIndex(0)
 
@@ -491,6 +492,10 @@ func (n *RaftNode) AppendEntries(
 
 	reply.Term = n.state.Persistent.CurrentTerm
 	reply.Success = true
+
+	// Synchronize observability with the final state produced
+	// by this AppendEntries RPC.
+	n.updateStateMetricsLocked()
 
 	entryCount := len(args.Entries)
 	commitIndex := n.state.Volatile.CommitIndex

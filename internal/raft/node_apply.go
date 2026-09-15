@@ -159,6 +159,8 @@ func (n *RaftNode) applyCommitted() {
 			}
 
 			n.state.Volatile.LastApplied = nextIndex
+			n.updateStateMetricsLocked()
+
 			n.mu.Unlock()
 
 			continue
@@ -172,6 +174,7 @@ func (n *RaftNode) applyCommitted() {
 
 		if n.state.Volatile.LastApplied < nextIndex {
 			n.state.Volatile.LastApplied = nextIndex
+			n.updateStateMetricsLocked()
 		}
 
 		n.mu.Unlock()
