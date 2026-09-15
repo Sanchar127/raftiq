@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -5656,5 +5657,239 @@ func TestLeaderFailureDuringJointConsensus(t *testing.T) {
 		"D",
 	) {
 		t.Fatal("D should have been removed from final configuration")
+	}
+}
+
+func TestRestartDuringJointConsensus(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq.wal")
+
+	// ---------------------------------------------------------------
+	// 1. Create persistent storage and initial node.
+	// ---------------------------------------------------------------
+
+	store, err := storage.OpenWAL(path)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+
+	node, err := NewRaftNodeWithStorage("A", store)
+	if err != nil {
+		store.Close()
+		t.Fatalf("create raft node: %v", err)
+	}
+
+	// ---------------------------------------------------------------
+	// 2. Bootstrap the initial stable membership.
+	// ---------------------------------------------------------------
+
+	if err := node.BootstrapMembership(); err != nil {
+		store.Close()
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
+	initialMembership := model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{"A", "B", "C", "D"},
+		},
+	}
+
+	node.mu.Lock()
+
+	node.state.Persistent.Membership = initialMembership
+
+	if err := node.persistStateLocked(); err != nil {
+		node.mu.Unlock()
+		store.Close()
+		t.Fatalf("persist initial membership: %v", err)
+	}
+
+	node.mu.Unlock()
+
+	// ---------------------------------------------------------------
+	// 3. Build and apply EnterJoint configuration.
+	//
+	// Old: A B C D
+	// New: A B C
+	// ---------------------------------------------------------------
+
+	oldConfiguration := model.Configuration{
+		Voters: []NodeID{"A", "B", "C", "D"},
+	}
+
+	newConfiguration := model.Configuration{
+		Voters: []NodeID{"A", "B", "C"},
+	}
+
+	enterJointData, err := EncodeEnterJointConfigurationEntry(
+		oldConfiguration,
+		newConfiguration,
+	)
+	if err != nil {
+		store.Close()
+		t.Fatalf("encode enter-joint entry: %v", err)
+	}
+
+	node.mu.Lock()
+
+	entry := model.LogEntry{
+		Index: node.log.LastIndex() + 1,
+		Term:  1,
+		Data:  enterJointData,
+	}
+
+	if err := store.AppendEntries([]model.LogEntry{entry}); err != nil {
+		node.mu.Unlock()
+		store.Close()
+		t.Fatalf("append enter-joint entry: %v", err)
+	}
+
+	if err := store.Sync(); err != nil {
+		node.mu.Unlock()
+		store.Close()
+		t.Fatalf("sync enter-joint entry: %v", err)
+	}
+
+	if err := node.log.Append(entry); err != nil {
+		node.mu.Unlock()
+		store.Close()
+		t.Fatalf("append enter-joint entry to memory log: %v", err)
+	}
+
+	node.state.Volatile.CommitIndex = entry.Index
+
+	node.mu.Unlock()
+
+	node.applyCommitted()
+
+	// ---------------------------------------------------------------
+	// 4. Verify node is currently in Joint configuration.
+	// ---------------------------------------------------------------
+
+	state := node.State()
+
+	if state.Persistent.Membership.Joint == nil {
+		store.Close()
+		t.Fatal("expected node to be in joint configuration before restart")
+	}
+
+	if !reflect.DeepEqual(
+		state.Persistent.Membership.Joint.Old.Voters,
+		oldConfiguration.Voters,
+	) {
+		store.Close()
+		t.Fatalf(
+			"unexpected old configuration before restart: got %v, want %v",
+			state.Persistent.Membership.Joint.Old.Voters,
+			oldConfiguration.Voters,
+		)
+	}
+
+	if !reflect.DeepEqual(
+		state.Persistent.Membership.Joint.New.Voters,
+		newConfiguration.Voters,
+	) {
+		store.Close()
+		t.Fatalf(
+			"unexpected new configuration before restart: got %v, want %v",
+			state.Persistent.Membership.Joint.New.Voters,
+			newConfiguration.Voters,
+		)
+	}
+
+	// ---------------------------------------------------------------
+	// 5. Simulate crash/restart by closing the WAL and reopening it.
+	// ---------------------------------------------------------------
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("close WAL before restart: %v", err)
+	}
+
+	reopenedStore, err := storage.OpenWAL(path)
+	if err != nil {
+		t.Fatalf("reopen WAL: %v", err)
+	}
+
+	restored, err := NewRaftNodeWithStorage(
+		"A",
+		reopenedStore,
+	)
+	if err != nil {
+		reopenedStore.Close()
+		t.Fatalf("restore raft node: %v", err)
+	}
+
+	// ---------------------------------------------------------------
+	// 6. Verify the restarted node recovered Joint configuration.
+	//
+	// It MUST NOT incorrectly recover the new stable configuration.
+	// LeaveJoint was never committed.
+	// ---------------------------------------------------------------
+
+	restoredState := restored.State()
+
+	if restoredState.Persistent.Membership.Joint == nil {
+		reopenedStore.Close()
+		t.Fatal(
+			"expected restarted node to recover joint configuration",
+		)
+	}
+
+	restoredJoint := restoredState.Persistent.Membership.Joint
+
+	if !reflect.DeepEqual(
+		restoredJoint.Old.Voters,
+		oldConfiguration.Voters,
+	) {
+		reopenedStore.Close()
+		t.Fatalf(
+			"unexpected recovered old configuration: got %v, want %v",
+			restoredJoint.Old.Voters,
+			oldConfiguration.Voters,
+		)
+	}
+
+	if !reflect.DeepEqual(
+		restoredJoint.New.Voters,
+		newConfiguration.Voters,
+	) {
+		reopenedStore.Close()
+		t.Fatalf(
+			"unexpected recovered new configuration: got %v, want %v",
+			restoredJoint.New.Voters,
+			newConfiguration.Voters,
+		)
+	}
+
+	// Current remains the old configuration while joint consensus
+	// is active.
+	if !reflect.DeepEqual(
+		restoredState.Persistent.Membership.Current.Voters,
+		oldConfiguration.Voters,
+	) {
+		reopenedStore.Close()
+		t.Fatalf(
+			"unexpected recovered current configuration: got %v, want %v",
+			restoredState.Persistent.Membership.Current.Voters,
+			oldConfiguration.Voters,
+		)
+	}
+
+	// ---------------------------------------------------------------
+	// 7. Verify the restored node is still a voter.
+	// ---------------------------------------------------------------
+
+	if !membershipIsVoter(
+		restoredState.Persistent.Membership,
+		"A",
+	) {
+		reopenedStore.Close()
+		t.Fatal(
+			"restored node A should remain a voter during joint consensus",
+		)
+	}
+
+	if err := reopenedStore.Close(); err != nil {
+		t.Fatalf("close reopened WAL: %v", err)
 	}
 }
