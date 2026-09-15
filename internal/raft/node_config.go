@@ -1,14 +1,15 @@
 package raft
 
 import (
-    "context"
-    "errors"
-    "fmt"
-    "log/slog"
-    "time"
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"time"
 
-    "github.com/sanchar127/raftiq/internal/model"
+	"github.com/sanchar127/raftiq/internal/model"
 )
+
 // SetPeers is retained as a compatibility helper for existing tests.
 //
 // New production code should use SetTransport so the Raft core depends

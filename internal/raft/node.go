@@ -1,13 +1,13 @@
 package raft
 
 import (
-    "fmt"
-    "log/slog"
-    "sync"
-    "time"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
 
-    "github.com/sanchar127/raftiq/internal/model"
-    "github.com/sanchar127/raftiq/internal/storage"
+	"github.com/sanchar127/raftiq/internal/model"
+	"github.com/sanchar127/raftiq/internal/storage"
 )
 
 const DefaultRPCTimeout = 2 * time.Second

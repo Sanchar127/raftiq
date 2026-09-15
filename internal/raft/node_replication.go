@@ -1,12 +1,12 @@
 package raft
 
 import (
-    "errors"
-    "fmt"
-    "time"
+	"errors"
+	"fmt"
+	"time"
 
-    "github.com/sanchar127/raftiq/internal/model"
-    "github.com/sanchar127/raftiq/internal/storage"
+	"github.com/sanchar127/raftiq/internal/model"
+	"github.com/sanchar127/raftiq/internal/storage"
 )
 
 func (n *RaftNode) Propose(data []byte) (LogIndex, error) {
