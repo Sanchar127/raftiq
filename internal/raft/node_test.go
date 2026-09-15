@@ -4446,44 +4446,6 @@ func TestRemoveMember(t *testing.T) {
 	}
 }
 
-func TestRemoveMemberRejectsLastVoter(t *testing.T) {
-	node := NewRaftNode("A")
-
-	if err := node.SetTransport(
-		NewLocalTransport(),
-		nil,
-	); err != nil {
-		t.Fatalf("set transport: %v", err)
-	}
-
-	if err := node.BootstrapMembership(); err != nil {
-		t.Fatalf("bootstrap membership: %v", err)
-	}
-
-	node.mu.Lock()
-	node.state.Role = Leader
-	node.state.Persistent.CurrentTerm = 1
-	node.mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(
-		context.Background(),
-		time.Second,
-	)
-	defer cancel()
-
-	err := node.RemoveMember(ctx, "A")
-	if err == nil {
-		t.Fatal("expected removing last voter to fail")
-	}
-
-	if !strings.Contains(err.Error(), "last voter") {
-		t.Fatalf(
-			"expected last-voter error, got %v",
-			err,
-		)
-	}
-}
-
 func TestRemoveMemberRejectsNonVoter(t *testing.T) {
 	node := NewRaftNode("A")
 
@@ -4605,113 +4567,34 @@ func TestRemoveMemberRejectsFollower(t *testing.T) {
 	}
 }
 
-func TestRemoveMemberAllowsLeaderSelfRemoval(t *testing.T) {
-	leader := NewRaftNode("A")
-	peerB := NewRaftNode("B")
-	peerC := NewRaftNode("C")
+func TestRemoveMemberRejectsLeaderSelfRemoval(t *testing.T) {
+	node := NewRaftNode("A")
 
-	transport := NewLocalTransport()
-
-	// Add all nodes to the transport.
-	for _, node := range []*RaftNode{
-		leader,
-		peerB,
-		peerC,
-	} {
-		if err := transport.AddNode(node); err != nil {
-			t.Fatalf("add node to transport: %v", err)
-		}
+	node.mu.Lock()
+	node.state.Role = Leader
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{"A", "B", "C"},
+		},
 	}
-
-	// Existing cluster is A,B,C.
-	if err := leader.SetTransport(
-		transport,
-		[]NodeID{"B", "C"},
-	); err != nil {
-		t.Fatalf("set leader transport: %v", err)
-	}
-
-	if err := peerB.SetTransport(
-		transport,
-		[]NodeID{"A", "C"},
-	); err != nil {
-		t.Fatalf("set B transport: %v", err)
-	}
-
-	if err := peerC.SetTransport(
-		transport,
-		[]NodeID{"A", "B"},
-	); err != nil {
-		t.Fatalf("set C transport: %v", err)
-	}
-
-	if err := leader.BootstrapMembership(); err != nil {
-		t.Fatalf("bootstrap leader membership: %v", err)
-	}
-
-	leader.mu.Lock()
-
-	leader.state.Role = Leader
-	leader.state.Persistent.CurrentTerm = 1
-
-	for _, peerID := range []NodeID{"B", "C"} {
-		leader.initializeReplicationStateLocked(peerID)
-	}
-
-	leader.mu.Unlock()
+	node.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
-		2*time.Second,
+		time.Second,
 	)
 	defer cancel()
 
-	if err := leader.RemoveMember(ctx, "A"); err != nil {
-		t.Fatalf("remove leader A: %v", err)
+	err := node.RemoveMember(ctx, "A")
+	if err == nil {
+		t.Fatal("expected self-removal to be rejected")
 	}
 
-	state := leader.State()
-
-	// The leader must step down after its removal.
-	if state.Role != Follower {
+	if !strings.Contains(err.Error(), "transfer leadership first") {
 		t.Fatalf(
-			"expected leader A to become follower, got %v",
-			state.Role,
+			"expected leadership-transfer error, got %v",
+			err,
 		)
-	}
-
-	// LeaderID must be cleared after stepping down.
-	if state.LeaderID != "" {
-		t.Fatalf(
-			"expected LeaderID to be cleared, got %q",
-			state.LeaderID,
-		)
-	}
-
-	// Final membership must be stable.
-	if state.Persistent.Membership.Joint != nil {
-		t.Fatal("expected final membership to be stable")
-	}
-
-	// A must no longer be a voter.
-	if configurationContainsVoter(
-		state.Persistent.Membership.Current,
-		"A",
-	) {
-		t.Fatal("expected A to be removed from final membership")
-	}
-
-	// B and C must remain voters.
-	for _, voterID := range []NodeID{"B", "C"} {
-		if !configurationContainsVoter(
-			state.Persistent.Membership.Current,
-			voterID,
-		) {
-			t.Fatalf(
-				"expected %s to remain a voter",
-				voterID,
-			)
-		}
 	}
 }
 func TestLeaderStepsDownAfterSelfRemoval(t *testing.T) {

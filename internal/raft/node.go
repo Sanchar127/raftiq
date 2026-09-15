@@ -3450,6 +3450,10 @@ func (n *RaftNode) RemoveMember(
 		return errors.New("raft member ID is required")
 	}
 
+	if ctx == nil {
+		return errors.New("raft: RemoveMember context is nil")
+	}
+
 	n.mu.Lock()
 
 	if n.state.Role != Leader {
@@ -3460,6 +3464,15 @@ func (n *RaftNode) RemoveMember(
 			"cannot remove member %s: node is not leader (role=%v)",
 			peerID,
 			role,
+		)
+	}
+
+	if peerID == n.id {
+		n.mu.Unlock()
+
+		return fmt.Errorf(
+			"cannot remove self %s: transfer leadership first",
+			peerID,
 		)
 	}
 
@@ -3569,17 +3582,14 @@ func (n *RaftNode) RemoveMember(
 
 	if finalMembership.Joint != nil {
 		return fmt.Errorf(
-			"member %s removed but membership is still joint",
+			"member %s removal completed with joint configuration still active",
 			peerID,
 		)
 	}
 
-	if configurationContainsVoter(
-		finalMembership.Current,
-		peerID,
-	) {
+	if membershipIsVoter(finalMembership, peerID) {
 		return fmt.Errorf(
-			"member %s is still present in final membership",
+			"member %s is still present after removal",
 			peerID,
 		)
 	}
