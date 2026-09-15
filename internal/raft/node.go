@@ -3463,15 +3463,6 @@ func (n *RaftNode) RemoveMember(
 		)
 	}
 
-	if peerID == n.id {
-		n.mu.Unlock()
-
-		return fmt.Errorf(
-			"cannot remove member %s: member is the local node",
-			peerID,
-		)
-	}
-
 	membership := n.state.Persistent.Membership
 
 	if membership.Joint != nil {
