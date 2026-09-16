@@ -112,6 +112,30 @@ func ApplyWithMetrics(
 			}
 		}
 
+	case CommandCreateJob:
+		job := model.Job{
+			ID:           model.JobID(command.JobID),
+			Payload:      append([]byte(nil), command.Payload...),
+			State:        model.JobPending,
+			ScheduledAt:  command.ScheduledAt,
+			CreatedIndex: entry.Index,
+		}
+
+		if err := store.CreateJob(job); err != nil {
+			return ApplyResult{
+				Job: &job,
+				Err: fmt.Errorf(
+					"create job %q: %w",
+					command.JobID,
+					err,
+				),
+			}
+		}
+
+		return ApplyResult{
+			Job: &job,
+		}
+
 	case CommandClaimJob:
 		job, err := store.ClaimJob(
 			model.JobID(command.JobID),
