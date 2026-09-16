@@ -6,7 +6,11 @@ import (
 	"testing"
 
 	raftiqv1 "github.com/sanchar127/raftiq/api/proto"
+	"github.com/sanchar127/raftiq/internal/model"
+	"github.com/sanchar127/raftiq/internal/raft"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type fakeKVStore struct {
@@ -36,6 +40,35 @@ func (f *fakeKVStore) Put(_ context.Context, key string, value []byte) error {
 func (f *fakeKVStore) Delete(_ context.Context, key string) error {
 	f.deleteKey = key
 	return f.deleteErr
+}
+
+type fakeJobStore struct {
+	fakeKVStore
+
+	job       *model.Job
+	index     raft.LogIndex
+	createErr error
+
+	createJobID       string
+	createPayload     []byte
+	createScheduledAt int64
+}
+
+func (f *fakeJobStore) CreateJob(
+	_ context.Context,
+	jobID string,
+	payload []byte,
+	scheduledAt int64,
+) (*model.Job, raft.LogIndex, error) {
+	f.createJobID = jobID
+	f.createPayload = append([]byte(nil), payload...)
+	f.createScheduledAt = scheduledAt
+
+	if f.createErr != nil {
+		return nil, 0, f.createErr
+	}
+
+	return f.job, f.index, nil
 }
 
 func TestNewKVService(t *testing.T) {
@@ -276,4 +309,107 @@ func TestKVServiceGetCopiesValue(t *testing.T) {
 	require.Equal(t, []byte("original"), response.GetValue())
 }
 
+func TestKVServiceCreateJob(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeJobStore{
+		job: &model.Job{
+			ID:          model.JobID("job-123"),
+			Payload:     []byte("hello"),
+			State:       model.JobPending,
+			ScheduledAt: 123456789,
+		},
+		index: 42,
+	}
+
+	service, err := NewKVService(store)
+	require.NoError(t, err)
+
+	response, err := service.CreateJob(
+		context.Background(),
+		&raftiqv1.CreateJobRequest{
+			JobId:       "job-123",
+			Payload:     []byte("hello"),
+			ScheduledAt: 123456789,
+		},
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, response)
+	require.Equal(t, uint64(42), response.GetIndex())
+
+	require.Equal(t, "job-123", store.createJobID)
+	require.Equal(t, []byte("hello"), store.createPayload)
+	require.Equal(t, int64(123456789), store.createScheduledAt)
+}
+
+func TestKVServiceCreateJobRejectsNilRequest(t *testing.T) {
+	t.Parallel()
+
+	service, err := NewKVService(&fakeJobStore{})
+	require.NoError(t, err)
+
+	response, err := service.CreateJob(
+		context.Background(),
+		nil,
+	)
+
+	require.Error(t, err)
+	require.Nil(t, response)
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	require.Equal(
+		t,
+		"create job request is required",
+		status.Convert(err).Message(),
+	)
+}
+
+func TestKVServiceCreateJobUnsupported(t *testing.T) {
+	t.Parallel()
+
+	service, err := NewKVService(&fakeKVStore{})
+	require.NoError(t, err)
+
+	response, err := service.CreateJob(
+		context.Background(),
+		&raftiqv1.CreateJobRequest{
+			JobId: "job-123",
+		},
+	)
+
+	require.Error(t, err)
+	require.Nil(t, response)
+	require.Equal(t, codes.Unimplemented, status.Code(err))
+	require.Equal(
+		t,
+		"job operations are not supported",
+		status.Convert(err).Message(),
+	)
+}
+
+func TestKVServiceCreateJobPropagatesError(t *testing.T) {
+	t.Parallel()
+
+	expectedErr := errors.New("create job failure")
+
+	store := &fakeJobStore{
+		createErr: expectedErr,
+	}
+
+	service, err := NewKVService(store)
+	require.NoError(t, err)
+
+	response, err := service.CreateJob(
+		context.Background(),
+		&raftiqv1.CreateJobRequest{
+			JobId: "job-123",
+		},
+	)
+
+	require.ErrorIs(t, err, expectedErr)
+	require.Nil(t, response)
+}
+
 var _ kvRPC = (*fakeKVStore)(nil)
+var _ kvRPC = (*fakeJobStore)(nil)
+var _ jobRPC = (*fakeJobStore)(nil)
