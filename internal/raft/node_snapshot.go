@@ -148,6 +148,8 @@ func (n *RaftNode) CreateSnapshot(
 		return wrappedErr
 	}
 
+	n.metrics.IncSnapshotsCreated()
+
 	n.mu.Unlock()
 
 	logger.Info(
@@ -303,6 +305,8 @@ func (n *RaftNode) InstallSnapshot(
 	reply.Success = true
 
 	n.mu.Unlock()
+
+	n.metrics.IncSnapshotsInstalled()
 
 	logger.Info(
 		"raft snapshot installed",
