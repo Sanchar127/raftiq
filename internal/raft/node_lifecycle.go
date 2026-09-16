@@ -183,3 +183,13 @@ func (n *RaftNode) resetElectionTimer() {
 
 	n.electionElapsed = 0
 }
+func (n *RaftNode) IsRunning() bool {
+	if n == nil {
+		return false
+	}
+
+	n.runMu.Lock()
+	defer n.runMu.Unlock()
+
+	return n.running
+}
