@@ -1,609 +1,189 @@
-# RaftIQ: Distributed Fault-Tolerant Key-Value Store & Distributed Job Scheduler
+# RaftIQ
 
-[![CI Build](https://github.com/sanchar127/raftiq/actions/workflows/ci.yml/badge.svg)](https://github.com/sanchar127/raftiq/actions/workflows/ci.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/sanchar127/raftiq.svg)](https://pkg.go.dev/github.com/sanchar127/raftiq)
-[![Go Report Card](https://goreportcard.com/badge/github.com/sanchar127/raftiq)](https://goreportcard.com/report/github.com/sanchar127/raftiq)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+RaftIQ is a Raft consensus implementation written from scratch in Go, with
+a replicated key-value store built on top of it. It also includes
+tested-but-not-yet-wired-in libraries for distributed locking (fencing
+tokens) and job scheduling, plus a gRPC transport, TLS/mTLS support, and
+Prometheus observability.
 
-**RaftIQ** is a distributed, strongly consistent key-value store and fault-tolerant distributed job scheduler built from scratch in Go.
+The goal is to implement and validate distributed-systems guarantees from
+first principles — election safety, log matching, leader completeness,
+joint-consensus membership changes, linearizable reads, crash-safe WAL
+persistence — rather than depending on an existing consensus library.
 
-The system combines a custom Raft consensus implementation, durable WAL storage, deterministic state-machine replication, lease-based distributed locking, fencing tokens, distributed job scheduling, gRPC transport, production observability, and chaos testing.
-
-The primary goal of RaftIQ is to demonstrate how distributed-systems guarantees can be implemented and validated from first principles rather than relying on an existing consensus library.
-
----
-
-## Key Technical Highlights
-
-* **Custom Raft Consensus:** Leader election, term management, log replication, commit tracking, safety rules, and snapshot installation.
-* **Durable WAL:** Append-only binary WAL with CRC32 validation, crash recovery, tail truncation, suffix replacement, and snapshot persistence.
-* **Strongly Consistent KV Store:** State-machine mutations are applied strictly in committed log order.
-* **Distributed Locking:** Lease-based locking with monotonically increasing fencing tokens.
-* **Fault-Tolerant Scheduler:** Distributed job coordination with worker leases, deterministic worker selection, retries, and stale-worker fencing.
-* **gRPC Transport:** Client APIs and inter-node Raft RPCs implemented using protobuf/gRPC.
-* **Production Observability:** Prometheus metrics, structured logging, tracing hooks, health/readiness endpoints, and Grafana dashboards.
-* **Chaos Testing:** Leader failure, follower failure, network partition, stale worker fencing, recovery, race detection, and linearizability testing.
+**This README states plainly what runs in the shipped binary versus what
+exists as tested library code that isn't started by it.** For the full
+evidence behind every claim here, see [`docs/AUDIT.md`](docs/AUDIT.md).
 
 ---
 
-## High-Level Architecture
+## Status
 
-```text
-                         +-------------------+
-                         |    gRPC Client    |
-                         +---------+---------+
-                                   |
-                  Dynamic Leader Redirection
-                                   |
-             +---------------------+---------------------+
-             |                                           |
-             v                                           v
-   +--------------------+                     +--------------------+
-   |    RaftIQ Node 1   |                     |    RaftIQ Node 2   |
-   |      LEADER        |                     |     FOLLOWER       |
-   +--------------------+                     +--------------------+
-   |                    |                     |                    |
-   |  gRPC Server       |<---- Raft RPCs ---->|  gRPC Server       |
-   |       |            |                     |       |            |
-   |  Raft Engine       |                     |  Raft Engine       |
-   |       |            |                     |       |            |
-   |  Applier Pipeline  |                     |  Applier Pipeline  |
-   |       |            |                     |       |            |
-   |  KV / Lock Engine  |                     |  KV / Lock Engine  |
-   |       |            |                     |       |            |
-   |  Job Scheduler     |                     |  Job Scheduler     |
-   |       |            |                     |       |            |
-   |  WAL / Snapshot    |                     |  WAL / Snapshot    |
-   +--------------------+                     +--------------------+
-             |                                           |
-             +-------------------+-----------------------+
-                                 |
-                                 v
-                    +-------------------------+
-                    |   Distributed Workers   |
-                    |  Fenced Job Execution   |
-                    +-------------------------+
+RaftIQ is an active, in-progress open-source project, not a finished
+production system. Read this before deploying it anywhere that matters:
+
+- **License is currently missing.** The `LICENSE` file in this repository
+  is empty. Until that's fixed, treat the code as **all rights reserved** —
+  do not assume MIT terms apply. See the [License](#license) section.
+- **The shipped binary (`cmd/raftiq`) runs without TLS.** TLS/mTLS is
+  implemented and tested (`internal/transport/tls.go`) but not wired into
+  `main.go`. Raft and KV gRPC traffic is plaintext unless you build your
+  own `main` package around the transport library. See
+  [`docs/transport/security.md`](docs/transport/security.md).
+- **The scheduler and worker are not started by the binary.** They're
+  real, tested packages (`internal/scheduler`, `internal/worker`) meant to
+  be embedded by a consumer; `cmd/raftiq` doesn't run them.
+- **Distributed locking is implemented but not exposed over gRPC.** It's
+  reachable from `internal/server.Server` in Go, not from the network
+  client.
+- **Membership changes (`AddMember`/`RemoveMember`) have no RPC or CLI.**
+  They exist as `RaftNode` methods; driving them requires embedding the
+  Go API.
+
+## Key features
+
+**Implemented and network-reachable in the `raftiq` binary:**
+- Raft leader election with PreVote, term management, log replication, and
+  commit-index advancement (`internal/raft`).
+- Linearizable reads via `ReadIndex` (`RaftNode.ReadIndex`, used by the KV
+  `Get` path).
+- Log compaction / snapshots, including `InstallSnapshot` for lagging
+  followers.
+- A durable, CRC32-checksummed, crash-recoverable WAL
+  (`internal/storage/wal.go`).
+- A replicated KV store (`Get`/`Put`/`Delete`) over gRPC.
+- Prometheus metrics on `-metrics-addr` (`/metrics`).
+
+**Implemented and tested, but not reachable from the running binary today:**
+- Joint-consensus membership changes (`AddMember`/`RemoveMember`) — Go API
+  only, no RPC/CLI.
+- Distributed locking with monotonically increasing fencing tokens
+  (`internal/lock`, `Server.AcquireLock`/`FencedPut`) — Go API only.
+- Distributed job scheduling and worker execution (`internal/scheduler`,
+  `internal/worker`) — not started by `cmd/raftiq/main.go`.
+- TLS/mTLS transport security — implemented, not wired into the CLI.
+- Health/readiness HTTP endpoints (`internal/observability/health.go`) —
+  implemented, not registered in `main.go`.
+
+**Planned / scaffolding only:**
+- Docker packaging (`deploy/docker/` exists but contains no Dockerfile).
+- A configuration file / env-based config loader (currently CLI flags only).
+
+See [`docs/AUDIT.md`](docs/AUDIT.md) for the full inventory with code and
+test references.
+
+## Architecture
+
+```mermaid
+graph TD
+    Client[gRPC Client] -->|KVService| KVSvc[internal/transport.KVService]
+    Peer[Raft Peer] -->|RaftService| RaftSvc[internal/transport.RaftService]
+    KVSvc --> AppServer[internal/server.Server]
+    RaftSvc --> RaftNode[internal/raft.RaftNode]
+    AppServer --> RaftNode
+    AppServer --> KVStore[internal/kv.Store]
+    AppServer --> LockState[internal/lock.State]
+    RaftNode -->|ApplyCh| Applier[internal/kv.Applier]
+    Applier --> KVStore
+    RaftNode --> WAL[internal/storage.WALStorage]
+    RaftNode -->|GRPCTransport| Peer
+    RaftNode -.-> Metrics[internal/observability]
 ```
 
----
+`internal/raft` never imports `net`, gRPC, or a disk package directly — it
+only talks outward through the `Transport` and `Storage` interfaces, which
+is what makes it unit-testable with `LocalTransport` and `MemoryStorage`
+instead of a real cluster. See [`docs/architecture.md`](docs/architecture.md)
+for the full breakdown.
 
-## Core Architecture Components
-
-### 1. Raft Consensus Subsystem
-
-Located in:
-
-```text
-internal/raft
-```
-
-Responsibilities:
-
-* Leader election
-* Candidate/follower/leader state transitions
-* Term management
-* RequestVote RPC handling
-* AppendEntries RPC handling
-* Log replication
-* Commit index advancement
-* Applied index tracking
-* Snapshot installation
-* Leader replication state
-* Election timeout handling
-* Persistent Raft state
-
-The implementation follows the core Raft safety properties including election safety, log matching, leader completeness, and state-machine safety.
-
----
-
-### 2. Deterministic State Machine
-
-Located primarily in:
+## Repository structure
 
 ```text
-internal/kv
+api/proto/          protobuf definitions and generated gRPC code
+client/              Go gRPC client for the KV service
+cmd/raftiq/          the CLI entry point / binary
+internal/raft/        Raft consensus core (election, log, membership, snapshots)
+internal/storage/     Storage interface, WAL, in-memory implementation
+internal/model/       shared types (LogEntry, Configuration, Snapshot, Job, ...)
+internal/kv/          deterministic KV state machine + applier
+internal/lock/        fencing-token lock state
+internal/scheduler/    job scheduling library (not started by cmd/raftiq)
+internal/worker/       job worker library (not started by cmd/raftiq)
+internal/transport/    gRPC transport, TLS/mTLS, KV/Raft services
+internal/server/       glues raft + kv + lock together for cmd/raftiq
+internal/observability/ Prometheus metrics, logging, health checks
+tests/chaos/           multi-node failure-injection tests
+deploy/                Grafana dashboards + empty Prometheus/Docker scaffolding
+docs/                  detailed documentation (see map below)
 ```
 
-Committed Raft entries are passed through a dedicated applier pipeline.
+## Requirements
 
-```text
-Raft Commit
-     |
-     v
-Applier
-     |
-     v
-State Machine
-     |
-     +---- KV State
-     |
-     +---- Lock State
-     |
-     +---- Job State
-```
+- Go 1.26+ (see `go.mod`)
+- `protoc` only if regenerating `api/proto/*.pb.go`
 
-Only committed entries are applied to the state machine.
-
-This ensures that replicas execute the same committed command sequence and therefore converge on the same deterministic state.
-
----
-
-### 3. Distributed Lock & Fencing Engine
-
-The locking subsystem provides:
-
-* Lease-based locks
-* Monotonically increasing fencing tokens
-* Lease expiration
-* Stale worker detection
-* Fencing of delayed/zombie workers
-* State-machine-based lock transitions
-
-A worker holding fencing token `N` must not be able to mutate state after token `N+1` has been issued.
-
-```text
-Worker A
-   |
-   | Token = 41
-   v
-Lock Granted
-   |
-   | Worker becomes partitioned
-   |
-   X
-
-Lease expires
-
-Worker B
-   |
-   | Token = 42
-   v
-Lock Granted
-
-Worker A later sends mutation
-   |
-   | Token = 41
-   v
-Rejected
-   |
-   +---- ErrInvalidFencing
-```
-
-This protects the system against stale workers and delayed network messages.
-
----
-
-### 4. Distributed Job Scheduler
-
-Located in:
-
-```text
-internal/scheduler
-internal/worker
-```
-
-The scheduler coordinates job execution across workers.
-
-Typical lifecycle:
-
-```text
-PENDING
-   |
-   v
-CLAIMED
-   |
-   v
-RUNNING
-   |
-   +----------+
-   |          |
-   v          v
-COMPLETED   FAILED
-```
-
-The scheduler uses:
-
-* Worker registration
-* Worker heartbeats
-* Lease expiration
-* Deterministic worker selection
-* Job state replication
-* Fencing tokens
-* Retry handling
-* Worker failure recovery
-
----
-
-### 5. Durable Storage & WAL
-
-Located in:
-
-```text
-internal/storage
-```
-
-The storage layer provides:
-
-* Append-only WAL
-* Binary record encoding
-* CRC32 validation
-* Full-write handling
-* Crash recovery
-* Corrupted-tail detection
-* Tail truncation
-* Log suffix replacement
-* Snapshot persistence
-* Snapshot recovery
-* Explicit durability/sync semantics
-
-Example record structure:
-
-```text
-+--------------+-------------------+----------------------+--------------+
-| Record Type  | Payload Length    | Payload Data         | CRC32        |
-|    1 byte    |      4 bytes      |      N bytes         |   4 bytes    |
-+--------------+-------------------+----------------------+--------------+
-```
-
-The WAL is scanned during startup and validated before recovered state is exposed.
-
----
-
-### 6. gRPC Transport Layer
-
-Located in:
-
-```text
-internal/transport
-api/proto
-```
-
-Supports:
-
-#### Client operations
-
-* `Get`
-* `Put`
-* `Delete`
-* Job submission and related APIs
-
-#### Raft operations
-
-* `AppendEntries`
-* `RequestVote`
-* `InstallSnapshot`
-
-Followers can return leader information so clients can redirect requests to the current leader.
-
----
-
-### 7. Observability
-
-Located primarily in:
-
-```text
-internal/observability
-```
-
-RaftIQ exposes operational telemetry including:
-
-* Raft state
-* Current term
-* Election counts
-* RPC latency
-* WAL write latency
-* WAL sync latency
-* KV operation counters
-* Scheduler queue depth
-* Worker state
-* Job execution metrics
-* Health/readiness status
-
-Prometheus and Grafana can be used for cluster monitoring.
-
----
-
-# Low-Level System Design
-
-## 1. Consensus & Log Replication
-
-The basic write path is:
-
-```text
-Client
-  |
-  v
-gRPC Server
-  |
-  v
-RaftNode.Propose()
-  |
-  v
-Append Entry to Local Log
-  |
-  v
-Persist to WAL
-  |
-  v
-AppendEntries RPCs
-  |
-  +----------+----------+
-  |                     |
-  v                     v
-Follower 1           Follower 2
-  |                     |
-  +----------+----------+
-             |
-             v
-        Quorum ACK
-             |
-             v
-       Advance CommitIndex
-             |
-             v
-       Applier Pipeline
-             |
-             v
-       State Machine
-             |
-             v
-        Client Response
-```
-
-A write is considered committed only after the leader has established the required quorum according to the Raft rules.
-
----
-
-# 2. Fencing Tokens
-
-Distributed workers can become stale because of:
-
-* Network partitions
-* Long GC pauses
-* Process stalls
-* Delayed packets
-* Worker crashes
-* Lease expiration
-
-RaftIQ uses monotonically increasing fencing tokens to protect against these conditions.
-
-Example:
-
-```text
-Worker A obtains token 10
-
-Worker A
-   |
-   | token=10
-   v
-Partition
-
-Lease expires
-
-Worker B obtains token 11
-
-Worker B
-   |
-   | token=11
-   v
-Executes job
-
-Worker A reconnects
-   |
-   | token=10
-   v
-Rejected by state machine
-```
-
-The state machine therefore prevents an older worker from modifying state after a newer ownership decision has been committed.
-
----
-
-# 3. WAL Recovery
-
-On startup:
-
-```text
-Open WAL
-   |
-   v
-Read Record
-   |
-   v
-Validate Header
-   |
-   v
-Validate Length
-   |
-   v
-Read Payload
-   |
-   v
-Validate CRC32
-   |
-   +---- Invalid tail?
-   |          |
-   |          v
-   |     Truncate Tail
-   |
-   v
-Replay Record
-   |
-   v
-Recover State
-```
-
-A partial final record caused by an interrupted write can therefore be detected and repaired without replaying corrupted state.
-
----
-
-# 4. Snapshotting
-
-Snapshots prevent the Raft log from growing indefinitely.
-
-Conceptually:
-
-```text
-Original Log
-
-[1][2][3][4][5][6][7][8][9][10]
-                ^
-             Snapshot
-```
-
-After snapshotting:
-
-```text
-Snapshot
-  |
-  +---- State through index 6
-
-Remaining Log
-
-[7][8][9][10]
-```
-
-A follower that is too far behind the compacted log can receive an `InstallSnapshot` RPC instead of requiring every historical log entry.
-
----
-
-# Strong Consistency
-
-RaftIQ is designed around replicated state-machine consistency.
-
-For writes:
-
-```text
-Client
-  |
-  v
-Leader
-  |
-  v
-Replicated Log
-  |
-  v
-Quorum
-  |
-  v
-Commit
-  |
-  v
-Apply
-```
-
-For linearizable reads, the implementation must ensure the serving node has sufficiently established current leadership/commit state rather than simply returning potentially stale follower state.
-
----
-
-# Testing & Chaos Engineering
-
-RaftIQ includes testing across multiple failure classes.
-
-Examples include:
-
-```text
-tests/chaos/
-```
-
-Important scenarios include:
-
-### Leader Failure
-
-```text
-Leader
-   |
-   X
- Crash
-   |
-   v
-Election
-   |
-   v
-New Leader
-   |
-   v
-Continue Operations
-```
-
-### Follower Failure
-
-The remaining quorum continues operating while the failed follower is eventually brought back and catches up.
-
-### Network Partition
-
-The minority side must not be able to make committed decisions without quorum.
-
-### Zombie Worker
-
-A stale worker with an old fencing token must be rejected.
-
-### Recovery
-
-Nodes restart from durable state and reconstruct the correct Raft/storage state.
-
-### Linearizability
-
-Concurrent client operations are exercised while failures and restarts occur to validate consistency guarantees.
-
----
-
-# Documentation
-
-Detailed technical documentation is available under `docs/`.
-
-| Document                          | Description                                                  |
-| --------------------------------- | ------------------------------------------------------------ |
-| `docs/architecture.md`            | Overall architecture, module boundaries, and execution flows |
-| `docs/raft-engine.md`             | Raft state machine, elections, replication, and safety       |
-| `docs/storage-engine.md`          | WAL, durability, recovery, and snapshots                     |
-| `docs/scheduler-and-worker.md`    | Distributed scheduling, leases, workers, and fencing         |
-| `docs/observability-and-chaos.md` | Metrics, monitoring, and chaos testing                       |
-
----
-
-# Getting Started
-
-## Prerequisites
-
-* Go 1.22+
-* Protocol Buffers compiler (`protoc`)
-* Docker and Docker Compose (optional)
-
-## Clone
+## Quick start
 
 ```bash
 git clone https://github.com/sanchar127/raftiq.git
 cd raftiq
+go mod download
+go build ./...
+go test ./...
 ```
 
-## Build
+## Running RaftIQ
+
+### Single node (for local experimentation)
 
 ```bash
-make build
+go run ./cmd/raftiq \
+  -id node1 \
+  -raft-addr :7000 \
+  -kv-addr :8000 \
+  -metrics-addr :9090 \
+  -data-dir ./data/node1
 ```
 
-## Run Tests
+A single-node cluster still runs the full Raft protocol against itself and
+will elect itself leader.
+
+### Multi-node cluster
+
+Every node needs the same `-peers` map (including itself) and a unique `-id`:
 
 ```bash
-make test
+go run ./cmd/raftiq -id node1 -raft-addr :7001 -kv-addr :8001 -metrics-addr :9091 \
+  -data-dir ./data/node1 \
+  -peers node1=localhost:7001,node2=localhost:7002,node3=localhost:7003
+
+go run ./cmd/raftiq -id node2 -raft-addr :7002 -kv-addr :8002 -metrics-addr :9092 \
+  -data-dir ./data/node2 \
+  -peers node1=localhost:7001,node2=localhost:7002,node3=localhost:7003
+
+go run ./cmd/raftiq -id node3 -raft-addr :7003 -kv-addr :8003 -metrics-addr :9093 \
+  -data-dir ./data/node3 \
+  -peers node1=localhost:7001,node2=localhost:7002,node3=localhost:7003
 ```
 
-## Run Race Detector
+The membership is fixed at startup via `BootstrapMembership()` — there is
+no "join an existing cluster" flag. See
+[`docs/operations.md`](docs/operations.md) and
+[`docs/raft/membership.md`](docs/raft/membership.md).
+
+## Testing
 
 ```bash
+go test ./...
 go test -race ./...
-```
-
-## Run Chaos Tests
-
-```bash
+go vet ./...
 go test -v -race ./tests/chaos/...
 ```
 
----
+`make check` also runs `golangci-lint` and `govulncheck`. See
+[`docs/testing.md`](docs/testing.md) for what each test package covers.
 
-# Go Client Example
+## Go client example
 
 ```go
 package main
@@ -621,47 +201,81 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	cli, err := client.Dial(ctx, "localhost:50051")
+	cli, err := client.Dial(ctx, "localhost:8001")
 	if err != nil {
 		log.Fatalf("failed to connect: %v", err)
 	}
 	defer cli.Close()
 
-	if err := cli.Put(ctx, "cluster:config:max_connections", []byte("10000")); err != nil {
+	if err := cli.Put(ctx, "example-key", []byte("example-value")); err != nil {
 		log.Fatalf("put failed: %v", err)
 	}
 
-	value, err := cli.Get(ctx, "cluster:config:max_connections")
+	value, err := cli.Get(ctx, "example-key")
 	if err != nil {
 		log.Fatalf("get failed: %v", err)
 	}
 
-	fmt.Printf("Retrieved Key: %s\n", string(value))
+	fmt.Printf("value: %s\n", value)
 }
 ```
 
----
+Note: if the node you dial is not the current leader, `Put` will fail with
+a plain gRPC error rather than a leader redirect (see
+[`docs/AUDIT.md`](docs/AUDIT.md)). Retry against another node in `-peers`.
 
-# Engineering Standards
+## Documentation map
 
-RaftIQ follows production-oriented engineering practices:
+| Area | Document |
+|---|---|
+| Audit / implementation inventory | [`docs/AUDIT.md`](docs/AUDIT.md) |
+| Architecture overview | [`docs/architecture.md`](docs/architecture.md) |
+| HLD + LLD | [`docs/system-design.md`](docs/system-design.md) |
+| Implementation walkthrough | [`docs/implementation.md`](docs/implementation.md) |
+| Development workflow | [`docs/development.md`](docs/development.md) |
+| Testing strategy | [`docs/testing.md`](docs/testing.md) |
+| Configuration / CLI flags | [`docs/configuration.md`](docs/configuration.md) |
+| Running / operating a cluster | [`docs/operations.md`](docs/operations.md) |
+| Debugging common failures | [`docs/troubleshooting.md`](docs/troubleshooting.md) |
+| Persistence overview | [`docs/persistence.md`](docs/persistence.md) |
+| Raft: overview | [`docs/raft/overview.md`](docs/raft/overview.md) |
+| Raft: leader election | [`docs/raft/leader-election.md`](docs/raft/leader-election.md) |
+| Raft: log replication | [`docs/raft/log-replication.md`](docs/raft/log-replication.md) |
+| Raft: commitment | [`docs/raft/commitment.md`](docs/raft/commitment.md) |
+| Raft: membership | [`docs/raft/membership.md`](docs/raft/membership.md) |
+| Raft: joint consensus | [`docs/raft/joint-consensus.md`](docs/raft/joint-consensus.md) |
+| Raft: snapshots | [`docs/raft/snapshots.md`](docs/raft/snapshots.md) |
+| Raft: linearizable reads | [`docs/raft/linearizable-reads.md`](docs/raft/linearizable-reads.md) |
+| Raft: failure recovery | [`docs/raft/failure-recovery.md`](docs/raft/failure-recovery.md) |
+| Storage: overview | [`docs/storage/overview.md`](docs/storage/overview.md) |
+| Storage: WAL format | [`docs/storage/wal.md`](docs/storage/wal.md) |
+| Storage: snapshots | [`docs/storage/snapshots.md`](docs/storage/snapshots.md) |
+| Transport: overview | [`docs/transport/overview.md`](docs/transport/overview.md) |
+| Transport: local (test) transport | [`docs/transport/local.md`](docs/transport/local.md) |
+| Transport: gRPC | [`docs/transport/grpc.md`](docs/transport/grpc.md) |
+| Transport: TLS/mTLS | [`docs/transport/security.md`](docs/transport/security.md) |
+| Component: KV store | [`docs/components/kv.md`](docs/components/kv.md) |
+| Component: distributed lock | [`docs/components/lock.md`](docs/components/lock.md) |
+| Component: scheduler | [`docs/components/scheduler.md`](docs/components/scheduler.md) |
+| Component: worker | [`docs/components/worker.md`](docs/components/worker.md) |
+| Component: observability | [`docs/components/observability.md`](docs/components/observability.md) |
 
-* Go idioms and standard library first
-* Strict error handling
-* `gofmt`
-* `go vet`
-* `golangci-lint`
-* Race detector testing
-* Unit tests
-* Integration tests
-* Failure injection
-* Chaos testing
-* Durable storage validation
-* Concurrent execution testing
-* Observability instrumentation
+## Contributing
 
----
+See [`CONTRIBUTING.md`](CONTRIBUTING.md), including the Raft safety
+invariants contributors must not violate.
 
-# License
+## Security
 
-RaftIQ is released under the MIT License.
+See [`SECURITY.md`](SECURITY.md) for the vulnerability-reporting process
+and the current, honest state of transport security.
+
+## License
+
+The `LICENSE` file in this repository is currently **empty**. Prior
+versions of this README claimed an MIT license and displayed an MIT badge;
+that claim did not match the actual repository contents, so it has been
+removed pending an actual license file being added. Until a license is
+added, no license is granted to use this code beyond what's permitted by
+default copyright law. If you're the maintainer, add the license text of
+your choice to `LICENSE`.

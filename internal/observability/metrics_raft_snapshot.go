@@ -24,6 +24,12 @@ func (m *Metrics) initRaftSnapshot() {
 		},
 		[]string{"node_id"},
 	)
+
+	// Initialize the node's time series without incrementing the counters.
+	// This ensures Prometheus exposes zero-valued metrics before the first
+	// snapshot event occurs.
+	m.SnapshotsCreatedTotal.WithLabelValues(m.nodeID)
+	m.SnapshotsInstalledTotal.WithLabelValues(m.nodeID)
 }
 
 func (m *Metrics) IncSnapshotsCreated() {

@@ -356,12 +356,14 @@ func TestRaftMetricsSnapshots(t *testing.T) {
 # HELP raftiq_raft_snapshots_created_total Total number of snapshots created.
 # TYPE raftiq_raft_snapshots_created_total counter
 raftiq_raft_snapshots_created_total{node_id="node-1"} 2
+raftiq_raft_snapshots_created_total{node_id="test-node"} 0
 `
 
 	expectedInstalled := `
 # HELP raftiq_raft_snapshots_installed_total Total number of snapshots installed.
 # TYPE raftiq_raft_snapshots_installed_total counter
 raftiq_raft_snapshots_installed_total{node_id="node-1"} 1
+raftiq_raft_snapshots_installed_total{node_id="test-node"} 0
 `
 
 	assertMetric(

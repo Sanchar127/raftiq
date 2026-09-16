@@ -9,13 +9,13 @@ import (
 )
 
 func main() {
-	c, err := client.Dial("127.0.0.1:8001")
+	c, err := client.Dial("127.0.0.1:8002")
 	if err != nil {
 		panic(err)
 	}
 	defer c.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := c.Put(ctx, "grafana-test", []byte("hello")); err != nil {
@@ -27,5 +27,31 @@ func main() {
 		panic(err)
 	}
 
-	fmt.Printf("found=%v value=%q\n", found, value)
+	fmt.Printf("KV: found=%v value=%q\n", found, value)
+
+	jobID := fmt.Sprintf("job-%d", time.Now().UnixNano())
+
+	index, err := c.CreateJob(
+		ctx,
+		jobID,
+		[]byte("hello from raftiq worker"),
+		0,
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf(
+		"JOB CREATED: id=%s index=%d\n",
+		jobID,
+		index,
+	)
+
+	fmt.Println("Waiting for scheduler and worker execution...")
+	time.Sleep(2 * time.Second)
+
+	fmt.Printf(
+		"JOB SUBMISSION COMPLETE: id=%s\n",
+		jobID,
+	)
 }

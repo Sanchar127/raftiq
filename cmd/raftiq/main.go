@@ -19,12 +19,14 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	"github.com/sanchar127/raftiq/internal/kv"
+	"github.com/sanchar127/raftiq/internal/model"
 	"github.com/sanchar127/raftiq/internal/observability"
 	"github.com/sanchar127/raftiq/internal/raft"
 	"github.com/sanchar127/raftiq/internal/scheduler"
 	"github.com/sanchar127/raftiq/internal/server"
 	"github.com/sanchar127/raftiq/internal/storage"
 	"github.com/sanchar127/raftiq/internal/transport"
+	"github.com/sanchar127/raftiq/internal/worker"
 )
 
 type peerFlag map[raft.NodeID]string
@@ -452,6 +454,68 @@ func main() {
 	)
 
 	// -------------------------------------------------------------------------
+	// Workers.
+	// -------------------------------------------------------------------------
+
+	workers := make([]*worker.Worker, 0, len(cfg.workers))
+
+	jobHandler := worker.HandlerFunc(
+		func(
+			ctx context.Context,
+			job model.Job,
+		) error {
+			logger.Info(
+				"job handler executed",
+				"job_id", job.ID,
+				"worker_id", job.AssignedWorkerID,
+				"execution_id", job.ExecutionID,
+				"attempt", job.Attempt,
+				"payload_size", len(job.Payload),
+			)
+
+			return nil
+		},
+	)
+
+	for _, workerID := range cfg.workers {
+		w, err := worker.New(
+			workerID,
+			jobHandler,
+		)
+		if err != nil {
+			logger.Error(
+				"failed to create worker",
+				"worker_id", workerID,
+				"error", err,
+			)
+			os.Exit(1)
+		}
+
+		if err := w.ConfigureLoop(
+			kvStore,
+			worker.Config{
+				Interval: scheduler.DefaultInterval,
+				Raft:     node,
+				Applier:  appServer.Applier(),
+				Metrics: observability.NewWorkerMetrics(
+					cfg.nodeID,
+					metrics,
+				),
+			},
+		); err != nil {
+			logger.Error(
+				"failed to configure worker",
+				"worker_id", workerID,
+				"error", err,
+			)
+			os.Exit(1)
+		}
+
+		w.SetLogger(logger)
+		workers = append(workers, w)
+	}
+
+	// -------------------------------------------------------------------------
 	// Raft transport.
 	// -------------------------------------------------------------------------
 
@@ -674,7 +738,7 @@ func main() {
 	// Start servers.
 	// -------------------------------------------------------------------------
 
-	errCh := make(chan error, 4)
+	errCh := make(chan error, len(workers)+5)
 
 	go func() {
 		logger.Info(
@@ -764,13 +828,13 @@ func main() {
 	}
 
 	// -------------------------------------------------------------------------
-	// Start scheduler.
+	// Start scheduler and workers.
 	// -------------------------------------------------------------------------
 
-	schedulerCtx, schedulerCancel := context.WithCancel(
+	executionCtx, executionCancel := context.WithCancel(
 		context.Background(),
 	)
-	defer schedulerCancel()
+	defer executionCancel()
 
 	go func() {
 		logger.Info(
@@ -780,7 +844,7 @@ func main() {
 			"workers", []string(cfg.workers),
 		)
 
-		if err := jobScheduler.Run(schedulerCtx); err != nil &&
+		if err := jobScheduler.Run(executionCtx); err != nil &&
 			!errors.Is(err, context.Canceled) &&
 			!errors.Is(err, context.DeadlineExceeded) {
 			errCh <- fmt.Errorf(
@@ -790,9 +854,30 @@ func main() {
 		}
 	}()
 
+	for _, w := range workers {
+		go func(w *worker.Worker) {
+			logger.Info(
+				"starting worker",
+				"worker_id", w.ID(),
+				"interval", scheduler.DefaultInterval,
+			)
+
+			if err := w.Run(executionCtx); err != nil &&
+				!errors.Is(err, context.Canceled) &&
+				!errors.Is(err, context.DeadlineExceeded) {
+				errCh <- fmt.Errorf(
+					"worker %s: %w",
+					w.ID(),
+					err,
+				)
+			}
+		}(w)
+	}
+
 	logger.Info(
 		"raftiq node started",
 		"node_id", cfg.nodeID,
+		"workers", len(workers),
 	)
 
 	// -------------------------------------------------------------------------
@@ -823,7 +908,7 @@ func main() {
 	// Graceful shutdown.
 	// -------------------------------------------------------------------------
 
-	schedulerCancel()
+	executionCancel()
 
 	shutdown(
 		logger,
@@ -997,8 +1082,8 @@ func shutdown(
 		}
 	}
 
-	// Scheduler context is canceled by main before this function.
-	// There is no separate Stop method on Scheduler.
+	// Scheduler and workers are stopped by cancellation of executionCtx
+	// before shutdown() is called.
 	_ = jobScheduler
 
 	// Stop Raft before closing its transport/storage dependencies.
