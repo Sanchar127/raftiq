@@ -3,6 +3,7 @@ package kv
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -480,6 +481,210 @@ func TestApplierCreateJobConflictDoesNotStopApplier(t *testing.T) {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("Run() error = %v, want context canceled", err)
+		}
+
+	case <-time.After(time.Second):
+		t.Fatal("Applier.Run() did not stop")
+	}
+}
+
+func TestApplierSnapshotReturnsAppliedStateAndIndex(t *testing.T) {
+	store := NewStore()
+	applier := NewApplier(store)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	applyCh := make(chan raft.LogEntry, 2)
+	done := make(chan error, 1)
+
+	go func() {
+		done <- applier.Run(ctx, applyCh)
+	}()
+
+	putCommand, err := EncodeCommand(Command{
+		Type:  CommandPut,
+		Key:   "snapshot-key",
+		Value: []byte("value-at-42"),
+	})
+	if err != nil {
+		t.Fatalf("EncodeCommand() error = %v", err)
+	}
+
+	applyCh <- raft.LogEntry{
+		Index: 42,
+		Term:  3,
+		Data:  putCommand,
+	}
+
+	waitCtx, waitCancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
+	defer waitCancel()
+
+	if err := applier.WaitApplied(waitCtx, 42); err != nil {
+		t.Fatalf("WaitApplied() error = %v", err)
+	}
+
+	data, index, err := applier.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+
+	if index != 42 {
+		t.Fatalf(
+			"snapshot index = %d, want 42",
+			index,
+		)
+	}
+
+	snapshotStore := NewStore()
+
+	if err := snapshotStore.Restore(data); err != nil {
+		t.Fatalf(
+			"Restore(snapshot data) error = %v",
+			err,
+		)
+	}
+
+	value, ok := snapshotStore.Get("snapshot-key")
+	if !ok {
+		t.Fatal("snapshot did not contain applied key")
+	}
+
+	if string(value) != "value-at-42" {
+		t.Fatalf(
+			"snapshot value = %q, want %q",
+			value,
+			"value-at-42",
+		)
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf(
+				"Run() error = %v, want context canceled",
+				err,
+			)
+		}
+
+	case <-time.After(time.Second):
+		t.Fatal("Applier.Run() did not stop")
+	}
+}
+
+func TestApplierSnapshotConcurrentWithApply(t *testing.T) {
+	store := NewStore()
+	applier := NewApplier(store)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	applyCh := make(chan raft.LogEntry, 32)
+	done := make(chan error, 1)
+
+	go func() {
+		done <- applier.Run(ctx, applyCh)
+	}()
+
+	const entries = 100
+
+	for i := 1; i <= entries; i++ {
+		command, err := EncodeCommand(Command{
+			Type:  CommandPut,
+			Key:   "snapshot-key",
+			Value: []byte(fmt.Sprintf("value-%d", i)),
+		})
+		if err != nil {
+			t.Fatalf("EncodeCommand() error = %v", err)
+		}
+
+		applyCh <- raft.LogEntry{
+			Index: model.LogIndex(i),
+			Term:  1,
+			Data:  command,
+		}
+	}
+
+	waitCtx, waitCancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
+	defer waitCancel()
+
+	if err := applier.WaitApplied(waitCtx, entries); err != nil {
+		t.Fatalf("WaitApplied() error = %v", err)
+	}
+
+	var previousIndex model.LogIndex
+
+	for i := 0; i < 100; i++ {
+		data, index, err := applier.Snapshot()
+		if err != nil {
+			t.Fatalf("Snapshot() error = %v", err)
+		}
+
+		if index < previousIndex {
+			t.Fatalf(
+				"snapshot index moved backward: previous=%d current=%d",
+				previousIndex,
+				index,
+			)
+		}
+
+		if index > entries {
+			t.Fatalf(
+				"snapshot index = %d, want <= %d",
+				index,
+				entries,
+			)
+		}
+
+		snapshotStore := NewStore()
+
+		if err := snapshotStore.Restore(data); err != nil {
+			t.Fatalf(
+				"Restore(snapshot data) error = %v at index %d",
+				err,
+				index,
+			)
+		}
+
+		value, ok := snapshotStore.Get("snapshot-key")
+		if !ok {
+			t.Fatalf(
+				"snapshot at index %d missing snapshot-key",
+				index,
+			)
+		}
+
+		expected := fmt.Sprintf("value-%d", index)
+
+		if string(value) != expected {
+			t.Fatalf(
+				"snapshot at index %d contains value %q, want %q",
+				index,
+				value,
+				expected,
+			)
+		}
+
+		previousIndex = index
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf(
+				"Run() error = %v, want context canceled",
+				err,
+			)
 		}
 
 	case <-time.After(time.Second):

@@ -25,12 +25,13 @@ type Applier struct {
 	metrics KVMetrics
 	logger  *slog.Logger
 
-	mu          sync.Mutex
+	mu      sync.Mutex
+	applyMu sync.RWMutex
+
 	lastApplied model.LogIndex
 	applyErr    error
 
 	results map[model.LogIndex]ApplyResult
-	cond    *sync.Cond
 }
 
 func NewApplier(store *Store) *Applier {
@@ -110,6 +111,8 @@ func (a *Applier) Run(
 			}
 			a.mu.Unlock()
 
+			a.applyMu.Lock()
+
 			result := ApplyWithMetrics(a.store, entry, metrics)
 
 			a.mu.Lock()
@@ -132,6 +135,7 @@ func (a *Applier) Run(
 				err := a.applyErr
 
 				a.mu.Unlock()
+				a.applyMu.Unlock()
 
 				a.logger.Error(
 					"failed to apply Raft log entry",
@@ -144,6 +148,7 @@ func (a *Applier) Run(
 			}
 
 			a.mu.Unlock()
+			a.applyMu.Unlock()
 
 			if result.Err != nil {
 				a.logger.Debug(
@@ -240,9 +245,34 @@ func (a *Applier) WaitResult(
 	}
 }
 
+// Snapshot captures the state-machine state and the exact Raft log index
+// represented by that state.
+//
+// The returned index and data are guaranteed to correspond to the same
+// applied state because state-machine application and lastApplied updates
+// use the same synchronization boundary.
+func (a *Applier) Snapshot() ([]byte, model.LogIndex, error) {
+	a.applyMu.RLock()
+	defer a.applyMu.RUnlock()
+
+	data, err := a.store.Snapshot()
+	if err != nil {
+		return nil, 0, fmt.Errorf("snapshot KV state: %w", err)
+	}
+
+	a.mu.Lock()
+	index := a.lastApplied
+	a.mu.Unlock()
+
+	return data, index, nil
+}
+
 func (a *Applier) RestoreSnapshot(
 	snapshot model.Snapshot,
 ) error {
+	a.applyMu.Lock()
+	defer a.applyMu.Unlock()
+
 	if err := a.store.Restore(snapshot.Data); err != nil {
 		a.logger.Error(
 			"failed to restore KV snapshot",
