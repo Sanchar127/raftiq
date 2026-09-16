@@ -332,6 +332,9 @@ func main() {
 		cfg.nodeID,
 	)
 
+	storageMetrics := observability.NewStorageMetrics(cfg.nodeID, metrics)
+	store.SetMetrics(storageMetrics)
+
 	kvMetrics := observability.NewKVMetrics(metrics)
 
 	// -------------------------------------------------------------------------
