@@ -260,19 +260,30 @@ func (n *RaftNode) InstallSnapshot(
 
 	restore := n.snapshotRestore
 
+	if restore == nil {
+		n.mu.Unlock()
+
+		logger.Error(
+			"failed to install snapshot",
+			"leader_id", args.LeaderID,
+			"last_included_index", args.LastIncludedIndex,
+			"error", "snapshot restore callback is not configured",
+		)
+
+		return reply
+	}
+
 	n.mu.Unlock()
 
-	if restore != nil {
-		if err := restore(snapshot); err != nil {
-			logger.Error(
-				"failed to restore state machine from snapshot",
-				"leader_id", args.LeaderID,
-				"last_included_index", args.LastIncludedIndex,
-				"error", err,
-			)
+	if err := restore(snapshot); err != nil {
+		logger.Error(
+			"failed to restore state machine from snapshot",
+			"leader_id", args.LeaderID,
+			"last_included_index", args.LastIncludedIndex,
+			"error", err,
+		)
 
-			return reply
-		}
+		return reply
 	}
 
 	n.mu.Lock()
@@ -382,6 +393,7 @@ func (n *RaftNode) handleInstallSnapshotReply(
 
 			return
 		}
+
 		n.updateStateMetricsLocked()
 		n.mu.Unlock()
 

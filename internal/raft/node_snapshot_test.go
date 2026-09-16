@@ -153,6 +153,10 @@ func TestInstallSnapshotPersistsHigherTerm(t *testing.T) {
 	node, err := NewRaftNodeWithStorage("node-1", store)
 	require.NoError(t, err)
 
+	node.SetSnapshotRestore(func(snapshot model.Snapshot) error {
+		return nil
+	})
+
 	reply := node.InstallSnapshot(InstallSnapshotArgs{
 		Term:              2,
 		LeaderID:          "node-2",
@@ -229,6 +233,7 @@ func TestInstallSnapshotRestoresStateMachine(t *testing.T) {
 	require.Equal(t, LogIndex(1), state.Volatile.CommitIndex)
 	require.Equal(t, LogIndex(1), state.Volatile.LastApplied)
 }
+
 func TestInstallSnapshotRestoreFailureDoesNotAdvanceRaftState(t *testing.T) {
 	store := storage.NewMemoryStorage()
 
@@ -246,6 +251,36 @@ func TestInstallSnapshotRestoreFailureDoesNotAdvanceRaftState(t *testing.T) {
 	node.SetSnapshotRestore(func(snapshot model.Snapshot) error {
 		return restoreErr
 	})
+
+	reply := node.InstallSnapshot(InstallSnapshotArgs{
+		Term:              2,
+		LeaderID:          "node-2",
+		LastIncludedIndex: 1,
+		LastIncludedTerm:  1,
+		Data:              []byte(`{"name":"raftiq"}`),
+	})
+
+	require.False(t, reply.Success)
+
+	require.Equal(t, LogIndex(0), node.Log().LastIncludedIndex())
+
+	state := node.State()
+
+	require.Equal(t, LogIndex(0), state.Volatile.CommitIndex)
+	require.Equal(t, LogIndex(0), state.Volatile.LastApplied)
+}
+
+func TestInstallSnapshotRejectsMissingStateMachineRestore(t *testing.T) {
+	store := storage.NewMemoryStorage()
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	require.NoError(t, err)
+
+	require.NoError(t, node.Log().Append(LogEntry{
+		Index: 1,
+		Term:  1,
+		Data:  []byte("entry-1"),
+	}))
 
 	reply := node.InstallSnapshot(InstallSnapshotArgs{
 		Term:              2,
