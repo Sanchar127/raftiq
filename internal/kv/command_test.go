@@ -379,3 +379,82 @@ func TestEncodeDecodeCreateJobCommand(t *testing.T) {
 		)
 	}
 }
+
+func TestApplyCreateJob(t *testing.T) {
+	store := NewStore()
+
+	command := Command{
+		Type:        CommandCreateJob,
+		JobID:       "job-1",
+		Payload:     []byte("send-email"),
+		ScheduledAt: 123456789,
+	}
+
+	data, err := EncodeCommand(command)
+	if err != nil {
+		t.Fatalf("encode command: %v", err)
+	}
+
+	entry := raft.LogEntry{
+		Index: 42,
+		Term:  3,
+		Data:  data,
+	}
+
+	result := Apply(store, entry)
+	if result.Err != nil {
+		t.Fatalf("Apply() returned error: %v", result.Err)
+	}
+
+	got, ok := store.GetJob(model.JobID("job-1"))
+	if !ok {
+		t.Fatal("expected job to exist")
+	}
+
+	if got.ID != model.JobID("job-1") {
+		t.Fatalf("expected job ID job-1, got %q", got.ID)
+	}
+
+	if string(got.Payload) != "send-email" {
+		t.Fatalf("expected payload %q, got %q", "send-email", got.Payload)
+	}
+
+	if got.State != model.JobPending {
+		t.Fatalf(
+			"expected state %q, got %q",
+			model.JobPending,
+			got.State,
+		)
+	}
+
+	if got.ScheduledAt != 123456789 {
+		t.Fatalf(
+			"expected scheduled time %d, got %d",
+			123456789,
+			got.ScheduledAt,
+		)
+	}
+
+	if got.CreatedIndex != 42 {
+		t.Fatalf(
+			"expected created index %d, got %d",
+			42,
+			got.CreatedIndex,
+		)
+	}
+
+	if got.Attempt != 0 {
+		t.Fatalf("expected attempt 0, got %d", got.Attempt)
+	}
+
+	if got.FencingToken != 0 {
+		t.Fatalf("expected fencing token 0, got %d", got.FencingToken)
+	}
+
+	if got.AssignedWorkerID != "" {
+		t.Fatalf(
+			"expected no assigned worker, got %q",
+			got.AssignedWorkerID,
+		)
+	}
+}

@@ -292,6 +292,7 @@ func commandNeedsResult(entry raft.LogEntry) bool {
 
 	switch command.Type {
 	case CommandFencedPut,
+		CommandCreateJob,
 		CommandClaimJob,
 		CommandJobReclaim,
 		CommandJobStart,
@@ -311,6 +312,7 @@ func isExpectedApplyError(err error) bool {
 		errors.Is(err, ErrInvalidJob) ||
 		errors.Is(err, ErrJobNotClaimable) ||
 		errors.Is(err, ErrJobAlreadyClaimed) ||
+		errors.Is(err, ErrJobAlreadyExists) ||
 		errors.Is(err, ErrInvalidJobState) ||
 		errors.Is(err, ErrJobOwnershipLost)
 }

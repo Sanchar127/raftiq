@@ -40,7 +40,7 @@ func (s *Store) CreateJob(job model.Job) error {
 			"reason", "job_already_exists",
 		)
 
-		return fmt.Errorf("job %q already exists", job.ID)
+		return fmt.Errorf("%w: job %q", ErrJobAlreadyExists, job.ID)
 	}
 
 	job.Payload = append([]byte(nil), job.Payload...)
