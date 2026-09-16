@@ -16,32 +16,45 @@ var (
 type Client struct {
 	mu     sync.RWMutex
 	kv     KV
+	job    Job
 	conn   *grpc.ClientConn
 	closed bool
 }
 
 func New(kv KV) *Client {
-	return &Client{
+	client := &Client{
 		kv: kv,
 	}
-}
 
+	if backend, ok := kv.(localJobBackend); ok {
+		job, err := newLocalJob(backend)
+		if err == nil {
+			client.job = job
+		}
+	}
+
+	return client
+}
 func newWithConnection(conn *grpc.ClientConn) (*Client, error) {
 	if conn == nil {
 		return nil, errors.New("grpc client connection is required")
 	}
 
-	kv, err := newGRPCKV(
-		// The generated constructor accepts grpc.ClientConnInterface.
-		// This keeps the transport behind our KV abstraction.
-		raftiqv1.NewKVServiceClient(conn),
-	)
+	grpcClient := raftiqv1.NewKVServiceClient(conn)
+
+	kv, err := newGRPCKV(grpcClient)
+	if err != nil {
+		return nil, err
+	}
+
+	job, err := newGRPCJob(grpcClient)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Client{
 		kv:   kv,
+		job:  job,
 		conn: conn,
 	}, nil
 }
@@ -81,6 +94,31 @@ func (c *Client) Delete(
 	}
 
 	return kv.Delete(ctx, key)
+}
+
+func (c *Client) CreateJob(
+	ctx context.Context,
+	jobID string,
+	payload []byte,
+	scheduledAt int64,
+) (uint64, error) {
+	if c == nil {
+		return 0, ErrClientClosed
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.closed || c.job == nil {
+		return 0, ErrClientClosed
+	}
+
+	return c.job.CreateJob(
+		ctx,
+		jobID,
+		payload,
+		scheduledAt,
+	)
 }
 
 func (c *Client) Close() error {
