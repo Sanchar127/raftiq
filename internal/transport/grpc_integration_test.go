@@ -7,6 +7,7 @@ import (
 	"time"
 
 	raftiqv1 "github.com/sanchar127/raftiq/api/proto"
+	"github.com/sanchar127/raftiq/internal/model"
 	"github.com/sanchar127/raftiq/internal/raft"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -69,7 +70,10 @@ func TestRaftServiceGRPCIntegration(t *testing.T) {
 
 	client := raftiqv1.NewRaftServiceClient(conn)
 
-	ctx, cancel := context.WithTimeout(context.Background(), testRPCTimeout)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		testRPCTimeout,
+	)
 	defer cancel()
 
 	response, err := client.RequestVote(
@@ -101,9 +105,18 @@ func TestKVServiceGRPCIntegration(t *testing.T) {
 	listener := bufconn.Listen(testBufSize)
 	grpcServer := grpc.NewServer()
 
-	store := &fakeKVStore{
-		getValue: []byte("world"),
-		getFound: true,
+	store := &fakeJobStore{
+		fakeKVStore: fakeKVStore{
+			getValue: []byte("world"),
+			getFound: true,
+		},
+		job: &model.Job{
+			ID:          model.JobID("job-123"),
+			Payload:     []byte("hello"),
+			State:       model.JobPending,
+			ScheduledAt: 123456789,
+		},
+		index: 42,
 	}
 
 	service, err := NewKVService(store)
@@ -143,10 +156,13 @@ func TestKVServiceGRPCIntegration(t *testing.T) {
 
 	client := raftiqv1.NewKVServiceClient(conn)
 
-	ctx, cancel := context.WithTimeout(context.Background(), testRPCTimeout)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		testRPCTimeout,
+	)
 	defer cancel()
 
-	response, err := client.Get(
+	getResponse, err := client.Get(
 		ctx,
 		&raftiqv1.GetRequest{
 			Key: "hello",
@@ -154,7 +170,23 @@ func TestKVServiceGRPCIntegration(t *testing.T) {
 	)
 
 	require.NoError(t, err)
-	require.True(t, response.GetFound())
-	require.Equal(t, []byte("world"), response.GetValue())
+	require.True(t, getResponse.GetFound())
+	require.Equal(t, []byte("world"), getResponse.GetValue())
 	require.Equal(t, "hello", store.getKey)
+
+	jobResponse, err := client.CreateJob(
+		ctx,
+		&raftiqv1.CreateJobRequest{
+			JobId:       "job-123",
+			Payload:     []byte("hello"),
+			ScheduledAt: 123456789,
+		},
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, uint64(42), jobResponse.GetIndex())
+
+	require.Equal(t, "job-123", store.createJobID)
+	require.Equal(t, []byte("hello"), store.createPayload)
+	require.Equal(t, int64(123456789), store.createScheduledAt)
 }
