@@ -235,9 +235,10 @@ var RaftService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	KVService_Get_FullMethodName    = "/raftiq.v1.KVService/Get"
-	KVService_Put_FullMethodName    = "/raftiq.v1.KVService/Put"
-	KVService_Delete_FullMethodName = "/raftiq.v1.KVService/Delete"
+	KVService_Get_FullMethodName       = "/raftiq.v1.KVService/Get"
+	KVService_Put_FullMethodName       = "/raftiq.v1.KVService/Put"
+	KVService_Delete_FullMethodName    = "/raftiq.v1.KVService/Delete"
+	KVService_CreateJob_FullMethodName = "/raftiq.v1.KVService/CreateJob"
 )
 
 // KVServiceClient is the client API for KVService service.
@@ -247,6 +248,7 @@ type KVServiceClient interface {
 	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetResponse, error)
 	Put(ctx context.Context, in *PutRequest, opts ...grpc.CallOption) (*PutResponse, error)
 	Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
+	CreateJob(ctx context.Context, in *CreateJobRequest, opts ...grpc.CallOption) (*CreateJobResponse, error)
 }
 
 type kVServiceClient struct {
@@ -287,6 +289,16 @@ func (c *kVServiceClient) Delete(ctx context.Context, in *DeleteRequest, opts ..
 	return out, nil
 }
 
+func (c *kVServiceClient) CreateJob(ctx context.Context, in *CreateJobRequest, opts ...grpc.CallOption) (*CreateJobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateJobResponse)
+	err := c.cc.Invoke(ctx, KVService_CreateJob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // KVServiceServer is the server API for KVService service.
 // All implementations must embed UnimplementedKVServiceServer
 // for forward compatibility.
@@ -294,6 +306,7 @@ type KVServiceServer interface {
 	Get(context.Context, *GetRequest) (*GetResponse, error)
 	Put(context.Context, *PutRequest) (*PutResponse, error)
 	Delete(context.Context, *DeleteRequest) (*DeleteResponse, error)
+	CreateJob(context.Context, *CreateJobRequest) (*CreateJobResponse, error)
 	mustEmbedUnimplementedKVServiceServer()
 }
 
@@ -312,6 +325,9 @@ func (UnimplementedKVServiceServer) Put(context.Context, *PutRequest) (*PutRespo
 }
 func (UnimplementedKVServiceServer) Delete(context.Context, *DeleteRequest) (*DeleteResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Delete not implemented")
+}
+func (UnimplementedKVServiceServer) CreateJob(context.Context, *CreateJobRequest) (*CreateJobResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateJob not implemented")
 }
 func (UnimplementedKVServiceServer) mustEmbedUnimplementedKVServiceServer() {}
 func (UnimplementedKVServiceServer) testEmbeddedByValue()                   {}
@@ -388,6 +404,24 @@ func _KVService_Delete_Handler(srv interface{}, ctx context.Context, dec func(in
 	return interceptor(ctx, in, info, handler)
 }
 
+func _KVService_CreateJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateJobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KVServiceServer).CreateJob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: KVService_CreateJob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KVServiceServer).CreateJob(ctx, req.(*CreateJobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // KVService_ServiceDesc is the grpc.ServiceDesc for KVService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -406,6 +440,10 @@ var KVService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Delete",
 			Handler:    _KVService_Delete_Handler,
+		},
+		{
+			MethodName: "CreateJob",
+			Handler:    _KVService_CreateJob_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

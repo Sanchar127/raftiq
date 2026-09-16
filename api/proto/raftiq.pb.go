@@ -881,6 +881,110 @@ func (*DeleteResponse) Descriptor() ([]byte, []int) {
 	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{14}
 }
 
+type CreateJobRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	JobId         string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	Payload       []byte                 `protobuf:"bytes,2,opt,name=payload,proto3" json:"payload,omitempty"`
+	ScheduledAt   int64                  `protobuf:"varint,3,opt,name=scheduled_at,json=scheduledAt,proto3" json:"scheduled_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateJobRequest) Reset() {
+	*x = CreateJobRequest{}
+	mi := &file_api_proto_raftiq_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateJobRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateJobRequest) ProtoMessage() {}
+
+func (x *CreateJobRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_raftiq_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateJobRequest.ProtoReflect.Descriptor instead.
+func (*CreateJobRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *CreateJobRequest) GetJobId() string {
+	if x != nil {
+		return x.JobId
+	}
+	return ""
+}
+
+func (x *CreateJobRequest) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *CreateJobRequest) GetScheduledAt() int64 {
+	if x != nil {
+		return x.ScheduledAt
+	}
+	return 0
+}
+
+type CreateJobResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Index         uint64                 `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateJobResponse) Reset() {
+	*x = CreateJobResponse{}
+	mi := &file_api_proto_raftiq_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateJobResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateJobResponse) ProtoMessage() {}
+
+func (x *CreateJobResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_raftiq_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateJobResponse.ProtoReflect.Descriptor instead.
+func (*CreateJobResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_raftiq_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *CreateJobResponse) GetIndex() uint64 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
 var File_api_proto_raftiq_proto protoreflect.FileDescriptor
 
 const file_api_proto_raftiq_proto_rawDesc = "" +
@@ -944,16 +1048,23 @@ const file_api_proto_raftiq_proto_rawDesc = "" +
 	"\vPutResponse\"!\n" +
 	"\rDeleteRequest\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\"\x10\n" +
-	"\x0eDeleteResponse2\xcb\x02\n" +
+	"\x0eDeleteResponse\"f\n" +
+	"\x10CreateJobRequest\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x18\n" +
+	"\apayload\x18\x02 \x01(\fR\apayload\x12!\n" +
+	"\fscheduled_at\x18\x03 \x01(\x03R\vscheduledAt\")\n" +
+	"\x11CreateJobResponse\x12\x14\n" +
+	"\x05index\x18\x01 \x01(\x04R\x05index2\xcb\x02\n" +
 	"\vRaftService\x12L\n" +
 	"\vRequestVote\x12\x1d.raftiq.v1.RequestVoteRequest\x1a\x1e.raftiq.v1.RequestVoteResponse\x12@\n" +
 	"\aPreVote\x12\x19.raftiq.v1.PreVoteRequest\x1a\x1a.raftiq.v1.PreVoteResponse\x12R\n" +
 	"\rAppendEntries\x12\x1f.raftiq.v1.AppendEntriesRequest\x1a .raftiq.v1.AppendEntriesResponse\x12X\n" +
-	"\x0fInstallSnapshot\x12!.raftiq.v1.InstallSnapshotRequest\x1a\".raftiq.v1.InstallSnapshotResponse2\xb6\x01\n" +
+	"\x0fInstallSnapshot\x12!.raftiq.v1.InstallSnapshotRequest\x1a\".raftiq.v1.InstallSnapshotResponse2\xfe\x01\n" +
 	"\tKVService\x124\n" +
 	"\x03Get\x12\x15.raftiq.v1.GetRequest\x1a\x16.raftiq.v1.GetResponse\x124\n" +
 	"\x03Put\x12\x15.raftiq.v1.PutRequest\x1a\x16.raftiq.v1.PutResponse\x12=\n" +
-	"\x06Delete\x12\x18.raftiq.v1.DeleteRequest\x1a\x19.raftiq.v1.DeleteResponseB1Z/github.com/sanchar127/raftiq/api/proto;raftiqv1b\x06proto3"
+	"\x06Delete\x12\x18.raftiq.v1.DeleteRequest\x1a\x19.raftiq.v1.DeleteResponse\x12F\n" +
+	"\tCreateJob\x12\x1b.raftiq.v1.CreateJobRequest\x1a\x1c.raftiq.v1.CreateJobResponseB1Z/github.com/sanchar127/raftiq/api/proto;raftiqv1b\x06proto3"
 
 var (
 	file_api_proto_raftiq_proto_rawDescOnce sync.Once
@@ -967,7 +1078,7 @@ func file_api_proto_raftiq_proto_rawDescGZIP() []byte {
 	return file_api_proto_raftiq_proto_rawDescData
 }
 
-var file_api_proto_raftiq_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_api_proto_raftiq_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_api_proto_raftiq_proto_goTypes = []any{
 	(*LogEntry)(nil),                // 0: raftiq.v1.LogEntry
 	(*RequestVoteRequest)(nil),      // 1: raftiq.v1.RequestVoteRequest
@@ -984,6 +1095,8 @@ var file_api_proto_raftiq_proto_goTypes = []any{
 	(*PutResponse)(nil),             // 12: raftiq.v1.PutResponse
 	(*DeleteRequest)(nil),           // 13: raftiq.v1.DeleteRequest
 	(*DeleteResponse)(nil),          // 14: raftiq.v1.DeleteResponse
+	(*CreateJobRequest)(nil),        // 15: raftiq.v1.CreateJobRequest
+	(*CreateJobResponse)(nil),       // 16: raftiq.v1.CreateJobResponse
 }
 var file_api_proto_raftiq_proto_depIdxs = []int32{
 	0,  // 0: raftiq.v1.AppendEntriesRequest.entries:type_name -> raftiq.v1.LogEntry
@@ -994,15 +1107,17 @@ var file_api_proto_raftiq_proto_depIdxs = []int32{
 	9,  // 5: raftiq.v1.KVService.Get:input_type -> raftiq.v1.GetRequest
 	11, // 6: raftiq.v1.KVService.Put:input_type -> raftiq.v1.PutRequest
 	13, // 7: raftiq.v1.KVService.Delete:input_type -> raftiq.v1.DeleteRequest
-	2,  // 8: raftiq.v1.RaftService.RequestVote:output_type -> raftiq.v1.RequestVoteResponse
-	4,  // 9: raftiq.v1.RaftService.PreVote:output_type -> raftiq.v1.PreVoteResponse
-	6,  // 10: raftiq.v1.RaftService.AppendEntries:output_type -> raftiq.v1.AppendEntriesResponse
-	8,  // 11: raftiq.v1.RaftService.InstallSnapshot:output_type -> raftiq.v1.InstallSnapshotResponse
-	10, // 12: raftiq.v1.KVService.Get:output_type -> raftiq.v1.GetResponse
-	12, // 13: raftiq.v1.KVService.Put:output_type -> raftiq.v1.PutResponse
-	14, // 14: raftiq.v1.KVService.Delete:output_type -> raftiq.v1.DeleteResponse
-	8,  // [8:15] is the sub-list for method output_type
-	1,  // [1:8] is the sub-list for method input_type
+	15, // 8: raftiq.v1.KVService.CreateJob:input_type -> raftiq.v1.CreateJobRequest
+	2,  // 9: raftiq.v1.RaftService.RequestVote:output_type -> raftiq.v1.RequestVoteResponse
+	4,  // 10: raftiq.v1.RaftService.PreVote:output_type -> raftiq.v1.PreVoteResponse
+	6,  // 11: raftiq.v1.RaftService.AppendEntries:output_type -> raftiq.v1.AppendEntriesResponse
+	8,  // 12: raftiq.v1.RaftService.InstallSnapshot:output_type -> raftiq.v1.InstallSnapshotResponse
+	10, // 13: raftiq.v1.KVService.Get:output_type -> raftiq.v1.GetResponse
+	12, // 14: raftiq.v1.KVService.Put:output_type -> raftiq.v1.PutResponse
+	14, // 15: raftiq.v1.KVService.Delete:output_type -> raftiq.v1.DeleteResponse
+	16, // 16: raftiq.v1.KVService.CreateJob:output_type -> raftiq.v1.CreateJobResponse
+	9,  // [9:17] is the sub-list for method output_type
+	1,  // [1:9] is the sub-list for method input_type
 	1,  // [1:1] is the sub-list for extension type_name
 	1,  // [1:1] is the sub-list for extension extendee
 	0,  // [0:1] is the sub-list for field type_name
@@ -1019,7 +1134,7 @@ func file_api_proto_raftiq_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_raftiq_proto_rawDesc), len(file_api_proto_raftiq_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   15,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   2,
 		},
