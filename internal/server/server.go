@@ -148,3 +148,6 @@ func (s *Server) Stop() {
 		"server stopped",
 	)
 }
+func (s *Server) SetKVMetrics(metrics kv.KVMetrics) {
+	s.applier.SetMetrics(metrics)
+}
