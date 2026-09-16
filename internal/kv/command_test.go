@@ -329,3 +329,53 @@ func TestApplyClaimJobIsIdempotentForSameWorker(t *testing.T) {
 		)
 	}
 }
+func TestEncodeDecodeCreateJobCommand(t *testing.T) {
+	original := Command{
+		Type:        CommandCreateJob,
+		JobID:       "job-1",
+		Payload:     []byte("send-email"),
+		ScheduledAt: 123456789,
+	}
+
+	data, err := EncodeCommand(original)
+	if err != nil {
+		t.Fatalf("encode command: %v", err)
+	}
+
+	decoded, err := DecodeCommand(data)
+	if err != nil {
+		t.Fatalf("decode command: %v", err)
+	}
+
+	if decoded.Type != CommandCreateJob {
+		t.Fatalf(
+			"expected command type %q, got %q",
+			CommandCreateJob,
+			decoded.Type,
+		)
+	}
+
+	if decoded.JobID != original.JobID {
+		t.Fatalf(
+			"expected job ID %q, got %q",
+			original.JobID,
+			decoded.JobID,
+		)
+	}
+
+	if string(decoded.Payload) != string(original.Payload) {
+		t.Fatalf(
+			"expected payload %q, got %q",
+			original.Payload,
+			decoded.Payload,
+		)
+	}
+
+	if decoded.ScheduledAt != original.ScheduledAt {
+		t.Fatalf(
+			"expected scheduled time %d, got %d",
+			original.ScheduledAt,
+			decoded.ScheduledAt,
+		)
+	}
+}

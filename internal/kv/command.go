@@ -17,6 +17,7 @@ const (
 	CommandLockExpire  CommandType = "LOCK_EXPIRE"
 	CommandFencedPut   CommandType = "FENCED_PUT"
 
+	CommandCreateJob    CommandType = "CREATE_JOB"
 	CommandClaimJob     CommandType = "CLAIM_JOB"
 	CommandJobReclaim   CommandType = "JOB_RECLAIM"
 	CommandJobStart     CommandType = "JOB_START"
@@ -29,7 +30,9 @@ type Command struct {
 	Key   string      `json:"key"`
 	Value []byte      `json:"value,omitempty"`
 
-	JobID string `json:"job_id,omitempty"`
+	JobID       string `json:"job_id,omitempty"`
+	Payload     []byte `json:"payload,omitempty"`
+	ScheduledAt int64  `json:"scheduled_at,omitempty"`
 
 	OwnerID       string         `json:"owner_id,omitempty"`
 	ExpiresAt     int64          `json:"expires_at,omitempty"`
