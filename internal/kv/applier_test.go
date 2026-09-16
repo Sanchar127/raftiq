@@ -245,3 +245,244 @@ func TestApplierClaimJobConflictDoesNotStopApplier(t *testing.T) {
 		t.Fatal("Applier.Run() did not stop")
 	}
 }
+func TestApplierCreateJobReturnsJob(t *testing.T) {
+	store := NewStore()
+	applier := NewApplier(store)
+
+	command, err := EncodeCommand(Command{
+		Type:        CommandCreateJob,
+		JobID:       "job-1",
+		Payload:     []byte("send-email"),
+		ScheduledAt: 123456789,
+	})
+	if err != nil {
+		t.Fatalf("EncodeCommand() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	applyCh := make(chan raft.LogEntry, 1)
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- applier.Run(ctx, applyCh)
+	}()
+
+	applyCh <- raft.LogEntry{
+		Index: 42,
+		Term:  3,
+		Data:  command,
+	}
+
+	resultCtx, resultCancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
+	defer resultCancel()
+
+	result, err := applier.WaitResult(resultCtx, 42)
+	if err != nil {
+		t.Fatalf("WaitResult() error = %v", err)
+	}
+
+	if result.Err != nil {
+		t.Fatalf("create job result error = %v", result.Err)
+	}
+
+	if result.Job == nil {
+		t.Fatal("expected created job in ApplyResult")
+	}
+
+	if result.Job.ID != "job-1" {
+		t.Fatalf("job ID = %q, want %q", result.Job.ID, "job-1")
+	}
+
+	if string(result.Job.Payload) != "send-email" {
+		t.Fatalf(
+			"job payload = %q, want %q",
+			result.Job.Payload,
+			"send-email",
+		)
+	}
+
+	if result.Job.State != model.JobPending {
+		t.Fatalf(
+			"job state = %q, want %q",
+			result.Job.State,
+			model.JobPending,
+		)
+	}
+
+	if result.Job.ScheduledAt != 123456789 {
+		t.Fatalf(
+			"scheduled at = %d, want %d",
+			result.Job.ScheduledAt,
+			123456789,
+		)
+	}
+
+	if result.Job.CreatedIndex != 42 {
+		t.Fatalf(
+			"created index = %d, want %d",
+			result.Job.CreatedIndex,
+			42,
+		)
+	}
+
+	job, ok := store.GetJob("job-1")
+	if !ok {
+		t.Fatal("expected job to exist in store")
+	}
+
+	if job.State != model.JobPending {
+		t.Fatalf(
+			"stored job state = %q, want %q",
+			job.State,
+			model.JobPending,
+		)
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run() error = %v, want context canceled", err)
+		}
+
+	case <-time.After(time.Second):
+		t.Fatal("Applier.Run() did not stop")
+	}
+}
+
+func TestApplierCreateJobConflictDoesNotStopApplier(t *testing.T) {
+	store := NewStore()
+	applier := NewApplier(store)
+
+	err := store.CreateJob(model.Job{
+		ID:      "job-1",
+		Payload: []byte("existing"),
+		State:   model.JobPending,
+	})
+	if err != nil {
+		t.Fatalf("CreateJob() error = %v", err)
+	}
+
+	firstCommand, err := EncodeCommand(Command{
+		Type:        CommandCreateJob,
+		JobID:       "job-1",
+		Payload:     []byte("first"),
+		ScheduledAt: 100,
+	})
+	if err != nil {
+		t.Fatalf("EncodeCommand(first) error = %v", err)
+	}
+
+	secondCommand, err := EncodeCommand(Command{
+		Type:        CommandCreateJob,
+		JobID:       "job-1",
+		Payload:     []byte("second"),
+		ScheduledAt: 200,
+	})
+	if err != nil {
+		t.Fatalf("EncodeCommand(second) error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	applyCh := make(chan raft.LogEntry, 2)
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- applier.Run(ctx, applyCh)
+	}()
+
+	applyCh <- raft.LogEntry{
+		Index: 1,
+		Term:  1,
+		Data:  firstCommand,
+	}
+
+	applyCh <- raft.LogEntry{
+		Index: 2,
+		Term:  1,
+		Data:  secondCommand,
+	}
+
+	waitCtx, waitCancel := context.WithTimeout(
+		context.Background(),
+		time.Second,
+	)
+	defer waitCancel()
+
+	firstResult, err := applier.WaitResult(waitCtx, 1)
+	if err != nil {
+		t.Fatalf("WaitResult(first) error = %v", err)
+	}
+
+	if firstResult.Err == nil {
+		t.Fatal("expected first create to fail because job already exists")
+	}
+
+	if !errors.Is(firstResult.Err, ErrJobAlreadyExists) {
+		t.Fatalf(
+			"first create error = %v, want ErrJobAlreadyExists",
+			firstResult.Err,
+		)
+	}
+
+	secondResult, err := applier.WaitResult(waitCtx, 2)
+	if err != nil {
+		t.Fatalf("WaitResult(second) error = %v", err)
+	}
+
+	if secondResult.Err == nil {
+		t.Fatal("expected second create to fail because job already exists")
+	}
+
+	if !errors.Is(secondResult.Err, ErrJobAlreadyExists) {
+		t.Fatalf(
+			"second create error = %v, want ErrJobAlreadyExists",
+			secondResult.Err,
+		)
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf(
+			"Applier stopped after expected create conflict: %v",
+			err,
+		)
+
+	default:
+	}
+
+	job, ok := store.GetJob("job-1")
+	if !ok {
+		t.Fatal("expected existing job to remain")
+	}
+
+	if string(job.Payload) != "existing" {
+		t.Fatalf(
+			"stored payload = %q, want %q",
+			job.Payload,
+			"existing",
+		)
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run() error = %v, want context canceled", err)
+		}
+
+	case <-time.After(time.Second):
+		t.Fatal("Applier.Run() did not stop")
+	}
+}
