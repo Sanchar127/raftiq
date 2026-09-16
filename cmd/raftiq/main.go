@@ -21,6 +21,7 @@ import (
 	"github.com/sanchar127/raftiq/internal/kv"
 	"github.com/sanchar127/raftiq/internal/observability"
 	"github.com/sanchar127/raftiq/internal/raft"
+	"github.com/sanchar127/raftiq/internal/scheduler"
 	"github.com/sanchar127/raftiq/internal/server"
 	"github.com/sanchar127/raftiq/internal/storage"
 	"github.com/sanchar127/raftiq/internal/transport"
@@ -105,6 +106,34 @@ func (p peerFlag) Set(value string) error {
 	return nil
 }
 
+type workerFlag []string
+
+func (w workerFlag) String() string {
+	return strings.Join(w, ",")
+}
+
+func (w *workerFlag) Set(value string) error {
+	value = strings.TrimSpace(value)
+
+	if value == "" {
+		return errors.New("worker list cannot be empty")
+	}
+
+	entries := strings.Split(value, ",")
+
+	for _, entry := range entries {
+		workerID := strings.TrimSpace(entry)
+
+		if workerID == "" {
+			return errors.New("worker ID cannot be empty")
+		}
+
+		*w = append(*w, workerID)
+	}
+
+	return nil
+}
+
 type config struct {
 	nodeID      string
 	raftAddr    string
@@ -112,6 +141,7 @@ type config struct {
 	metricsAddr string
 	dataDir     string
 	peers       peerFlag
+	workers     workerFlag
 	heartbeat   time.Duration
 	election    time.Duration
 	logLevel    string
@@ -165,6 +195,12 @@ func main() {
 		&cfg.peers,
 		"peers",
 		"Raft peers as comma-separated id=host:port values.",
+	)
+
+	flag.Var(
+		&cfg.workers,
+		"workers",
+		"Scheduler workers as comma-separated worker IDs.",
 	)
 
 	flag.DurationVar(
@@ -229,6 +265,7 @@ func main() {
 		"kv_addr", cfg.kvAddr,
 		"metrics_addr", cfg.metricsAddr,
 		"data_dir", cfg.dataDir,
+		"workers", []string(cfg.workers),
 	)
 
 	// -------------------------------------------------------------------------
@@ -332,7 +369,10 @@ func main() {
 		cfg.nodeID,
 	)
 
-	storageMetrics := observability.NewStorageMetrics(cfg.nodeID, metrics)
+	storageMetrics := observability.NewStorageMetrics(
+		cfg.nodeID,
+		metrics,
+	)
 	store.SetMetrics(storageMetrics)
 
 	kvMetrics := observability.NewKVMetrics(metrics)
@@ -368,8 +408,49 @@ func main() {
 	)
 
 	appServer.SetLogger(logger)
-
 	appServer.SetKVMetrics(kvMetrics)
+
+	// -------------------------------------------------------------------------
+	// Scheduler.
+	// -------------------------------------------------------------------------
+
+	workerSelector, err := scheduler.NewHashWorkerSelector(
+		[]string(cfg.workers),
+	)
+	if err != nil {
+		logger.Error(
+			"failed to create scheduler worker selector",
+			"error", err,
+		)
+		os.Exit(2)
+	}
+
+	jobScheduler, err := scheduler.New(
+		node,
+		kvStore,
+		appServer.Applier(),
+		workerSelector,
+		scheduler.Config{
+			Interval: scheduler.DefaultInterval,
+			Lease:    scheduler.DefaultLease,
+		},
+	)
+	if err != nil {
+		logger.Error(
+			"failed to create scheduler",
+			"error", err,
+		)
+		os.Exit(1)
+	}
+
+	jobScheduler.SetLogger(logger)
+	jobScheduler.SetMetrics(
+		observability.NewSchedulerMetrics(
+			cfg.nodeID,
+			metrics,
+		),
+	)
+
 	// -------------------------------------------------------------------------
 	// Raft transport.
 	// -------------------------------------------------------------------------
@@ -593,7 +674,7 @@ func main() {
 	// Start servers.
 	// -------------------------------------------------------------------------
 
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
 
 	go func() {
 		logger.Info(
@@ -656,6 +737,7 @@ func main() {
 			raftGRPCServer,
 			kvGRPCServer,
 			metricsServer,
+			nil,
 		)
 
 		os.Exit(1)
@@ -675,10 +757,38 @@ func main() {
 			raftGRPCServer,
 			kvGRPCServer,
 			metricsServer,
+			nil,
 		)
 
 		os.Exit(1)
 	}
+
+	// -------------------------------------------------------------------------
+	// Start scheduler.
+	// -------------------------------------------------------------------------
+
+	schedulerCtx, schedulerCancel := context.WithCancel(
+		context.Background(),
+	)
+	defer schedulerCancel()
+
+	go func() {
+		logger.Info(
+			"starting scheduler",
+			"interval", scheduler.DefaultInterval,
+			"lease", scheduler.DefaultLease,
+			"workers", []string(cfg.workers),
+		)
+
+		if err := jobScheduler.Run(schedulerCtx); err != nil &&
+			!errors.Is(err, context.Canceled) &&
+			!errors.Is(err, context.DeadlineExceeded) {
+			errCh <- fmt.Errorf(
+				"scheduler: %w",
+				err,
+			)
+		}
+	}()
 
 	logger.Info(
 		"raftiq node started",
@@ -713,6 +823,8 @@ func main() {
 	// Graceful shutdown.
 	// -------------------------------------------------------------------------
 
+	schedulerCancel()
+
 	shutdown(
 		logger,
 		node,
@@ -721,6 +833,7 @@ func main() {
 		raftGRPCServer,
 		kvGRPCServer,
 		metricsServer,
+		jobScheduler,
 	)
 
 	logger.Info("raftiq node stopped")
@@ -801,6 +914,10 @@ func validateConfig(cfg config) error {
 		return errors.New("--peers requires at least one peer")
 	}
 
+	if len(cfg.workers) == 0 {
+		return errors.New("--workers requires at least one worker")
+	}
+
 	return nil
 }
 
@@ -841,6 +958,7 @@ func shutdown(
 	raftGRPCServer *transport.Server,
 	kvGRPCServer *transport.Server,
 	metricsServer *http.Server,
+	jobScheduler *scheduler.Scheduler,
 ) {
 	const shutdownTimeout = 10 * time.Second
 
@@ -878,6 +996,10 @@ func shutdown(
 			)
 		}
 	}
+
+	// Scheduler context is canceled by main before this function.
+	// There is no separate Stop method on Scheduler.
+	_ = jobScheduler
 
 	// Stop Raft before closing its transport/storage dependencies.
 	if node != nil {

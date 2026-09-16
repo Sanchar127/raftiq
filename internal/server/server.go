@@ -151,3 +151,8 @@ func (s *Server) Stop() {
 func (s *Server) SetKVMetrics(metrics kv.KVMetrics) {
 	s.applier.SetMetrics(metrics)
 }
+
+// Applier returns the server's shared KV state-machine applier.
+func (s *Server) Applier() *kv.Applier {
+	return s.applier
+}
