@@ -10,6 +10,7 @@ const (
 	StorageOperationLoadEntries   = "LoadEntries"
 	StorageOperationSaveSnapshot  = "SaveSnapshot"
 	StorageOperationLoadSnapshot  = "LoadSnapshot"
+	StorageOperationCompact       = "Compact"
 )
 
 type StorageMetrics interface {

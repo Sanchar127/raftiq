@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -829,5 +830,216 @@ func TestWALStorageRejectsCorruptedRecordOnRecovery(t *testing.T) {
 			"OpenWAL() error = %v, want checksum mismatch",
 			err,
 		)
+	}
+}
+
+func TestWALCompactRemovesSnapshotPrefixAndRecovers(t *testing.T) {
+	path := filepath.Join(
+		t.TempDir(),
+		"raftiq.wal",
+	)
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+
+	state := model.PersistentState{
+		CurrentTerm: 7,
+		VotedFor:    "node-2",
+	}
+
+	if err := storage.SaveState(state); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	entries := make([]model.LogEntry, 0, 10)
+
+	for index := model.LogIndex(1); index <= 10; index++ {
+		entries = append(entries, model.LogEntry{
+			Index: index,
+			Term:  7,
+			Data:  []byte(fmt.Sprintf("entry-%d", index)),
+		})
+	}
+
+	if err := storage.AppendEntries(entries); err != nil {
+		t.Fatalf("append entries: %v", err)
+	}
+
+	snapshot := model.Snapshot{
+		LastIncludedIndex: 5,
+		LastIncludedTerm:  7,
+		Data:              []byte(`{"value":"snapshot-state"}`),
+	}
+
+	if err := storage.SaveSnapshot(snapshot); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+
+	if err := storage.Sync(); err != nil {
+		t.Fatalf("sync before compaction: %v", err)
+	}
+
+	if err := storage.Compact(snapshot); err != nil {
+		t.Fatalf("compact WAL: %v", err)
+	}
+
+	if err := storage.Close(); err != nil {
+		t.Fatalf("close WAL: %v", err)
+	}
+
+	reopened, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("reopen WAL: %v", err)
+	}
+
+	defer func() {
+		if err := reopened.Close(); err != nil {
+			t.Errorf("close reopened WAL: %v", err)
+		}
+	}()
+
+	recoveredState, err := reopened.LoadState()
+	if err != nil {
+		t.Fatalf("load recovered state: %v", err)
+	}
+
+	if !reflect.DeepEqual(recoveredState, state) {
+		t.Fatalf(
+			"recovered state mismatch: got %#v, want %#v",
+			recoveredState,
+			state,
+		)
+	}
+
+	recoveredSnapshot, err := reopened.LoadSnapshot()
+	if err != nil {
+		t.Fatalf("load recovered snapshot: %v", err)
+	}
+
+	if !reflect.DeepEqual(recoveredSnapshot, snapshot) {
+		t.Fatalf(
+			"recovered snapshot mismatch: got %#v, want %#v",
+			recoveredSnapshot,
+			snapshot,
+		)
+	}
+
+	recoveredEntries, err := reopened.LoadEntries()
+	if err != nil {
+		t.Fatalf("load recovered entries: %v", err)
+	}
+
+	if len(recoveredEntries) != 5 {
+		t.Fatalf(
+			"recovered entry count: got %d, want 5",
+			len(recoveredEntries),
+		)
+	}
+
+	for i, entry := range recoveredEntries {
+		expectedIndex := model.LogIndex(i + 6)
+
+		if entry.Index != expectedIndex {
+			t.Errorf(
+				"entry %d index: got %d, want %d",
+				i,
+				entry.Index,
+				expectedIndex,
+			)
+		}
+
+		expectedData := []byte(
+			fmt.Sprintf("entry-%d", expectedIndex),
+		)
+
+		if !bytes.Equal(entry.Data, expectedData) {
+			t.Errorf(
+				"entry %d data: got %q, want %q",
+				i,
+				entry.Data,
+				expectedData,
+			)
+		}
+	}
+}
+
+func TestWALCompactReducesFileSize(t *testing.T) {
+	path := filepath.Join(
+		t.TempDir(),
+		"raftiq.wal",
+	)
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+
+	state := model.PersistentState{
+		CurrentTerm: 3,
+		VotedFor:    "node-1",
+	}
+
+	if err := storage.SaveState(state); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	entries := make([]model.LogEntry, 0, 100)
+
+	for index := model.LogIndex(1); index <= 100; index++ {
+		entries = append(entries, model.LogEntry{
+			Index: index,
+			Term:  3,
+			Data: []byte(fmt.Sprintf(
+				"large-entry-payload-%d-%s",
+				index,
+				string(make([]byte, 100)),
+			)),
+		})
+	}
+
+	if err := storage.AppendEntries(entries); err != nil {
+		t.Fatalf("append entries: %v", err)
+	}
+
+	snapshot := model.Snapshot{
+		LastIncludedIndex: 90,
+		LastIncludedTerm:  3,
+		Data:              []byte("snapshot-state"),
+	}
+
+	if err := storage.SaveSnapshot(snapshot); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+
+	if err := storage.Sync(); err != nil {
+		t.Fatalf("sync WAL: %v", err)
+	}
+
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat WAL before compaction: %v", err)
+	}
+
+	if err := storage.Compact(snapshot); err != nil {
+		t.Fatalf("compact WAL: %v", err)
+	}
+
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat WAL after compaction: %v", err)
+	}
+
+	if after.Size() >= before.Size() {
+		t.Fatalf(
+			"WAL did not shrink: before=%d after=%d",
+			before.Size(),
+			after.Size(),
+		)
+	}
+
+	if err := storage.Close(); err != nil {
+		t.Fatalf("close WAL: %v", err)
 	}
 }

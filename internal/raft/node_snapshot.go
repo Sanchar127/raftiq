@@ -130,6 +130,24 @@ func (n *RaftNode) CreateSnapshot(
 		return wrappedErr
 	}
 
+	if err := n.storage.Compact(snapshot); err != nil {
+		wrappedErr := fmt.Errorf(
+			"compact durable storage after snapshot: %w",
+			err,
+		)
+
+		n.mu.Unlock()
+
+		logger.Error(
+			"failed to compact durable storage after snapshot",
+			"last_included_index", index,
+			"last_included_term", entry.Term,
+			"error", wrappedErr,
+		)
+
+		return wrappedErr
+	}
+
 	if err := n.log.Compact(snapshot); err != nil {
 		wrappedErr := fmt.Errorf(
 			"compact log after snapshot: %w",
@@ -260,20 +278,17 @@ func (n *RaftNode) InstallSnapshot(
 
 	restore := n.snapshotRestore
 
-	if restore == nil {
-		n.mu.Unlock()
+	n.mu.Unlock()
 
+	if restore == nil {
 		logger.Error(
-			"failed to install snapshot",
+			"snapshot installation rejected: state machine restore is not configured",
 			"leader_id", args.LeaderID,
 			"last_included_index", args.LastIncludedIndex,
-			"error", "snapshot restore callback is not configured",
 		)
 
 		return reply
 	}
-
-	n.mu.Unlock()
 
 	if err := restore(snapshot); err != nil {
 		logger.Error(
@@ -287,6 +302,25 @@ func (n *RaftNode) InstallSnapshot(
 	}
 
 	n.mu.Lock()
+
+	if err := n.storage.Compact(snapshot); err != nil {
+		wrappedErr := fmt.Errorf(
+			"compact durable storage after snapshot install: %w",
+			err,
+		)
+
+		n.mu.Unlock()
+
+		logger.Error(
+			"failed to compact durable storage after snapshot install",
+			"leader_id", args.LeaderID,
+			"last_included_index", args.LastIncludedIndex,
+			"last_included_term", args.LastIncludedTerm,
+			"error", wrappedErr,
+		)
+
+		return reply
+	}
 
 	if err := n.log.RestoreSnapshot(snapshot); err != nil {
 		n.mu.Unlock()

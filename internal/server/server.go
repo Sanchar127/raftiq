@@ -23,6 +23,8 @@ type Server struct {
 
 	expirationMu      sync.Mutex
 	pendingExpiration map[string]uint64
+
+	snapshotConfig SnapshotConfig
 }
 
 func discardServerLogger() *slog.Logger {
@@ -57,7 +59,20 @@ func NewServer(raftNode *raft.RaftNode, store *kv.Store) *Server {
 		applier:           applier,
 		logger:            discardServerLogger(),
 		pendingExpiration: make(map[string]uint64),
+		snapshotConfig: SnapshotConfig{
+			Interval:  DefaultSnapshotInterval,
+			Threshold: DefaultSnapshotThreshold,
+		},
 	}
+}
+
+func (s *Server) SetSnapshotConfig(config SnapshotConfig) error {
+	if err := config.validate(); err != nil {
+		return err
+	}
+
+	s.snapshotConfig = config
+	return nil
 }
 
 func (s *Server) Start() error {
@@ -120,6 +135,13 @@ func (s *Server) Start() error {
 		s.runLockExpirationWorker()
 	}()
 
+	s.wg.Add(1)
+
+	go func() {
+		defer s.wg.Done()
+		s.runSnapshotWorker()
+	}()
+
 	logger.Info(
 		"server started",
 	)
@@ -148,6 +170,7 @@ func (s *Server) Stop() {
 		"server stopped",
 	)
 }
+
 func (s *Server) SetKVMetrics(metrics kv.KVMetrics) {
 	s.applier.SetMetrics(metrics)
 }

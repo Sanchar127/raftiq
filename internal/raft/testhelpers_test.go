@@ -233,6 +233,10 @@ func (s *diskFullStorage) LoadSnapshot() (model.Snapshot, error) {
 	return model.Snapshot{}, nil
 }
 
+func (s *diskFullStorage) Compact(model.Snapshot) error {
+	return nil
+}
+
 func (s *diskFullStorage) Sync() error {
 	if s.diskFull {
 		return storage.ErrWALDiskFull

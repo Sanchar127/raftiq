@@ -15,7 +15,7 @@ type Storage interface {
 
 	SaveSnapshot(snapshot model.Snapshot) error
 	LoadSnapshot() (model.Snapshot, error)
-
+	Compact(snapshot model.Snapshot) error
 	Sync() error
 	Close() error
 }

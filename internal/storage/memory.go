@@ -260,3 +260,49 @@ func (s *MemoryStorage) ReplaceSuffix(
 
 	return nil
 }
+func (s *MemoryStorage) Compact(
+	snapshot model.Snapshot,
+) error {
+	startedAt := time.Now()
+	logger := s.getLogger()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if snapshot.LastIncludedIndex == 0 {
+		return fmt.Errorf("cannot compact at snapshot index 0")
+	}
+
+	if s.snapshot == nil {
+		return fmt.Errorf("cannot compact without persisted snapshot")
+	}
+
+	if s.snapshot.LastIncludedIndex !=
+		snapshot.LastIncludedIndex {
+		return fmt.Errorf(
+			"snapshot index mismatch: stored %d, requested %d",
+			s.snapshot.LastIncludedIndex,
+			snapshot.LastIncludedIndex,
+		)
+	}
+
+	remaining := make([]model.LogEntry, 0, len(s.entries))
+
+	for _, entry := range s.entries {
+		if entry.Index > snapshot.LastIncludedIndex {
+			entry.Data = append([]byte(nil), entry.Data...)
+			remaining = append(remaining, entry)
+		}
+	}
+
+	s.entries = remaining
+
+	logger.Debug(
+		"memory log compacted",
+		"snapshot_index", snapshot.LastIncludedIndex,
+		"remaining_entries", len(remaining),
+		"duration", time.Since(startedAt),
+	)
+
+	return nil
+}

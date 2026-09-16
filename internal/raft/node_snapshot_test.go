@@ -2,6 +2,8 @@ package raft
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/sanchar127/raftiq/internal/model"
@@ -83,6 +85,160 @@ func TestCreateSnapshot(t *testing.T) {
 			"expected last index 5, got %d",
 			node.Log().LastIndex(),
 		)
+	}
+}
+
+func TestCreateSnapshotCompactsWALAndRecovers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq.wal")
+
+	store, err := storage.OpenWAL(path)
+	if err != nil {
+		t.Fatalf("OpenWAL() error: %v", err)
+	}
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	if err != nil {
+		store.Close()
+		t.Fatalf("create node failed: %v", err)
+	}
+
+	const totalEntries = LogIndex(10)
+	const snapshotIndex = LogIndex(5)
+
+	node.mu.Lock()
+
+	for i := LogIndex(1); i <= totalEntries; i++ {
+		entry := LogEntry{
+			Index: i,
+			Term:  1,
+			Data: []byte(fmt.Sprintf(
+				"large-command-payload-%d-%s",
+				i,
+				"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			)),
+		}
+
+		if err := node.log.Append(entry); err != nil {
+			node.mu.Unlock()
+			store.Close()
+			t.Fatalf("append to raft log failed: %v", err)
+		}
+
+		if err := store.AppendEntries([]model.LogEntry{
+			{
+				Index: entry.Index,
+				Term:  entry.Term,
+				Data:  append([]byte(nil), entry.Data...),
+			},
+		}); err != nil {
+			node.mu.Unlock()
+			store.Close()
+			t.Fatalf("append to WAL failed: %v", err)
+		}
+	}
+
+	node.state.Volatile.CommitIndex = snapshotIndex
+	node.state.Volatile.LastApplied = snapshotIndex
+
+	node.mu.Unlock()
+
+	if err := store.Sync(); err != nil {
+		store.Close()
+		t.Fatalf("sync WAL failed: %v", err)
+	}
+
+	beforeInfo, err := os.Stat(path)
+	if err != nil {
+		store.Close()
+		t.Fatalf("stat WAL before snapshot failed: %v", err)
+	}
+
+	if err := node.CreateSnapshot(
+		snapshotIndex,
+		[]byte(`{"key":"value"}`),
+	); err != nil {
+		store.Close()
+		t.Fatalf("CreateSnapshot() failed: %v", err)
+	}
+
+	afterInfo, err := os.Stat(path)
+	if err != nil {
+		store.Close()
+		t.Fatalf("stat WAL after snapshot failed: %v", err)
+	}
+
+	if afterInfo.Size() >= beforeInfo.Size() {
+		store.Close()
+		t.Fatalf(
+			"expected WAL to shrink after snapshot: before=%d after=%d",
+			beforeInfo.Size(),
+			afterInfo.Size(),
+		)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("close WAL failed: %v", err)
+	}
+
+	reopened, err := storage.OpenWAL(path)
+	if err != nil {
+		t.Fatalf("reopen WAL failed: %v", err)
+	}
+	defer reopened.Close()
+
+	snapshot, err := reopened.LoadSnapshot()
+	if err != nil {
+		t.Fatalf("LoadSnapshot() after reopen failed: %v", err)
+	}
+
+	if snapshot.LastIncludedIndex != snapshotIndex {
+		t.Fatalf(
+			"snapshot index = %d, want %d",
+			snapshot.LastIncludedIndex,
+			snapshotIndex,
+		)
+	}
+
+	if snapshot.LastIncludedTerm != 1 {
+		t.Fatalf(
+			"snapshot term = %d, want 1",
+			snapshot.LastIncludedTerm,
+		)
+	}
+
+	entries, err := reopened.LoadEntries()
+	if err != nil {
+		t.Fatalf("LoadEntries() after reopen failed: %v", err)
+	}
+
+	if len(entries) != int(totalEntries-snapshotIndex) {
+		t.Fatalf(
+			"recovered %d entries, want %d",
+			len(entries),
+			totalEntries-snapshotIndex,
+		)
+	}
+
+	for i, entry := range entries {
+		wantIndex := snapshotIndex + LogIndex(i) + 1
+
+		if entry.Index != wantIndex {
+			t.Errorf(
+				"recovered entry %d has index %d, want %d",
+				i,
+				entry.Index,
+				wantIndex,
+			)
+		}
+
+		if entry.Term != 1 {
+			t.Errorf(
+				"recovered entry %d has term %d, want 1",
+				i,
+				entry.Term,
+			)
+		}
 	}
 }
 
@@ -298,4 +454,164 @@ func TestInstallSnapshotRejectsMissingStateMachineRestore(t *testing.T) {
 
 	require.Equal(t, LogIndex(0), state.Volatile.CommitIndex)
 	require.Equal(t, LogIndex(0), state.Volatile.LastApplied)
+}
+
+func TestInstallSnapshotCompactsWALAndRecovers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq.wal")
+
+	store, err := storage.OpenWAL(path)
+	require.NoError(t, err)
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	require.NoError(t, err)
+
+	node.SetSnapshotRestore(func(snapshot model.Snapshot) error {
+		return nil
+	})
+
+	const totalEntries = LogIndex(10)
+	const snapshotIndex = LogIndex(5)
+
+	node.mu.Lock()
+
+	for i := LogIndex(1); i <= totalEntries; i++ {
+		entry := LogEntry{
+			Index: i,
+			Term:  1,
+			Data: []byte(fmt.Sprintf(
+				"large-command-payload-%d-%s",
+				i,
+				"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			)),
+		}
+
+		if err := node.log.Append(entry); err != nil {
+			node.mu.Unlock()
+			store.Close()
+			t.Fatalf("append to raft log failed: %v", err)
+		}
+
+		if err := store.AppendEntries([]model.LogEntry{
+			{
+				Index: entry.Index,
+				Term:  entry.Term,
+				Data:  append([]byte(nil), entry.Data...),
+			},
+		}); err != nil {
+			node.mu.Unlock()
+			store.Close()
+			t.Fatalf("append to WAL failed: %v", err)
+		}
+	}
+
+	node.mu.Unlock()
+
+	require.NoError(t, store.Sync())
+
+	beforeInfo, err := os.Stat(path)
+	require.NoError(t, err)
+
+	reply := node.InstallSnapshot(InstallSnapshotArgs{
+		Term:              2,
+		LeaderID:          "node-2",
+		LastIncludedIndex: snapshotIndex,
+		LastIncludedTerm:  1,
+		Data:              []byte(`{"key":"value"}`),
+	})
+
+	require.True(t, reply.Success)
+
+	afterInfo, err := os.Stat(path)
+	require.NoError(t, err)
+
+	require.Less(
+		t,
+		afterInfo.Size(),
+		beforeInfo.Size(),
+		"expected WAL to shrink after InstallSnapshot",
+	)
+
+	require.Equal(
+		t,
+		snapshotIndex,
+		node.Log().LastIncludedIndex(),
+	)
+
+	require.Equal(
+		t,
+		snapshotIndex,
+		node.State().Volatile.CommitIndex,
+	)
+
+	require.Equal(
+		t,
+		snapshotIndex,
+		node.State().Volatile.LastApplied,
+	)
+
+	require.NoError(t, store.Close())
+
+	reopened, err := storage.OpenWAL(path)
+	require.NoError(t, err)
+	defer reopened.Close()
+
+	snapshot, err := reopened.LoadSnapshot()
+	require.NoError(t, err)
+
+	require.Equal(
+		t,
+		snapshotIndex,
+		snapshot.LastIncludedIndex,
+	)
+
+	require.Equal(
+		t,
+		Term(1),
+		snapshot.LastIncludedTerm,
+	)
+
+	require.Equal(
+		t,
+		[]byte(`{"key":"value"}`),
+		snapshot.Data,
+	)
+
+	entries, err := reopened.LoadEntries()
+	require.NoError(t, err)
+
+	require.Len(
+		t,
+		entries,
+		int(totalEntries-snapshotIndex),
+	)
+
+	for i, entry := range entries {
+		require.Equal(
+			t,
+			snapshotIndex+LogIndex(i)+1,
+			entry.Index,
+		)
+
+		require.Equal(
+			t,
+			Term(1),
+			entry.Term,
+		)
+	}
+
+	state, err := reopened.LoadState()
+	require.NoError(t, err)
+
+	require.Equal(
+		t,
+		Term(2),
+		state.CurrentTerm,
+	)
+
+	require.Equal(
+		t,
+		NodeID(""),
+		state.VotedFor,
+	)
 }
