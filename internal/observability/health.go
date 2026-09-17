@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"time"
 )
 
 const (
@@ -38,10 +39,10 @@ func NewHealthServer(address string) *HealthServer {
 		server: &http.Server{
 			Addr:              address,
 			Handler:           mux,
-			ReadHeaderTimeout: 5 * 1e9,
-			ReadTimeout:       10 * 1e9,
-			WriteTimeout:      10 * 1e9,
-			IdleTimeout:       60 * 1e9,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			IdleTimeout:       60 * time.Second,
 		},
 	}
 

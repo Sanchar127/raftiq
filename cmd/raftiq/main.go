@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -14,7 +13,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
@@ -141,6 +139,7 @@ type config struct {
 	raftAddr    string
 	kvAddr      string
 	metricsAddr string
+	healthAddr  string
 	dataDir     string
 	peers       peerFlag
 	workers     workerFlag
@@ -184,6 +183,13 @@ func main() {
 		"metrics-addr",
 		":9090",
 		"Address for the Prometheus metrics HTTP server.",
+	)
+
+	flag.StringVar(
+		&cfg.healthAddr,
+		"health-addr",
+		":8080",
+		"Address for the health and readiness HTTP server.",
 	)
 
 	flag.StringVar(
@@ -266,6 +272,7 @@ func main() {
 		"raft_addr", cfg.raftAddr,
 		"kv_addr", cfg.kvAddr,
 		"metrics_addr", cfg.metricsAddr,
+		"health_addr", cfg.healthAddr,
 		"data_dir", cfg.dataDir,
 		"workers", []string(cfg.workers),
 	)
@@ -375,6 +382,7 @@ func main() {
 		cfg.nodeID,
 		metrics,
 	)
+
 	store.SetMetrics(storageMetrics)
 
 	kvMetrics := observability.NewKVMetrics(metrics)
@@ -715,30 +723,74 @@ func main() {
 	}
 
 	// -------------------------------------------------------------------------
-	// Prometheus HTTP server.
+	// Prometheus metrics server.
 	// -------------------------------------------------------------------------
 
-	metricsMux := http.NewServeMux()
+	metricsServer, err := observability.NewMetricsServer(
+		cfg.metricsAddr,
+		registry,
+	)
+	if err != nil {
+		logger.Error(
+			"failed to create metrics server",
+			"address", cfg.metricsAddr,
+			"error", err,
+		)
 
-	metricsMux.Handle(
-		"/metrics",
-		promhttp.HandlerFor(
-			registry,
-			promhttp.HandlerOpts{},
-		),
+		shutdownTransportServer(
+			logger,
+			kvGRPCServer,
+		)
+
+		shutdownTransportServer(
+			logger,
+			raftGRPCServer,
+		)
+
+		raftTransport.Close()
+		os.Exit(1)
+	}
+
+	// -------------------------------------------------------------------------
+	// Health and readiness server.
+	// -------------------------------------------------------------------------
+
+	healthServer := observability.NewHealthServer(
+		cfg.healthAddr,
 	)
 
-	metricsServer := &http.Server{
-		Addr:              cfg.metricsAddr,
-		Handler:           metricsMux,
-		ReadHeaderTimeout: 5 * time.Second,
+	if err := healthServer.RegisterReadinessProbe(
+		"raft",
+		observability.RaftReadinessProbe(node),
+	); err != nil {
+		logger.Error(
+			"failed to register Raft readiness probe",
+			"error", err,
+		)
+
+		_ = metricsServer.Shutdown(
+			context.Background(),
+		)
+
+		shutdownTransportServer(
+			logger,
+			kvGRPCServer,
+		)
+
+		shutdownTransportServer(
+			logger,
+			raftGRPCServer,
+		)
+
+		raftTransport.Close()
+		os.Exit(1)
 	}
 
 	// -------------------------------------------------------------------------
 	// Start servers.
 	// -------------------------------------------------------------------------
 
-	errCh := make(chan error, len(workers)+5)
+	errCh := make(chan error, len(workers)+6)
 
 	go func() {
 		logger.Info(
@@ -771,13 +823,27 @@ func main() {
 	go func() {
 		logger.Info(
 			"starting metrics server",
-			"address", cfg.metricsAddr,
+			"address", metricsServer.Address(),
 		)
 
-		if err := metricsServer.ListenAndServe(); err != nil &&
-			!errors.Is(err, http.ErrServerClosed) {
+		if err := metricsServer.Serve(); err != nil {
 			errCh <- fmt.Errorf(
 				"metrics server: %w",
+				err,
+			)
+		}
+	}()
+
+	go func() {
+		logger.Info(
+			"starting health server",
+			"address", healthServer.Address(),
+		)
+
+		if err := healthServer.Serve(); err != nil &&
+			!errors.Is(err, observability.ErrHealthServerClosed) {
+			errCh <- fmt.Errorf(
+				"health server: %w",
 				err,
 			)
 		}
@@ -801,6 +867,7 @@ func main() {
 			raftGRPCServer,
 			kvGRPCServer,
 			metricsServer,
+			healthServer,
 			nil,
 		)
 
@@ -821,6 +888,7 @@ func main() {
 			raftGRPCServer,
 			kvGRPCServer,
 			metricsServer,
+			healthServer,
 			nil,
 		)
 
@@ -918,6 +986,7 @@ func main() {
 		raftGRPCServer,
 		kvGRPCServer,
 		metricsServer,
+		healthServer,
 		jobScheduler,
 	)
 
@@ -962,6 +1031,12 @@ func validateConfig(cfg config) error {
 	if strings.TrimSpace(cfg.metricsAddr) == "" {
 		return errors.New(
 			"--metrics-addr cannot be empty",
+		)
+	}
+
+	if strings.TrimSpace(cfg.healthAddr) == "" {
+		return errors.New(
+			"--health-addr cannot be empty",
 		)
 	}
 
@@ -1042,7 +1117,8 @@ func shutdown(
 	raftTransport *transport.GRPCTransport,
 	raftGRPCServer *transport.Server,
 	kvGRPCServer *transport.Server,
-	metricsServer *http.Server,
+	metricsServer *observability.MetricsServer,
+	healthServer *observability.HealthServer,
 	jobScheduler *scheduler.Scheduler,
 ) {
 	const shutdownTimeout = 10 * time.Second
@@ -1072,6 +1148,30 @@ func shutdown(
 		}
 	}
 
+	// Scheduler and workers are stopped by cancellation of executionCtx
+	// before shutdown() is called.
+	_ = jobScheduler
+
+	// Stop Raft before shutting down readiness so the readiness probe
+	// can observe the node transitioning out of service.
+	if node != nil {
+		node.Stop()
+	}
+
+	if appServer != nil {
+		appServer.Stop()
+	}
+
+	// Stop health/readiness endpoint after Raft has stopped.
+	if healthServer != nil {
+		if err := healthServer.Shutdown(ctx); err != nil {
+			logger.Error(
+				"failed to shutdown health server",
+				"error", err,
+			)
+		}
+	}
+
 	// Stop the metrics HTTP server.
 	if metricsServer != nil {
 		if err := metricsServer.Shutdown(ctx); err != nil {
@@ -1082,19 +1182,7 @@ func shutdown(
 		}
 	}
 
-	// Scheduler and workers are stopped by cancellation of executionCtx
-	// before shutdown() is called.
-	_ = jobScheduler
-
-	// Stop Raft before closing its transport/storage dependencies.
-	if node != nil {
-		node.Stop()
-	}
-
-	if appServer != nil {
-		appServer.Stop()
-	}
-
+	// Close transport only after Raft has stopped.
 	if raftTransport != nil {
 		if err := raftTransport.Close(); err != nil {
 			logger.Error(
