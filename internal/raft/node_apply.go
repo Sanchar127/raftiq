@@ -190,7 +190,7 @@ func (n *RaftNode) WaitApplied(
 
 	for {
 		n.mu.RLock()
-		applied := n.state.Volatile.LastApplied >= n.state.Volatile.CommitIndex
+		applied := n.state.Volatile.LastApplied >= index
 		if applied {
 			n.mu.RUnlock()
 			return nil
