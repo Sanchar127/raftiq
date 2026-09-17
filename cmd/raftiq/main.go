@@ -1,3 +1,4 @@
+// Package main contains the Raftiq node entrypoint and runtime configuration.
 package main
 
 import (
@@ -46,7 +47,6 @@ func main() {
 		syscall.SIGINT,
 		syscall.SIGTERM,
 	)
-	defer stopSignals()
 
 	if err := runtime.Start(signalCtx); err != nil {
 		logger.Error(
@@ -55,6 +55,7 @@ func main() {
 		)
 
 		runtime.Shutdown()
+		stopSignals()
 
 		os.Exit(1)
 	}
@@ -73,6 +74,7 @@ func main() {
 	}
 
 	runtime.Shutdown()
+	stopSignals()
 
 	logger.Info("raftiq node stopped")
 }

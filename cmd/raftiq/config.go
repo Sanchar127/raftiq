@@ -252,10 +252,46 @@ func parseConfig(cfg *config) error {
 }
 
 func validateConfig(cfg config) error {
+	if err := validateIdentity(cfg); err != nil {
+		return err
+	}
+
+	if err := validateTiming(cfg); err != nil {
+		return err
+	}
+
+	if err := validateAddresses(cfg); err != nil {
+		return err
+	}
+
+	if err := validateDataDir(cfg); err != nil {
+		return err
+	}
+
+	if err := validateLogLevel(cfg); err != nil {
+		return err
+	}
+
+	if err := validateTLS(cfg); err != nil {
+		return err
+	}
+
+	if err := validateCluster(cfg); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateIdentity(cfg config) error {
 	if strings.TrimSpace(cfg.nodeID) == "" {
 		return errors.New("--id is required")
 	}
 
+	return nil
+}
+
+func validateTiming(cfg config) error {
 	if cfg.heartbeat <= 0 {
 		return errors.New(
 			"--heartbeat must be greater than zero",
@@ -274,6 +310,10 @@ func validateConfig(cfg config) error {
 		)
 	}
 
+	return nil
+}
+
+func validateAddresses(cfg config) error {
 	if strings.TrimSpace(cfg.raftAddr) == "" {
 		return errors.New(
 			"--raft-addr cannot be empty",
@@ -298,14 +338,23 @@ func validateConfig(cfg config) error {
 		)
 	}
 
+	return nil
+}
+
+func validateDataDir(cfg config) error {
 	if strings.TrimSpace(cfg.dataDir) == "" {
 		return errors.New(
 			"--data-dir cannot be empty",
 		)
 	}
 
+	return nil
+}
+
+func validateLogLevel(cfg config) error {
 	switch strings.ToLower(strings.TrimSpace(cfg.logLevel)) {
 	case "debug", "info", "warn", "error":
+		return nil
 
 	default:
 		return fmt.Errorf(
@@ -313,7 +362,9 @@ func validateConfig(cfg config) error {
 			cfg.logLevel,
 		)
 	}
+}
 
+func validateTLS(cfg config) error {
 	if strings.TrimSpace(cfg.tlsCA) == "" {
 		return errors.New("--tls-ca is required")
 	}
@@ -326,6 +377,10 @@ func validateConfig(cfg config) error {
 		return errors.New("--tls-key is required")
 	}
 
+	return nil
+}
+
+func validateCluster(cfg config) error {
 	if len(cfg.peers) == 0 {
 		return errors.New("--peers requires at least one peer")
 	}

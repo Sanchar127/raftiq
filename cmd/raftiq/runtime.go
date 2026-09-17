@@ -300,7 +300,7 @@ func (r *runtime) initializeScheduler() error {
 func (r *runtime) initializeWorkers() error {
 	jobHandler := worker.HandlerFunc(
 		func(
-			ctx context.Context,
+			_ context.Context,
 			job model.Job,
 		) error {
 			r.logger.Info(
@@ -369,7 +369,7 @@ func (r *runtime) initializeTransport() error {
 	if err := raftTransport.SetTLSConfig(
 		r.clientTLS,
 	); err != nil {
-		raftTransport.Close()
+		r.closeRaftTransport(raftTransport)
 
 		return fmt.Errorf(
 			"configure Raft transport TLS: %w",
@@ -392,7 +392,7 @@ func (r *runtime) initializeTransport() error {
 			peerID,
 			address,
 		); err != nil {
-			raftTransport.Close()
+			r.closeRaftTransport(raftTransport)
 
 			return fmt.Errorf(
 				"add Raft peer %q at %q: %w",
@@ -405,13 +405,20 @@ func (r *runtime) initializeTransport() error {
 		peerIDs = append(peerIDs, peerID)
 	}
 
-	r.node.SetTransport(
+	if err := r.node.SetTransport(
 		raftTransport,
 		peerIDs,
-	)
+	); err != nil {
+		r.closeRaftTransport(raftTransport)
+
+		return fmt.Errorf(
+			"configure Raft transport: %w",
+			err,
+		)
+	}
 
 	if err := r.node.BootstrapMembership(); err != nil {
-		raftTransport.Close()
+		r.closeRaftTransport(raftTransport)
 
 		return fmt.Errorf(
 			"bootstrap Raft membership: %w",
@@ -595,6 +602,7 @@ func (r *runtime) Start(ctx context.Context) error {
 		r.executionCancel()
 
 		r.stopServers()
+
 		return fmt.Errorf(
 			"start application server: %w",
 			err,
@@ -754,7 +762,9 @@ func (r *runtime) reportError(err error) {
 	}
 }
 
-func (r *runtime) Errors() <-chan error { return r.errCh }
+func (r *runtime) Errors() <-chan error {
+	return r.errCh
+}
 
 func (r *runtime) Shutdown() {
 	if r.shutdownOnce {
@@ -773,6 +783,14 @@ func (r *runtime) Shutdown() {
 	)
 	defer cancel()
 
+	r.shutdownServers(ctx)
+	r.shutdownApplication()
+	r.shutdownNode()
+	r.shutdownRuntimeServices(ctx)
+	r.shutdownPersistence()
+}
+
+func (r *runtime) shutdownServers(ctx context.Context) {
 	if r.raftGRPCServer != nil {
 		if err := r.raftGRPCServer.Shutdown(ctx); err != nil {
 			r.logger.Error(
@@ -790,15 +808,21 @@ func (r *runtime) Shutdown() {
 			)
 		}
 	}
+}
 
-	if r.node != nil {
-		r.node.Stop()
-	}
-
+func (r *runtime) shutdownApplication() {
 	if r.appServer != nil {
 		r.appServer.Stop()
 	}
+}
 
+func (r *runtime) shutdownNode() {
+	if r.node != nil {
+		r.node.Stop()
+	}
+}
+
+func (r *runtime) shutdownRuntimeServices(ctx context.Context) {
 	if r.healthServer != nil {
 		if err := r.healthServer.Shutdown(ctx); err != nil {
 			r.logger.Error(
@@ -816,7 +840,9 @@ func (r *runtime) Shutdown() {
 			)
 		}
 	}
+}
 
+func (r *runtime) shutdownPersistence() {
 	if r.raftTransport != nil {
 		if err := r.raftTransport.Close(); err != nil {
 			r.logger.Error(
@@ -833,6 +859,21 @@ func (r *runtime) Shutdown() {
 				"error", err,
 			)
 		}
+	}
+}
+
+func (r *runtime) closeRaftTransport(
+	raftTransport *transport.GRPCTransport,
+) {
+	if raftTransport == nil {
+		return
+	}
+
+	if err := raftTransport.Close(); err != nil {
+		r.logger.Error(
+			"failed to close Raft transport during initialization",
+			"error", err,
+		)
 	}
 }
 

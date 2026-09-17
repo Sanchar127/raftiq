@@ -6,6 +6,14 @@ run:
 linters:
   default: standard
 
+  settings:
+    funlen:
+      lines: 150
+      statements: 100
+
+    cyclop:
+      max-complexity: 15
+
   enable:
     - bodyclose
     - copyloopvar
@@ -25,6 +33,12 @@ linters:
 
   exclusions:
     generated: lax
+
+    rules:
+      - path: '(_test\.go)$'
+        linters:
+          - cyclop
+          - funlen
 
 formatters:
   enable:

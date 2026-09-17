@@ -68,7 +68,6 @@ func (n *RaftNode) ReadIndex(ctx context.Context) (model.LogIndex, error) {
 	results := make(chan result, len(peerIDs))
 
 	for _, peerID := range peerIDs {
-		peerID := peerID
 
 		go func() {
 			n.mu.RLock()
