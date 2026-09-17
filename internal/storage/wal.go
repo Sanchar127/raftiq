@@ -15,8 +15,9 @@ import (
 type WALStorage struct {
 	mu sync.RWMutex
 
-	file   *os.File
-	syncFn func() error
+	file    *os.File
+	syncFn  func() error
+	writeFn func(*os.File, []byte) error
 
 	state    model.PersistentState
 	entries  []model.LogEntry
@@ -41,6 +42,7 @@ func OpenWAL(path string) (*WALStorage, error) {
 	storage := &WALStorage{
 		file:    file,
 		syncFn:  file.Sync,
+		writeFn: writeFull,
 		entries: make([]model.LogEntry, 0),
 		metrics: NoopStorageMetrics{},
 	}
@@ -156,12 +158,14 @@ func (s *WALStorage) recover() error {
 
 		recordType, payload, err := decodeRecord(s.file)
 
-		if err == io.EOF {
-			validOffset = recordStart
-			break
-		}
+		if errors.Is(err, io.EOF) {
+			// EOF at the current valid boundary means the WAL ended
+			// cleanly. EOF after a record has started means the final
+			// record is incomplete and must be discarded.
+			if recordStart == validOffset {
+				break
+			}
 
-		if err == io.ErrUnexpectedEOF {
 			if err := s.file.Truncate(validOffset); err != nil {
 				return fmt.Errorf(
 					"truncate incomplete WAL tail at offset %d: %w",
@@ -169,7 +173,17 @@ func (s *WALStorage) recover() error {
 					err,
 				)
 			}
+			break
+		}
 
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			if err := s.file.Truncate(validOffset); err != nil {
+				return fmt.Errorf(
+					"truncate incomplete WAL tail at offset %d: %w",
+					validOffset,
+					err,
+				)
+			}
 			break
 		}
 
@@ -194,7 +208,6 @@ func (s *WALStorage) recover() error {
 			if err != nil {
 				return fmt.Errorf("decode state: %w", err)
 			}
-
 			s.state = state
 
 		case recordEntries:
@@ -204,24 +217,15 @@ func (s *WALStorage) recover() error {
 			}
 
 			if err := validateRecoveredAppend(s.entries, entries); err != nil {
-				return fmt.Errorf(
-					"validate recovered entries: %w",
-					err,
-				)
+				return fmt.Errorf("validate recovered entries: %w", err)
 			}
 
-			s.entries = appendEntriesCopy(
-				s.entries,
-				entries,
-			)
+			s.entries = appendEntriesCopy(s.entries, entries)
 
 		case recordSnapshot:
 			snapshot, err := decodeSnapshotPayload(payload)
 			if err != nil {
-				return fmt.Errorf(
-					"decode snapshot: %w",
-					err,
-				)
+				return fmt.Errorf("decode snapshot: %w", err)
 			}
 
 			snapshot.Data = cloneBytes(snapshot.Data)
@@ -230,21 +234,14 @@ func (s *WALStorage) recover() error {
 		case recordReplaceSuffix:
 			from, entries, err := decodeReplaceSuffixPayload(payload)
 			if err != nil {
-				return fmt.Errorf(
-					"decode suffix replacement: %w",
-					err,
-				)
+				return fmt.Errorf("decode suffix replacement: %w", err)
 			}
 
 			if err := validateEntries(entries); err != nil {
-				return fmt.Errorf(
-					"validate recovered replacement entries: %w",
-					err,
-				)
+				return fmt.Errorf("validate recovered replacement entries: %w", err)
 			}
 
-			if len(entries) > 0 &&
-				entries[0].Index != from {
+			if len(entries) > 0 && entries[0].Index != from {
 				return fmt.Errorf(
 					"%w: replacement starts at %d, want %d",
 					ErrInvalidLog,
@@ -253,11 +250,7 @@ func (s *WALStorage) recover() error {
 				)
 			}
 
-			s.entries = replaceSuffixCopy(
-				s.entries,
-				from,
-				entries,
-			)
+			s.entries = replaceSuffixCopy(s.entries, from, entries)
 
 			if err := validateLog(s.entries); err != nil {
 				return fmt.Errorf(
@@ -275,10 +268,70 @@ func (s *WALStorage) recover() error {
 	}
 
 	if _, err := s.file.Seek(0, io.SeekEnd); err != nil {
-		return fmt.Errorf(
-			"seek WAL end: %w",
-			err,
-		)
+		return fmt.Errorf("seek WAL end: %w", err)
+	}
+
+	return nil
+}
+
+func (s *WALStorage) appendRecord(record []byte) error {
+	startOffset, err := s.file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return fmt.Errorf("get WAL write offset: %w", err)
+	}
+
+	if s.writeFn == nil {
+		s.writeFn = writeFull
+	}
+
+	if err := s.writeFn(s.file, record); err != nil {
+		writeErr := err
+
+		if errors.Is(err, syscall.ENOSPC) {
+			writeErr = fmt.Errorf("%w: %w", ErrWALDiskFull, err)
+		}
+
+		if rollbackErr := s.file.Truncate(startOffset); rollbackErr != nil {
+			closeErr := s.file.Close()
+			s.file = nil
+
+			if closeErr != nil {
+				return fmt.Errorf(
+					"WAL write failed: %w; rollback failed: %w; close failed: %w",
+					writeErr,
+					rollbackErr,
+					closeErr,
+				)
+			}
+
+			return fmt.Errorf(
+				"WAL write failed: %w; rollback failed: %w",
+				writeErr,
+				rollbackErr,
+			)
+		}
+
+		if _, seekErr := s.file.Seek(0, io.SeekEnd); seekErr != nil {
+			closeErr := s.file.Close()
+			s.file = nil
+
+			if closeErr != nil {
+				return fmt.Errorf(
+					"WAL write failed: %w; restore position failed: %w; close failed: %w",
+					writeErr,
+					seekErr,
+					closeErr,
+				)
+			}
+
+			return fmt.Errorf(
+				"WAL write failed: %w; restore position failed: %w",
+				writeErr,
+				seekErr,
+			)
+		}
+
+		return writeErr
 	}
 
 	return nil

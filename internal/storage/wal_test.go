@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"syscall"
 
 	"github.com/sanchar127/raftiq/internal/model"
 )
@@ -1111,5 +1113,410 @@ func TestWALStorageRejectsTooManyMembershipVoters(t *testing.T) {
 
 	if _, err := OpenWAL(path); err == nil {
 		t.Fatal("OpenWAL() error = nil, want oversized voter count error")
+	}
+}
+
+func TestWALCompactRejectsClosedStorage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+
+	if err := storage.Close(); err != nil {
+		t.Fatalf("close WAL: %v", err)
+	}
+
+	err = storage.Compact(model.Snapshot{
+		LastIncludedIndex: 1,
+		LastIncludedTerm:  1,
+	})
+
+	if !errors.Is(err, ErrClosedStorage) {
+		t.Fatalf("Compact() error = %v, want ErrClosedStorage", err)
+	}
+}
+
+func TestWALCompactRejectsMissingPersistedSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+	defer func() {
+		if err := storage.Close(); err != nil {
+			t.Errorf("close WAL: %v", err)
+		}
+	}()
+
+	snapshot := model.Snapshot{
+		LastIncludedIndex: 5,
+		LastIncludedTerm:  1,
+		Data:              []byte("snapshot"),
+	}
+
+	err = storage.Compact(snapshot)
+	if err == nil {
+		t.Fatal("Compact() error = nil, want missing persisted snapshot error")
+	}
+
+	if !strings.Contains(err.Error(), "without persisted snapshot") {
+		t.Fatalf(
+			"Compact() error = %v, want missing persisted snapshot error",
+			err,
+		)
+	}
+}
+
+func TestWALCompactRejectsSnapshotMismatchWithoutChangingState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+	defer func() {
+		if err := storage.Close(); err != nil {
+			t.Errorf("close WAL: %v", err)
+		}
+	}()
+
+	state := model.PersistentState{
+		CurrentTerm: 3,
+		VotedFor:    "node-1",
+	}
+
+	if err := storage.SaveState(state); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	entries := []model.LogEntry{
+		{
+			Index: 1,
+			Term:  3,
+			Data:  []byte("entry-1"),
+		},
+		{
+			Index: 2,
+			Term:  3,
+			Data:  []byte("entry-2"),
+		},
+		{
+			Index: 3,
+			Term:  3,
+			Data:  []byte("entry-3"),
+		},
+	}
+
+	if err := storage.AppendEntries(entries); err != nil {
+		t.Fatalf("append entries: %v", err)
+	}
+
+	persistedSnapshot := model.Snapshot{
+		LastIncludedIndex: 2,
+		LastIncludedTerm:  3,
+		Data:              []byte("snapshot"),
+	}
+
+	if err := storage.SaveSnapshot(persistedSnapshot); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+
+	mismatchedSnapshot := model.Snapshot{
+		LastIncludedIndex: 2,
+		LastIncludedTerm:  99,
+		Data:              []byte("different"),
+	}
+
+	err = storage.Compact(mismatchedSnapshot)
+	if err == nil {
+		t.Fatal("Compact() error = nil, want snapshot term mismatch")
+	}
+
+	if !strings.Contains(err.Error(), "snapshot term mismatch") {
+		t.Fatalf(
+			"Compact() error = %v, want snapshot term mismatch",
+			err,
+		)
+	}
+
+	recoveredEntries, err := storage.LoadEntries()
+	if err != nil {
+		t.Fatalf("load entries after rejected compaction: %v", err)
+	}
+
+	if !reflect.DeepEqual(recoveredEntries, entries) {
+		t.Fatalf(
+			"entries changed after rejected compaction: got %#v, want %#v",
+			recoveredEntries,
+			entries,
+		)
+	}
+
+	recoveredSnapshot, err := storage.LoadSnapshot()
+	if err != nil {
+		t.Fatalf("load snapshot after rejected compaction: %v", err)
+	}
+
+	if !reflect.DeepEqual(recoveredSnapshot, persistedSnapshot) {
+		t.Fatalf(
+			"snapshot changed after rejected compaction: got %#v, want %#v",
+			recoveredSnapshot,
+			persistedSnapshot,
+		)
+	}
+}
+
+func TestWALStorageRecoversFromTruncatedRecordHeader(t *testing.T) {
+	testCases := []struct {
+		name string
+		tail []byte
+	}{
+		{
+			name: "partial type",
+			tail: []byte{recordState},
+		},
+		{
+			name: "partial length",
+			tail: []byte{
+				recordState,
+				0x00,
+				0x00,
+			},
+		},
+		{
+			name: "complete header",
+			tail: []byte{
+				recordState,
+				0x00,
+				0x00,
+				0x00,
+				0x01,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "raftiq.wal")
+
+			storage, err := OpenWAL(path)
+			if err != nil {
+				t.Fatalf("OpenWAL() error = %v", err)
+			}
+
+			state := model.PersistentState{
+				CurrentTerm: 9,
+				VotedFor:    "node-1",
+			}
+
+			if err := storage.SaveState(state); err != nil {
+				t.Fatalf("SaveState() error = %v", err)
+			}
+
+			if err := storage.Sync(); err != nil {
+				t.Fatalf("Sync() error = %v", err)
+			}
+
+			if err := storage.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+
+			file, err := os.OpenFile(
+				path,
+				os.O_WRONLY|os.O_APPEND,
+				0o600,
+			)
+			if err != nil {
+				t.Fatalf("open WAL for partial header: %v", err)
+			}
+
+			if _, err := file.Write(tc.tail); err != nil {
+				_ = file.Close()
+				t.Fatalf("write partial header: %v", err)
+			}
+
+			if err := file.Close(); err != nil {
+				t.Fatalf("close WAL after partial header: %v", err)
+			}
+
+			reopened, err := OpenWAL(path)
+			if err != nil {
+				t.Fatalf("OpenWAL() error = %v", err)
+			}
+			defer reopened.Close()
+
+			gotState, err := reopened.LoadState()
+			if err != nil {
+				t.Fatalf("LoadState() error = %v", err)
+			}
+
+			if !reflect.DeepEqual(gotState, state) {
+				t.Fatalf(
+					"LoadState() = %+v, want %+v",
+					gotState,
+					state,
+				)
+			}
+
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stat WAL: %v", err)
+			}
+
+			expectedRecord, err := encodeStateRecord(state)
+			if err != nil {
+				t.Fatalf("encodeStateRecord() error = %v", err)
+			}
+
+			expectedSize := int64(len(expectedRecord))
+
+			if info.Size() != expectedSize {
+				t.Fatalf(
+					"WAL size = %d, want %d after truncating partial header",
+					info.Size(),
+					expectedSize,
+				)
+			}
+		})
+	}
+}
+
+func TestWALStorageRollsBackFailedPartialWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("OpenWAL() error = %v", err)
+	}
+	defer storage.Close()
+
+	firstEntry := model.LogEntry{
+		Index: 1,
+		Term:  1,
+		Data:  []byte("first"),
+	}
+
+	if err := storage.AppendEntries([]model.LogEntry{firstEntry}); err != nil {
+		t.Fatalf("AppendEntries(first) error = %v", err)
+	}
+
+	originalWriteFn := storage.writeFn
+	writeErr := errors.New("injected partial write failure")
+
+	storage.writeFn = func(file *os.File, data []byte) error {
+		partial := len(data) / 2
+		if partial == 0 {
+			partial = 1
+		}
+
+		if _, err := file.Write(data[:partial]); err != nil {
+			return err
+		}
+
+		return writeErr
+	}
+
+	secondEntry := model.LogEntry{
+		Index: 2,
+		Term:  1,
+		Data:  []byte("second"),
+	}
+
+	err = storage.AppendEntries([]model.LogEntry{secondEntry})
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("AppendEntries() error = %v, want %v", err, writeErr)
+	}
+
+	storage.writeFn = originalWriteFn
+
+	thirdEntry := model.LogEntry{
+		Index: 2,
+		Term:  1,
+		Data:  []byte("third"),
+	}
+
+	if err := storage.AppendEntries([]model.LogEntry{thirdEntry}); err != nil {
+		t.Fatalf("AppendEntries(third) error = %v", err)
+	}
+
+	entries, err := storage.LoadEntries()
+	if err != nil {
+		t.Fatalf("LoadEntries() error = %v", err)
+	}
+
+	want := []model.LogEntry{
+		firstEntry,
+		thirdEntry,
+	}
+
+	if !reflect.DeepEqual(entries, want) {
+		t.Fatalf("LoadEntries() = %#v, want %#v", entries, want)
+	}
+
+	if err := storage.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("OpenWAL() after rollback error = %v", err)
+	}
+	defer reopened.Close()
+
+	entries, err = reopened.LoadEntries()
+	if err != nil {
+		t.Fatalf("LoadEntries() after reopen error = %v", err)
+	}
+
+	if !reflect.DeepEqual(entries, want) {
+		t.Fatalf(
+			"LoadEntries() after reopen = %#v, want %#v",
+			entries,
+			want,
+		)
+	}
+}
+
+func TestWALStorageWriteDiskFull(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("OpenWAL() error = %v", err)
+	}
+	defer storage.Close()
+
+	storage.writeFn = func(_ *os.File, _ []byte) error {
+		return syscall.ENOSPC
+	}
+
+	entry := model.LogEntry{
+		Index: 1,
+		Term:  1,
+		Data:  []byte("disk-full"),
+	}
+
+	err = storage.AppendEntries([]model.LogEntry{entry})
+	if !errors.Is(err, ErrWALDiskFull) {
+		t.Fatalf("AppendEntries() error = %v, want ErrWALDiskFull", err)
+	}
+
+	if !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("AppendEntries() error = %v, want wrapped syscall.ENOSPC", err)
+	}
+
+	entries, err := storage.LoadEntries()
+	if err != nil {
+		t.Fatalf("LoadEntries() error = %v", err)
+	}
+
+	if len(entries) != 0 {
+		t.Fatalf("LoadEntries() returned %d entries, want 0", len(entries))
 	}
 }

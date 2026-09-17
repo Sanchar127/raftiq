@@ -56,7 +56,7 @@ func (s *WALStorage) SaveSnapshot(
 		return fmt.Errorf("encode snapshot record: %w", err)
 	}
 
-	if err = writeFull(s.file, record); err != nil {
+	if err = s.appendRecord(record); err != nil {
 		return fmt.Errorf(
 			"write snapshot record: %w",
 			err,

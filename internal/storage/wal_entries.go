@@ -64,7 +64,7 @@ func (s *WALStorage) AppendEntries(
 		return fmt.Errorf("encode entries record: %w", err)
 	}
 
-	if err = writeFull(s.file, record); err != nil {
+	if err = s.appendRecord(record); err != nil {
 		return fmt.Errorf("write entries record: %w", err)
 	}
 
@@ -150,7 +150,7 @@ func (s *WALStorage) ReplaceSuffix(
 		)
 	}
 
-	if err = writeFull(s.file, record); err != nil {
+	if err = s.appendRecord(record); err != nil {
 		return fmt.Errorf(
 			"write suffix replacement record: %w",
 			err,

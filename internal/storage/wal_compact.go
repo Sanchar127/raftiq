@@ -194,8 +194,9 @@ func (s *WALStorage) Compact(
 		)
 	}
 
+	s.file = nil
+
 	if err := os.Rename(tempPath, walPath); err != nil {
-		// Reopen the original WAL if the replacement failed.
 		reopened, reopenErr := os.OpenFile(
 			walPath,
 			os.O_RDWR|os.O_APPEND,
@@ -211,7 +212,7 @@ func (s *WALStorage) Compact(
 
 		if reopenErr != nil {
 			return fmt.Errorf(
-				"rename compacted WAL: %w; reopen original WAL: %v",
+				"rename compacted WAL: %w; reopen original WAL: %w",
 				err,
 				reopenErr,
 			)
@@ -223,12 +224,21 @@ func (s *WALStorage) Compact(
 		)
 	}
 
+	if err := syncDirectory(dir); err != nil {
+		return fmt.Errorf(
+			"sync WAL directory after rename: %w",
+			err,
+		)
+	}
+
 	file, err := os.OpenFile(
 		walPath,
 		os.O_RDWR|os.O_APPEND,
 		0o600,
 	)
 	if err != nil {
+		s.file = nil
+
 		return fmt.Errorf(
 			"reopen compacted WAL: %w",
 			err,
@@ -242,6 +252,34 @@ func (s *WALStorage) Compact(
 	snapshotCopy := snapshot
 	snapshotCopy.Data = cloneBytes(snapshot.Data)
 	s.snapshot = &snapshotCopy
+
+	return nil
+}
+
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf(
+			"open WAL directory: %w",
+			err,
+		)
+	}
+
+	if err := dir.Sync(); err != nil {
+		_ = dir.Close()
+
+		return fmt.Errorf(
+			"sync WAL directory: %w",
+			err,
+		)
+	}
+
+	if err := dir.Close(); err != nil {
+		return fmt.Errorf(
+			"close WAL directory: %w",
+			err,
+		)
+	}
 
 	return nil
 }

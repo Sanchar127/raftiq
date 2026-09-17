@@ -47,7 +47,7 @@ func (s *WALStorage) SaveState(
 		return fmt.Errorf("encode state record: %w", err)
 	}
 
-	if err = writeFull(s.file, record); err != nil {
+	if err = s.appendRecord(record); err != nil {
 		return fmt.Errorf("write state record: %w", err)
 	}
 

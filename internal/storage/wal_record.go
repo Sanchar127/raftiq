@@ -3,7 +3,6 @@ package storage
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -60,9 +59,7 @@ func encodeRecord(
 		)
 	}
 
-	checksum := crc32.ChecksumIEEE(
-		record.Bytes(),
-	)
+	checksum := crc32.ChecksumIEEE(record.Bytes())
 
 	if err := binary.Write(
 		&record,
@@ -83,6 +80,7 @@ func decodeRecord(
 ) (byte, []byte, error) {
 	var recordType byte
 
+	// EOF before reading any record bytes means the WAL ended cleanly.
 	if err := binary.Read(
 		reader,
 		binary.BigEndian,
@@ -93,11 +91,17 @@ func decodeRecord(
 
 	var payloadLength uint32
 
+	// Once the record type has been read, EOF means the record is
+	// incomplete rather than a clean end of the WAL.
 	if err := binary.Read(
 		reader,
 		binary.BigEndian,
 		&payloadLength,
 	); err != nil {
+		if err == io.EOF {
+			return 0, nil, io.ErrUnexpectedEOF
+		}
+
 		return 0, nil, err
 	}
 
@@ -109,15 +113,13 @@ func decodeRecord(
 		)
 	}
 
-	payload := make(
-		[]byte,
-		payloadLength,
-	)
+	payload := make([]byte, payloadLength)
 
-	if _, err := io.ReadFull(
-		reader,
-		payload,
-	); err != nil {
+	if _, err := io.ReadFull(reader, payload); err != nil {
+		if err == io.EOF {
+			return 0, nil, io.ErrUnexpectedEOF
+		}
+
 		return 0, nil, err
 	}
 
@@ -128,14 +130,16 @@ func decodeRecord(
 		binary.BigEndian,
 		&storedChecksum,
 	); err != nil {
+		if err == io.EOF {
+			return 0, nil, io.ErrUnexpectedEOF
+		}
+
 		return 0, nil, err
 	}
 
 	var headerAndPayload bytes.Buffer
 
-	if err := headerAndPayload.WriteByte(
-		recordType,
-	); err != nil {
+	if err := headerAndPayload.WriteByte(recordType); err != nil {
 		return 0, nil, err
 	}
 
@@ -147,15 +151,11 @@ func decodeRecord(
 		return 0, nil, err
 	}
 
-	if _, err := headerAndPayload.Write(
-		payload,
-	); err != nil {
+	if _, err := headerAndPayload.Write(payload); err != nil {
 		return 0, nil, err
 	}
 
-	expectedChecksum := crc32.ChecksumIEEE(
-		headerAndPayload.Bytes(),
-	)
+	expectedChecksum := crc32.ChecksumIEEE(headerAndPayload.Bytes())
 
 	if storedChecksum != expectedChecksum {
 		return 0, nil, fmt.Errorf(
@@ -194,5 +194,3 @@ func writeFull(
 
 	return nil
 }
-
-var _ = errors.New // keep errors import if unused after refactor
