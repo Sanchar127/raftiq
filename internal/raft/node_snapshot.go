@@ -14,69 +14,8 @@ func (n *RaftNode) CreateSnapshot(
 
 	n.mu.Lock()
 
-	if index > n.state.Volatile.LastApplied {
-		err := fmt.Errorf(
-			"cannot snapshot unapplied index %d: last applied %d",
-			index,
-			n.state.Volatile.LastApplied,
-		)
-
-		lastApplied := n.state.Volatile.LastApplied
-
-		n.mu.Unlock()
-
-		logger.Warn(
-			"snapshot creation rejected",
-			"index", index,
-			"last_applied", lastApplied,
-			"error", err,
-		)
-
-		return err
-	}
-
-	if index > n.state.Volatile.CommitIndex {
-		err := fmt.Errorf(
-			"cannot snapshot uncommitted index %d: commit index %d",
-			index,
-			n.state.Volatile.CommitIndex,
-		)
-
-		commitIndex := n.state.Volatile.CommitIndex
-
-		n.mu.Unlock()
-
-		logger.Warn(
-			"snapshot creation rejected",
-			"index", index,
-			"commit_index", commitIndex,
-			"error", err,
-		)
-
-		return err
-	}
-
-	if index == 0 {
-		err := fmt.Errorf("cannot snapshot index 0")
-
-		n.mu.Unlock()
-
-		logger.Warn(
-			"snapshot creation rejected",
-			"index", index,
-			"error", err,
-		)
-
-		return err
-	}
-
-	entry, ok := n.log.Get(index)
-	if !ok {
-		err := fmt.Errorf(
-			"cannot snapshot missing log index %d",
-			index,
-		)
-
+	entry, err := n.validateSnapshotRequestLocked(index)
+	if err != nil {
 		n.mu.Unlock()
 
 		logger.Warn(
@@ -94,76 +33,17 @@ func (n *RaftNode) CreateSnapshot(
 		Data:              append([]byte(nil), data...),
 	}
 
-	if err := n.storage.SaveSnapshot(snapshot); err != nil {
-		wrappedErr := fmt.Errorf(
-			"save snapshot: %w",
-			err,
-		)
-
+	if err := n.persistAndCompactSnapshotLocked(snapshot); err != nil {
 		n.mu.Unlock()
 
 		logger.Error(
-			"failed to persist snapshot",
+			"failed to persist or compact snapshot",
 			"last_included_index", index,
 			"last_included_term", entry.Term,
-			"error", wrappedErr,
+			"error", err,
 		)
 
-		return wrappedErr
-	}
-
-	if err := n.storage.Sync(); err != nil {
-		wrappedErr := fmt.Errorf(
-			"sync snapshot: %w",
-			err,
-		)
-
-		n.mu.Unlock()
-
-		logger.Error(
-			"failed to sync snapshot",
-			"last_included_index", index,
-			"last_included_term", entry.Term,
-			"error", wrappedErr,
-		)
-
-		return wrappedErr
-	}
-
-	if err := n.storage.Compact(snapshot); err != nil {
-		wrappedErr := fmt.Errorf(
-			"compact durable storage after snapshot: %w",
-			err,
-		)
-
-		n.mu.Unlock()
-
-		logger.Error(
-			"failed to compact durable storage after snapshot",
-			"last_included_index", index,
-			"last_included_term", entry.Term,
-			"error", wrappedErr,
-		)
-
-		return wrappedErr
-	}
-
-	if err := n.log.Compact(snapshot); err != nil {
-		wrappedErr := fmt.Errorf(
-			"compact log after snapshot: %w",
-			err,
-		)
-
-		n.mu.Unlock()
-
-		logger.Error(
-			"failed to compact raft log after snapshot",
-			"last_included_index", index,
-			"last_included_term", entry.Term,
-			"error", wrappedErr,
-		)
-
-		return wrappedErr
+		return err
 	}
 
 	n.metrics.IncSnapshotsCreated()
@@ -176,6 +56,96 @@ func (n *RaftNode) CreateSnapshot(
 		"last_included_term", entry.Term,
 		"snapshot_size", len(data),
 	)
+
+	return nil
+}
+
+func (n *RaftNode) validateSnapshotRequestLocked(
+	index LogIndex,
+) (model.LogEntry, error) {
+	if index > n.state.Volatile.LastApplied {
+		return model.LogEntry{}, fmt.Errorf(
+			"cannot snapshot unapplied index %d: last applied %d",
+			index,
+			n.state.Volatile.LastApplied,
+		)
+	}
+
+	if index > n.state.Volatile.CommitIndex {
+		return model.LogEntry{}, fmt.Errorf(
+			"cannot snapshot uncommitted index %d: commit index %d",
+			index,
+			n.state.Volatile.CommitIndex,
+		)
+	}
+
+	if index == 0 {
+		return model.LogEntry{}, fmt.Errorf(
+			"cannot snapshot index 0",
+		)
+	}
+
+	entry, ok := n.log.Get(index)
+	if !ok {
+		return model.LogEntry{}, fmt.Errorf(
+			"cannot snapshot missing log index %d",
+			index,
+		)
+	}
+
+	return entry, nil
+}
+
+func (n *RaftNode) persistAndCompactSnapshotLocked(
+	snapshot model.Snapshot,
+) error {
+	if err := n.storage.SaveSnapshot(snapshot); err != nil {
+		return fmt.Errorf(
+			"save snapshot: %w",
+			err,
+		)
+	}
+
+	if err := n.storage.Sync(); err != nil {
+		return fmt.Errorf(
+			"sync snapshot: %w",
+			err,
+		)
+	}
+
+	if err := n.storage.Compact(snapshot); err != nil {
+		return fmt.Errorf(
+			"compact durable storage after snapshot: %w",
+			err,
+		)
+	}
+
+	if err := n.log.Compact(snapshot); err != nil {
+		return fmt.Errorf(
+			"compact log after snapshot: %w",
+			err,
+		)
+	}
+
+	return nil
+}
+
+func (n *RaftNode) persistSnapshotLocked(
+	snapshot model.Snapshot,
+) error {
+	if err := n.storage.SaveSnapshot(snapshot); err != nil {
+		return fmt.Errorf(
+			"save installed snapshot: %w",
+			err,
+		)
+	}
+
+	if err := n.storage.Sync(); err != nil {
+		return fmt.Errorf(
+			"sync installed snapshot: %w",
+			err,
+		)
+	}
 
 	return nil
 }
@@ -250,24 +220,11 @@ func (n *RaftNode) InstallSnapshot(
 		Data:              append([]byte(nil), args.Data...),
 	}
 
-	if err := n.storage.SaveSnapshot(snapshot); err != nil {
+	if err := n.persistSnapshotLocked(snapshot); err != nil {
 		n.mu.Unlock()
 
 		logger.Error(
 			"failed to persist installed snapshot",
-			"leader_id", args.LeaderID,
-			"last_included_index", args.LastIncludedIndex,
-			"error", err,
-		)
-
-		return reply
-	}
-
-	if err := n.storage.Sync(); err != nil {
-		n.mu.Unlock()
-
-		logger.Error(
-			"failed to sync installed snapshot",
 			"leader_id", args.LeaderID,
 			"last_included_index", args.LastIncludedIndex,
 			"error", err,

@@ -425,6 +425,26 @@ func (r *runtime) initializeTransport() error {
 }
 
 func (r *runtime) initializeServers() error {
+	if err := r.initializeRaftGRPCServer(); err != nil {
+		return err
+	}
+
+	if err := r.initializeKVGRPCServer(); err != nil {
+		return err
+	}
+
+	if err := r.initializeMetricsServer(); err != nil {
+		return err
+	}
+
+	if err := r.initializeHealthServer(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (r *runtime) initializeRaftGRPCServer() error {
 	raftGRPCServer, err := transport.NewServer(
 		r.cfg.raftAddr,
 		grpc.Creds(
@@ -474,6 +494,10 @@ func (r *runtime) initializeServers() error {
 
 	r.raftGRPCServer = raftGRPCServer
 
+	return nil
+}
+
+func (r *runtime) initializeKVGRPCServer() error {
 	kvGRPCServer, err := transport.NewServer(
 		r.cfg.kvAddr,
 	)
@@ -519,6 +543,10 @@ func (r *runtime) initializeServers() error {
 
 	r.kvGRPCServer = kvGRPCServer
 
+	return nil
+}
+
+func (r *runtime) initializeMetricsServer() error {
 	metricsServer, err := observability.NewMetricsServer(
 		r.cfg.metricsAddr,
 		r.metricsRegistry,
@@ -532,6 +560,10 @@ func (r *runtime) initializeServers() error {
 
 	r.metricsServer = metricsServer
 
+	return nil
+}
+
+func (r *runtime) initializeHealthServer() error {
 	healthServer := observability.NewHealthServer(
 		r.cfg.healthAddr,
 	)

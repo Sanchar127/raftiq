@@ -275,6 +275,79 @@ func (n *RaftNode) replicateTo(peerID NodeID) {
 	}
 }
 
+func (n *RaftNode) reconcileReplicatedEntriesLocked(
+	entries []LogEntry,
+) error {
+	firstNew := -1
+	replaceFrom := model.LogIndex(0)
+
+	for i, entry := range entries {
+		existing, ok := n.log.Get(entry.Index)
+		if !ok {
+			firstNew = i
+			break
+		}
+
+		if existing.Term != entry.Term {
+			firstNew = i
+			replaceFrom = entry.Index
+			break
+		}
+	}
+
+	if firstNew < 0 {
+		return nil
+	}
+
+	newEntries := cloneEntries(entries[firstNew:])
+
+	if replaceFrom > 0 {
+		if err := n.storage.ReplaceSuffix(
+			replaceFrom,
+			newEntries,
+		); err != nil {
+			return fmt.Errorf(
+				"replace raft log suffix: %w",
+				err,
+			)
+		}
+
+		if err := n.storage.Sync(); err != nil {
+			return fmt.Errorf(
+				"sync replaced raft log suffix: %w",
+				err,
+			)
+		}
+
+		n.log.TruncateFrom(replaceFrom)
+	} else {
+		if err := n.storage.AppendEntries(newEntries); err != nil {
+			return fmt.Errorf(
+				"persist replicated raft entries: %w",
+				err,
+			)
+		}
+
+		if err := n.storage.Sync(); err != nil {
+			return fmt.Errorf(
+				"sync replicated raft entries: %w",
+				err,
+			)
+		}
+	}
+
+	for _, entry := range newEntries {
+		if err := n.log.Append(entry); err != nil {
+			return fmt.Errorf(
+				"append replicated raft entry: %w",
+				err,
+			)
+		}
+	}
+
+	return nil
+}
+
 func (n *RaftNode) AppendEntries(
 	args AppendEntriesArgs,
 ) (reply AppendEntriesReply) {
@@ -311,9 +384,8 @@ func (n *RaftNode) AppendEntries(
 		n.getLogger().Debug(
 			"append entries rejected",
 			"leader_id", args.LeaderID,
-			"request_term", args.Term,
+			"term", args.Term,
 			"current_term", reply.Term,
-			"entry_count", len(args.Entries),
 			"reason", "stale_term",
 		)
 
@@ -348,11 +420,10 @@ func (n *RaftNode) AppendEntries(
 			n.getLogger().Debug(
 				"append entries rejected",
 				"leader_id", args.LeaderID,
-				"request_term", args.Term,
-				"entry_count", len(args.Entries),
-				"reason", "log_mismatch",
+				"term", args.Term,
 				"prev_log_index", args.PrevLogIndex,
 				"prev_log_term", args.PrevLogTerm,
+				"reason", "log_mismatch",
 			)
 
 			return reply
@@ -363,115 +434,18 @@ func (n *RaftNode) AppendEntries(
 	n.state.LeaderID = args.LeaderID
 	n.electionElapsed = 0
 
-	firstNew := -1
-	replaceFrom := model.LogIndex(0)
+	if err := n.reconcileReplicatedEntriesLocked(args.Entries); err != nil {
+		n.mu.Unlock()
 
-	for i, entry := range args.Entries {
-		existing, ok := n.log.Get(entry.Index)
-		if !ok {
-			firstNew = i
-			break
-		}
+		n.getLogger().Error(
+			"failed to reconcile replicated raft entries",
+			"leader_id", args.LeaderID,
+			"term", args.Term,
+			"entry_count", len(args.Entries),
+			"error", err,
+		)
 
-		if existing.Term != entry.Term {
-			firstNew = i
-			replaceFrom = entry.Index
-			break
-		}
-	}
-
-	if firstNew >= 0 {
-		newEntries := cloneEntries(args.Entries[firstNew:])
-
-		if replaceFrom > 0 {
-			if err := n.storage.ReplaceSuffix(
-				replaceFrom,
-				newEntries,
-			); err != nil {
-				n.mu.Unlock()
-
-				n.getLogger().Error(
-					"failed to replace raft log suffix",
-					"leader_id", args.LeaderID,
-					"replace_from", replaceFrom,
-					"entry_count", len(newEntries),
-					"error", err,
-				)
-
-				return reply
-			}
-
-			if err := n.storage.Sync(); err != nil {
-				n.mu.Unlock()
-
-				n.getLogger().Error(
-					"failed to sync replaced raft log suffix",
-					"leader_id", args.LeaderID,
-					"replace_from", replaceFrom,
-					"error", err,
-				)
-
-				return reply
-			}
-
-			n.log.TruncateFrom(replaceFrom)
-
-			for _, entry := range newEntries {
-				if err := n.log.Append(entry); err != nil {
-					n.mu.Unlock()
-
-					n.getLogger().Error(
-						"failed to append replicated raft entry",
-						"leader_id", args.LeaderID,
-						"index", entry.Index,
-						"error", err,
-					)
-
-					return reply
-				}
-			}
-		} else {
-			if err := n.storage.AppendEntries(newEntries); err != nil {
-				n.mu.Unlock()
-
-				n.getLogger().Error(
-					"failed to persist replicated raft entries",
-					"leader_id", args.LeaderID,
-					"entry_count", len(newEntries),
-					"error", err,
-				)
-
-				return reply
-			}
-
-			if err := n.storage.Sync(); err != nil {
-				n.mu.Unlock()
-
-				n.getLogger().Error(
-					"failed to sync replicated raft entries",
-					"leader_id", args.LeaderID,
-					"entry_count", len(newEntries),
-					"error", err,
-				)
-
-				return reply
-			}
-
-			for _, entry := range newEntries {
-				if err := n.log.Append(entry); err != nil {
-					n.mu.Unlock()
-
-					n.getLogger().Error(
-						"failed to append replicated raft entry",
-						"leader_id", args.LeaderID,
-						"index", entry.Index,
-						"error", err,
-					)
-
-					return reply
-				}
-			}
-		}
+		return reply
 	}
 
 	commitAdvanced := false
@@ -493,8 +467,6 @@ func (n *RaftNode) AppendEntries(
 	reply.Term = n.state.Persistent.CurrentTerm
 	reply.Success = true
 
-	// Synchronize observability with the final state produced
-	// by this AppendEntries RPC.
 	n.updateStateMetricsLocked()
 
 	entryCount := len(args.Entries)
@@ -506,10 +478,9 @@ func (n *RaftNode) AppendEntries(
 		n.getLogger().Debug(
 			"append entries accepted",
 			"leader_id", args.LeaderID,
-			"term", reply.Term,
+			"term", args.Term,
 			"entry_count", entryCount,
 			"commit_index", commitIndex,
-			"commit_advanced", commitAdvanced,
 		)
 	}
 

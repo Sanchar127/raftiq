@@ -108,31 +108,19 @@ func (n *RaftNode) catchUpPeer(
 	}
 }
 
-func (n *RaftNode) AddMember(
-	ctx context.Context,
+func (n *RaftNode) validateAddMemberLocked(
 	peerID NodeID,
-) error {
-	if peerID == "" {
-		return errors.New("raft member ID is required")
-	}
-
-	n.mu.Lock()
-
+) (model.Configuration, model.Configuration, error) {
 	if n.state.Role != Leader {
-		role := n.state.Role
-		n.mu.Unlock()
-
-		return fmt.Errorf(
+		return model.Configuration{}, model.Configuration{}, fmt.Errorf(
 			"cannot add member %s: node is not leader (role=%v)",
 			peerID,
-			role,
+			n.state.Role,
 		)
 	}
 
 	if peerID == n.id {
-		n.mu.Unlock()
-
-		return fmt.Errorf(
+		return model.Configuration{}, model.Configuration{}, fmt.Errorf(
 			"cannot add member %s: member is the local node",
 			peerID,
 		)
@@ -141,17 +129,13 @@ func (n *RaftNode) AddMember(
 	membership := n.state.Persistent.Membership
 
 	if membership.Joint != nil {
-		n.mu.Unlock()
-
-		return errors.New(
+		return model.Configuration{}, model.Configuration{}, errors.New(
 			"cannot add member while membership is in joint configuration",
 		)
 	}
 
 	if membershipIsVoter(membership, peerID) {
-		n.mu.Unlock()
-
-		return fmt.Errorf(
+		return model.Configuration{}, model.Configuration{}, fmt.Errorf(
 			"member %s is already a voter",
 			peerID,
 		)
@@ -166,9 +150,7 @@ func (n *RaftNode) AddMember(
 	}
 
 	if !registered {
-		n.mu.Unlock()
-
-		return fmt.Errorf(
+		return model.Configuration{}, model.Configuration{}, fmt.Errorf(
 			"member %s is not registered as a raft peer",
 			peerID,
 		)
@@ -184,6 +166,87 @@ func (n *RaftNode) AddMember(
 
 	newConfiguration := model.Configuration{
 		Voters: newVoters,
+	}
+
+	return oldConfiguration, newConfiguration, nil
+}
+
+func (n *RaftNode) validateRemoveMemberLocked(
+	peerID NodeID,
+) (model.Configuration, model.Configuration, error) {
+	if n.state.Role != Leader {
+		return model.Configuration{}, model.Configuration{}, fmt.Errorf(
+			"cannot remove member %s: node is not leader (role=%v)",
+			peerID,
+			n.state.Role,
+		)
+	}
+
+	if peerID == n.id {
+		return model.Configuration{}, model.Configuration{}, fmt.Errorf(
+			"cannot remove self %s: transfer leadership first",
+			peerID,
+		)
+	}
+
+	membership := n.state.Persistent.Membership
+
+	if membership.Joint != nil {
+		return model.Configuration{}, model.Configuration{}, errors.New(
+			"cannot remove member while membership is in joint configuration",
+		)
+	}
+
+	if !membershipIsVoter(membership, peerID) {
+		return model.Configuration{}, model.Configuration{}, fmt.Errorf(
+			"member %s is not a voter",
+			peerID,
+		)
+	}
+
+	oldConfiguration := membership.Current
+
+	if len(oldConfiguration.Voters) <= 1 {
+		return model.Configuration{}, model.Configuration{}, errors.New(
+			"cannot remove the last voter",
+		)
+	}
+
+	newVoters := make([]NodeID, 0, len(oldConfiguration.Voters)-1)
+
+	for _, voterID := range oldConfiguration.Voters {
+		if voterID != peerID {
+			newVoters = append(newVoters, voterID)
+		}
+	}
+
+	newConfiguration := model.Configuration{
+		Voters: newVoters,
+	}
+
+	return oldConfiguration, newConfiguration, nil
+}
+
+func (n *RaftNode) AddMember(
+	ctx context.Context,
+	peerID NodeID,
+) error {
+	if peerID == "" {
+		return errors.New("raft member ID is required")
+	}
+
+	if ctx == nil {
+		return errors.New("raft: AddMember context is nil")
+	}
+
+	n.mu.Lock()
+
+	oldConfiguration, newConfiguration, err :=
+		n.validateAddMemberLocked(peerID)
+
+	if err != nil {
+		n.mu.Unlock()
+		return err
 	}
 
 	n.initializeNewPeerReplicationStateLocked(peerID)
@@ -317,65 +380,12 @@ func (n *RaftNode) RemoveMember(
 
 	n.mu.Lock()
 
-	if n.state.Role != Leader {
-		role := n.state.Role
+	oldConfiguration, newConfiguration, err :=
+		n.validateRemoveMemberLocked(peerID)
+
+	if err != nil {
 		n.mu.Unlock()
-
-		return fmt.Errorf(
-			"cannot remove member %s: node is not leader (role=%v)",
-			peerID,
-			role,
-		)
-	}
-
-	if peerID == n.id {
-		n.mu.Unlock()
-
-		return fmt.Errorf(
-			"cannot remove self %s: transfer leadership first",
-			peerID,
-		)
-	}
-
-	membership := n.state.Persistent.Membership
-
-	if membership.Joint != nil {
-		n.mu.Unlock()
-
-		return errors.New(
-			"cannot remove member while membership is in joint configuration",
-		)
-	}
-
-	if !membershipIsVoter(membership, peerID) {
-		n.mu.Unlock()
-
-		return fmt.Errorf(
-			"member %s is not a voter",
-			peerID,
-		)
-	}
-
-	oldConfiguration := membership.Current
-
-	if len(oldConfiguration.Voters) <= 1 {
-		n.mu.Unlock()
-
-		return errors.New(
-			"cannot remove the last voter",
-		)
-	}
-
-	newVoters := make([]NodeID, 0, len(oldConfiguration.Voters)-1)
-
-	for _, voterID := range oldConfiguration.Voters {
-		if voterID != peerID {
-			newVoters = append(newVoters, voterID)
-		}
-	}
-
-	newConfiguration := model.Configuration{
-		Voters: newVoters,
+		return err
 	}
 
 	n.mu.Unlock()
@@ -403,7 +413,7 @@ func (n *RaftNode) RemoveMember(
 
 	if err := n.waitForApplied(ctx, enterJointIndex); err != nil {
 		return fmt.Errorf(
-			"wait for enter-joint configuration at index %d: %w",
+			"wait for enter-joint configuration at index %d to apply: %w",
 			enterJointIndex,
 			err,
 		)
@@ -431,7 +441,7 @@ func (n *RaftNode) RemoveMember(
 
 	if err := n.waitForApplied(ctx, leaveJointIndex); err != nil {
 		return fmt.Errorf(
-			"wait for leave-joint configuration at index %d: %w",
+			"wait for leave-joint configuration at index %d to apply: %w",
 			leaveJointIndex,
 			err,
 		)
