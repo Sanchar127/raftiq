@@ -50,6 +50,14 @@ func ApplyWithMetrics(
 		}
 	}()
 
+	return applyCommand(store, command, entry)
+}
+
+func applyCommand(
+	store *Store,
+	command Command,
+	entry raft.LogEntry,
+) ApplyResult {
 	switch command.Type {
 	case CommandPut:
 		store.Put(command.Key, command.Value)
@@ -58,6 +66,7 @@ func ApplyWithMetrics(
 		store.Delete(command.Key)
 
 	case CommandReadBarrier:
+		return ApplyResult{}
 
 	case CommandLockAcquire:
 		_, _, err := store.AcquireLock(
@@ -218,8 +227,6 @@ func ApplyWithMetrics(
 		}
 
 	default:
-		metrics.IncOperationError(KVOperationUnknown)
-
 		return ApplyResult{
 			Err: fmt.Errorf(
 				"unknown command type %q",
