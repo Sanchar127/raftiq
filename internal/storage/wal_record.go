@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -98,7 +99,7 @@ func decodeRecord(
 		binary.BigEndian,
 		&payloadLength,
 	); err != nil {
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return 0, nil, io.ErrUnexpectedEOF
 		}
 
@@ -116,7 +117,7 @@ func decodeRecord(
 	payload := make([]byte, payloadLength)
 
 	if _, err := io.ReadFull(reader, payload); err != nil {
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return 0, nil, io.ErrUnexpectedEOF
 		}
 
@@ -130,7 +131,7 @@ func decodeRecord(
 		binary.BigEndian,
 		&storedChecksum,
 	); err != nil {
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return 0, nil, io.ErrUnexpectedEOF
 		}
 

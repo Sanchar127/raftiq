@@ -185,16 +185,17 @@ func (s *WALStorage) Compact(
 		)
 	}
 
-	if err := s.file.Close(); err != nil {
+	closeErr := s.file.Close()
+	s.file = nil
+
+	if closeErr != nil {
 		_ = os.Remove(tempPath)
 
 		return fmt.Errorf(
 			"close current WAL before compaction: %w",
-			err,
+			closeErr,
 		)
 	}
-
-	s.file = nil
 
 	if err := os.Rename(tempPath, walPath); err != nil {
 		reopened, reopenErr := os.OpenFile(
