@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -765,4 +766,70 @@ func TestApplierRestoreSnapshotResetsApplicationState(t *testing.T) {
 			len(applier.results),
 		)
 	}
+}
+func TestApplierConcurrentSetLoggerAndRun(t *testing.T) {
+	store := NewStore()
+	applier := NewApplier(store)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	applyCh := make(chan raft.LogEntry, 1)
+	done := make(chan error, 1)
+
+	go func() {
+		done <- applier.Run(ctx, applyCh)
+	}()
+
+	for i := 0; i < 1000; i++ {
+		applier.SetLogger(slog.Default())
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run() error = %v, want context canceled", err)
+		}
+
+	case <-time.After(time.Second):
+		t.Fatal("Applier.Run() did not stop")
+	}
+}
+
+func TestApplierConcurrentSetLoggerAndRestoreSnapshot(t *testing.T) {
+	store := NewStore()
+	applier := NewApplier(store)
+
+	snapshotStore := NewStore()
+	snapshotStore.Put("snapshot-key", []byte("snapshot-value"))
+
+	snapshotData, err := snapshotStore.Snapshot()
+	if err != nil {
+		t.Fatalf("snapshot Store.Snapshot() error = %v", err)
+	}
+
+	snapshot := model.Snapshot{
+		LastIncludedIndex: 42,
+		LastIncludedTerm:  7,
+		Data:               snapshotData,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		for i := 0; i < 1000; i++ {
+			applier.SetLogger(slog.Default())
+		}
+	}()
+
+	for i := 0; i < 1000; i++ {
+		if err := applier.RestoreSnapshot(snapshot); err != nil {
+			t.Fatalf("RestoreSnapshot() error = %v", err)
+		}
+	}
+
+	<-done
 }

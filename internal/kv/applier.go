@@ -73,6 +73,18 @@ func (a *Applier) SetLogger(logger *slog.Logger) {
 	a.logger = logger
 }
 
+// loggerSnapshot returns the current logger safely.
+func (a *Applier) loggerSnapshot() *slog.Logger {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.logger == nil {
+		return discardLogger()
+	}
+
+	return a.logger
+}
+
 // Run applies entries received from applyCh until the context is canceled
 // or the channel is closed.
 func (a *Applier) Run(
@@ -87,7 +99,7 @@ func (a *Applier) Run(
 		return errors.New("applier apply channel is required")
 	}
 
-	a.logger.Debug(
+	a.loggerSnapshot().Debug(
 		"applier started",
 		slog.String("component", "kv-applier"),
 	)
@@ -95,7 +107,7 @@ func (a *Applier) Run(
 	for {
 		select {
 		case <-ctx.Done():
-			a.logger.Debug(
+			a.loggerSnapshot().Debug(
 				"applier stopped",
 				slog.String("component", "kv-applier"),
 				slog.String("reason", "context canceled"),
@@ -104,7 +116,7 @@ func (a *Applier) Run(
 
 		case entry, ok := <-applyCh:
 			if !ok {
-				a.logger.Debug(
+				a.loggerSnapshot().Debug(
 					"applier stopped",
 					slog.String("component", "kv-applier"),
 					slog.String("reason", "apply channel closed"),
@@ -145,7 +157,7 @@ func (a *Applier) Run(
 				a.mu.Unlock()
 				a.applyMu.Unlock()
 
-				a.logger.Error(
+				a.loggerSnapshot().Error(
 					"failed to apply Raft log entry",
 					slog.String("component", "kv-applier"),
 					slog.Uint64("log_index", uint64(entry.Index)),
@@ -159,7 +171,7 @@ func (a *Applier) Run(
 			a.applyMu.Unlock()
 
 			if result.Err != nil {
-				a.logger.Debug(
+				a.loggerSnapshot().Debug(
 					"Raft log entry produced expected state-machine error",
 					slog.String("component", "kv-applier"),
 					slog.Uint64("log_index", uint64(entry.Index)),
@@ -168,7 +180,7 @@ func (a *Applier) Run(
 				continue
 			}
 
-			a.logger.Debug(
+			a.loggerSnapshot().Debug(
 				"Raft log entry applied",
 				slog.String("component", "kv-applier"),
 				slog.Uint64("log_index", uint64(entry.Index)),
@@ -285,7 +297,7 @@ func (a *Applier) RestoreSnapshot(
 	defer a.applyMu.Unlock()
 
 	if err := a.store.Restore(snapshot.Data); err != nil {
-		a.logger.Error(
+		a.loggerSnapshot().Error(
 			"failed to restore KV snapshot",
 			slog.String("component", "kv-applier"),
 			slog.Uint64(
@@ -308,7 +320,7 @@ func (a *Applier) RestoreSnapshot(
 	a.results = make(map[model.LogIndex]ApplyResult)
 	a.mu.Unlock()
 
-	a.logger.Info(
+	a.loggerSnapshot().Info(
 		"KV snapshot restored",
 		slog.String("component", "kv-applier"),
 		slog.Uint64(
