@@ -12,6 +12,9 @@ import (
 const (
 	stateMembershipMagic   uint32 = 0x52414654 // "RAFT"
 	stateMembershipVersion byte   = 1
+
+	maxWALConfigurationVoters uint32 = 1024
+	maxWALConfigurationNodeID uint32 = 1024
 )
 
 func encodeMembership(
@@ -256,15 +259,29 @@ func decodeConfiguration(
 		)
 	}
 
-	var voters []model.NodeID
-
-	if voterCount > 0 {
-		voters = make(
-			[]model.NodeID,
-			0,
+	// Zero voters are valid for an empty/default persistent state.
+	// Raft membership semantics are validated at the Raft layer.
+	if voterCount > maxWALConfigurationVoters {
+		return model.Configuration{}, fmt.Errorf(
+			"configuration contains too many voters: %d",
 			voterCount,
 		)
 	}
+
+	if voterCount == 0 {
+		return model.Configuration{}, nil
+	}
+
+	voters := make(
+		[]model.NodeID,
+		0,
+		voterCount,
+	)
+
+	seen := make(
+		map[model.NodeID]struct{},
+		voterCount,
+	)
 
 	for i := uint32(0); i < voterCount; i++ {
 		var length uint32
@@ -281,12 +298,25 @@ func decodeConfiguration(
 			)
 		}
 
-		if uint64(length) > uint64(reader.Len()) {
+		if length == 0 {
 			return model.Configuration{}, fmt.Errorf(
-				"invalid voter %d length: %d, remaining payload: %d",
+				"voter %d has empty ID",
+				i,
+			)
+		}
+
+		if length > maxWALConfigurationNodeID {
+			return model.Configuration{}, fmt.Errorf(
+				"voter %d ID is too long: %d",
 				i,
 				length,
-				reader.Len(),
+			)
+		}
+
+		if uint64(length) > uint64(reader.Len()) {
+			return model.Configuration{}, fmt.Errorf(
+				"voter %d ID is truncated",
+				i,
 			)
 		}
 
@@ -300,9 +330,20 @@ func decodeConfiguration(
 			)
 		}
 
+		voterID := model.NodeID(string(data))
+
+		if _, exists := seen[voterID]; exists {
+			return model.Configuration{}, fmt.Errorf(
+				"duplicate voter ID: %q",
+				voterID,
+			)
+		}
+
+		seen[voterID] = struct{}{}
+
 		voters = append(
 			voters,
-			model.NodeID(data),
+			voterID,
 		)
 	}
 

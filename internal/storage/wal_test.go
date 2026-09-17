@@ -1043,3 +1043,73 @@ func TestWALCompactReducesFileSize(t *testing.T) {
 		t.Fatalf("close WAL: %v", err)
 	}
 }
+
+func TestWALStorageRejectsTooManyMembershipVoters(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "too-many-voters.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("OpenWAL() error = %v", err)
+	}
+
+	statePayload := new(bytes.Buffer)
+
+	if err := binary.Write(
+		statePayload,
+		binary.BigEndian,
+		uint64(1),
+	); err != nil {
+		t.Fatalf("encode term: %v", err)
+	}
+
+	if err := binary.Write(
+		statePayload,
+		binary.BigEndian,
+		uint32(0),
+	); err != nil {
+		t.Fatalf("encode voted-for length: %v", err)
+	}
+
+	if err := binary.Write(
+		statePayload,
+		binary.BigEndian,
+		stateMembershipMagic,
+	); err != nil {
+		t.Fatalf("encode membership magic: %v", err)
+	}
+
+	if err := statePayload.WriteByte(stateMembershipVersion); err != nil {
+		t.Fatalf("encode membership version: %v", err)
+	}
+
+	if err := binary.Write(
+		statePayload,
+		binary.BigEndian,
+		uint32(maxWALConfigurationVoters+1),
+	); err != nil {
+		t.Fatalf("encode voter count: %v", err)
+	}
+
+	if err := statePayload.WriteByte(0); err != nil {
+		t.Fatalf("encode joint flag: %v", err)
+	}
+
+	record, err := encodeRecord(recordState, statePayload.Bytes())
+	if err != nil {
+		_ = storage.Close()
+		t.Fatalf("encode record: %v", err)
+	}
+
+	if err := storage.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	if err := os.WriteFile(path, record, 0o600); err != nil {
+		t.Fatalf("write corrupted WAL: %v", err)
+	}
+
+	if _, err := OpenWAL(path); err == nil {
+		t.Fatal("OpenWAL() error = nil, want oversized voter count error")
+	}
+}
