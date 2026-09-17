@@ -309,8 +309,23 @@ func TestStoreSnapshotRestorePreservesFencingAfterExpiration(t *testing.T) {
 		)
 	}
 }
+
 func TestStoreSnapshotRestoreJobs(t *testing.T) {
 	store := NewStore()
+
+	_, acquired, err := store.AcquireLock(
+		"job-1",
+		"worker-A",
+		2000,
+		42,
+	)
+	if err != nil {
+		t.Fatalf("AcquireLock() returned error: %v", err)
+	}
+
+	if !acquired {
+		t.Fatal("expected job lock to be acquired")
+	}
 
 	job := model.Job{
 		ID:               "job-1",
@@ -318,7 +333,7 @@ func TestStoreSnapshotRestoreJobs(t *testing.T) {
 		State:            model.JobRunning,
 		ScheduledAt:      1000,
 		AssignedWorkerID: "worker-A",
-		FencingToken:     7,
+		FencingToken:     1,
 		Attempt:          2,
 		CreatedIndex:     42,
 	}
@@ -374,9 +389,9 @@ func TestStoreSnapshotRestoreJobs(t *testing.T) {
 		)
 	}
 
-	if got.FencingToken != 7 {
+	if got.FencingToken != 1 {
 		t.Fatalf(
-			"expected fencing token 7, got %d",
+			"expected fencing token 1, got %d",
 			got.FencingToken,
 		)
 	}
@@ -392,6 +407,25 @@ func TestStoreSnapshotRestoreJobs(t *testing.T) {
 		t.Fatalf(
 			"expected created index 42, got %d",
 			got.CreatedIndex,
+		)
+	}
+
+	gotLock, ok := restored.GetLock("job-1")
+	if !ok {
+		t.Fatal("expected job lock to survive snapshot restore")
+	}
+
+	if gotLock.OwnerID != "worker-A" {
+		t.Fatalf(
+			"expected lock owner worker-A, got %q",
+			gotLock.OwnerID,
+		)
+	}
+
+	if gotLock.FencingToken != 1 {
+		t.Fatalf(
+			"expected lock fencing token 1, got %d",
+			gotLock.FencingToken,
 		)
 	}
 }

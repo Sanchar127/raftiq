@@ -86,6 +86,158 @@ func (s *Store) Snapshot() ([]byte, error) {
 	return result, nil
 }
 
+func validateSnapshotState(snapshot snapshotState) error {
+	for key, currentLock := range snapshot.Locks {
+		if key == "" {
+			return fmt.Errorf(
+				"snapshot contains lock with empty map key",
+			)
+		}
+
+		if currentLock.Key == "" {
+			return fmt.Errorf(
+				"snapshot lock %q has empty key",
+				key,
+			)
+		}
+
+		if currentLock.Key != key {
+			return fmt.Errorf(
+				"snapshot lock map key %q does not match lock key %q",
+				key,
+				currentLock.Key,
+			)
+		}
+
+		if currentLock.OwnerID == "" {
+			return fmt.Errorf(
+				"snapshot lock %q has empty owner",
+				key,
+			)
+		}
+
+		if currentLock.FencingToken == 0 {
+			return fmt.Errorf(
+				"snapshot lock %q has invalid fencing token 0",
+				key,
+			)
+		}
+
+		if currentLock.FencingToken > snapshot.NextToken {
+			return fmt.Errorf(
+				"snapshot lock %q fencing token %d exceeds next token %d",
+				key,
+				currentLock.FencingToken,
+				snapshot.NextToken,
+			)
+		}
+	}
+
+	for id, job := range snapshot.Jobs {
+		if id == "" {
+			return fmt.Errorf(
+				"snapshot contains job with empty map key",
+			)
+		}
+
+		if job.ID == "" {
+			return fmt.Errorf(
+				"snapshot job map key %q has empty job ID",
+				id,
+			)
+		}
+
+		if job.ID != id {
+			return fmt.Errorf(
+				"snapshot job map key %q does not match job ID %q",
+				id,
+				job.ID,
+			)
+		}
+
+		switch job.State {
+		case model.JobPending:
+			if job.AssignedWorkerID != "" || job.FencingToken != 0 {
+				return fmt.Errorf(
+					"pending job %q retains active ownership",
+					id,
+				)
+			}
+
+		case model.JobScheduled, model.JobRunning:
+			if err := validateActiveJobOwnership(
+				id,
+				job,
+				snapshot.Locks,
+			); err != nil {
+				return err
+			}
+
+		case model.JobSucceeded, model.JobFailed:
+			// Terminal jobs may retain their worker, fencing token,
+			// execution ID, and corresponding lock. This matches the
+			// current lifecycle implementation.
+
+		default:
+			return fmt.Errorf(
+				"snapshot job %q has unknown state %q",
+				id,
+				job.State,
+			)
+		}
+	}
+
+	return nil
+}
+
+func validateActiveJobOwnership(
+	id model.JobID,
+	job model.Job,
+	locks map[string]lock.Lock,
+) error {
+	if job.AssignedWorkerID == "" {
+		return fmt.Errorf(
+			"active job %q has empty assigned worker",
+			id,
+		)
+	}
+
+	if job.FencingToken == 0 {
+		return fmt.Errorf(
+			"active job %q has invalid fencing token 0",
+			id,
+		)
+	}
+
+	currentLock, ok := locks[string(id)]
+	if !ok {
+		return fmt.Errorf(
+			"active job %q has no corresponding lock",
+			id,
+		)
+	}
+
+	if currentLock.OwnerID != job.AssignedWorkerID {
+		return fmt.Errorf(
+			"active job %q worker %q does not match lock owner %q",
+			id,
+			job.AssignedWorkerID,
+			currentLock.OwnerID,
+		)
+	}
+
+	if currentLock.FencingToken != job.FencingToken {
+		return fmt.Errorf(
+			"active job %q fencing token %d does not match lock token %d",
+			id,
+			job.FencingToken,
+			currentLock.FencingToken,
+		)
+	}
+
+	return nil
+}
+
 func (s *Store) Restore(data []byte) error {
 	logger := s.getLogger()
 
@@ -168,6 +320,17 @@ func (s *Store) Restore(data []byte) error {
 
 		if snapshot.Jobs == nil {
 			snapshot.Jobs = make(map[model.JobID]model.Job)
+		}
+
+		if err := validateSnapshotState(snapshot); err != nil {
+			logger.Warn(
+				"KV snapshot restore rejected",
+				"operation", "restore",
+				"stage", "validate_snapshot",
+				"error", err,
+			)
+
+			return fmt.Errorf("validate KV snapshot: %w", err)
 		}
 
 		restoredData := cloneData(snapshot.Data)

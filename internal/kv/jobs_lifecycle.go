@@ -234,6 +234,7 @@ func (s *Store) handleFailedClaim(
 // reclaiming a newer ownership generation.
 //
 // The operation is intended to be invoked through the Raft state machine.
+
 func (s *Store) ReclaimExpiredJob(
 	id model.JobID,
 	expectedToken uint64,
@@ -325,6 +326,8 @@ func (s *Store) ReclaimExpiredJob(
 		return model.Job{}, ErrJobOwnershipLost
 	}
 
+	previousState := job.State
+
 	delete(s.locks.Locks, string(id))
 
 	job.State = model.JobPending
@@ -337,7 +340,7 @@ func (s *Store) ReclaimExpiredJob(
 	logger.Info(
 		"expired job reclaimed",
 		"operation", "reclaim_expired_job",
-		"previous_state", job.State,
+		"previous_state", previousState,
 		"new_state", model.JobPending,
 		"attempt", job.Attempt,
 		"fencing_token", expectedToken,
