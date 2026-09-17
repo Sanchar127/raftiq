@@ -194,13 +194,6 @@ func (n *RaftNode) ApplyCh() <-chan LogEntry {
 	return n.applyCh
 }
 
-func (n *RaftNode) transportSnapshot() (Transport, []NodeID) {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-
-	return n.transport, append([]NodeID(nil), n.peerIDs...)
-}
-
 func (n *RaftNode) Storage() storage.Storage {
 	n.mu.RLock()
 	defer n.mu.RUnlock()

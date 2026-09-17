@@ -58,16 +58,6 @@ func (n *RaftNode) recordVote(
 	return true
 }
 
-func (n *RaftNode) hasElectionMajority() bool {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-
-	return membershipHasQuorum(
-		n.state.Persistent.Membership,
-		n.state.Election.VotesReceived,
-	)
-}
-
 func (n *RaftNode) tryBecomeLeader() bool {
 	logger := n.getLogger()
 

@@ -86,7 +86,3 @@ func (n *RaftNode) becomeLeader() {
 		"peer_count", peerCount,
 	)
 }
-
-func majority(clusterSize int) int {
-	return clusterSize/2 + 1
-}

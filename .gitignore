@@ -94,3 +94,6 @@ tls/
 
 # RaftIQ local runtime state
 data-node*/
+
+# Local binaries
+/raftiq
