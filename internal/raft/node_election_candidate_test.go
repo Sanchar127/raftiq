@@ -368,3 +368,4 @@ func TestJointElectionRequiresBothMajorities(t *testing.T) {
 		t.Fatalf("expected leader A, got %q", state.LeaderID)
 	}
 }
+

@@ -626,3 +626,342 @@ func TestHandleAppendEntriesReplyHigherTermSyncFailure(t *testing.T) {
 		)
 	}
 }
+func TestHandleAppendEntriesReplyDoesNotRegressMatchIndex(t *testing.T) {
+	leader := NewRaftNode("leader")
+	follower := NewRaftNode("follower")
+
+	leader.SetPeers([]Peer{follower})
+
+	if err := leader.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
+	if _, err := leader.startElection(); err != nil {
+		t.Fatalf("start election: %v", err)
+	}
+
+	leader.becomeLeader()
+
+	for index := LogIndex(1); index <= 4; index++ {
+		if err := leader.Log().Append(LogEntry{
+			Index: index,
+			Term:  1,
+			Data:  []byte{byte(index)},
+		}); err != nil {
+			t.Fatalf("append entry %d: %v", index, err)
+		}
+	}
+
+	leader.mu.Lock()
+
+	leader.state.Leader.NextIndex[follower.ID()] = 1
+	leader.state.Leader.MatchIndex[follower.ID()] = 0
+
+	leader.mu.Unlock()
+
+	newerArgs := AppendEntriesArgs{
+		Term:    1,
+		Entries: []LogEntry{{Index: 1}, {Index: 2}, {Index: 3}, {Index: 4}},
+	}
+
+	leader.handleAppendEntriesReply(
+		follower.ID(),
+		newerArgs,
+		AppendEntriesReply{
+			Term:       1,
+			FollowerID: follower.ID(),
+			Success:    true,
+		},
+	)
+
+	leader.mu.RLock()
+	matchIndexAfterNewer := leader.state.Leader.MatchIndex[follower.ID()]
+	nextIndexAfterNewer := leader.state.Leader.NextIndex[follower.ID()]
+	leader.mu.RUnlock()
+
+	if matchIndexAfterNewer != 4 {
+		t.Fatalf(
+			"expected MatchIndex 4 after newer reply, got %d",
+			matchIndexAfterNewer,
+		)
+	}
+
+	if nextIndexAfterNewer != 5 {
+		t.Fatalf(
+			"expected NextIndex 5 after newer reply, got %d",
+			nextIndexAfterNewer,
+		)
+	}
+
+	olderArgs := AppendEntriesArgs{
+		Term:    1,
+		Entries: []LogEntry{{Index: 1}, {Index: 2}},
+	}
+
+	leader.handleAppendEntriesReply(
+		follower.ID(),
+		olderArgs,
+		AppendEntriesReply{
+			Term:       1,
+			FollowerID: follower.ID(),
+			Success:    true,
+		},
+	)
+
+	leader.mu.RLock()
+	matchIndexAfterOlder := leader.state.Leader.MatchIndex[follower.ID()]
+	nextIndexAfterOlder := leader.state.Leader.NextIndex[follower.ID()]
+	leader.mu.RUnlock()
+
+	if matchIndexAfterOlder != 4 {
+		t.Fatalf(
+			"late successful reply regressed MatchIndex: got %d, want 4",
+			matchIndexAfterOlder,
+		)
+	}
+
+	if nextIndexAfterOlder != 5 {
+		t.Fatalf(
+			"late successful reply regressed NextIndex: got %d, want 5",
+			nextIndexAfterOlder,
+		)
+	}
+}
+func TestAdvanceCommitIndexRequiresCurrentTermEntry(t *testing.T) {
+	leader := NewRaftNode("leader")
+	peerB := NewRaftNode("B")
+	peerC := NewRaftNode("C")
+
+	leader.SetPeers([]Peer{peerB, peerC})
+
+	if err := leader.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
+	if err := leader.Log().Append(LogEntry{
+		Index: 1,
+		Term:  1,
+		Data:  []byte("old-term"),
+	}); err != nil {
+		t.Fatalf("append old-term entry: %v", err)
+	}
+
+	if err := leader.Log().Append(LogEntry{
+		Index: 2,
+		Term:  2,
+		Data:  []byte("current-term"),
+	}); err != nil {
+		t.Fatalf("append current-term entry: %v", err)
+	}
+
+	leader.mu.Lock()
+
+	leader.state.Role = Leader
+	leader.state.Persistent.CurrentTerm = 2
+
+	leader.state.Leader.MatchIndex["B"] = 1
+	leader.state.Leader.MatchIndex["C"] = 1
+
+	advanced := leader.advanceCommitIndexLocked()
+	commitIndex := leader.state.Volatile.CommitIndex
+
+	leader.mu.Unlock()
+
+	if advanced {
+		t.Fatal("expected old-term entry not to advance commit index")
+	}
+
+	if commitIndex != 0 {
+		t.Fatalf(
+			"expected commit index 0 for old-term majority, got %d",
+			commitIndex,
+		)
+	}
+
+	leader.mu.Lock()
+
+	leader.state.Leader.MatchIndex["B"] = 2
+	leader.state.Leader.MatchIndex["C"] = 2
+
+	advanced = leader.advanceCommitIndexLocked()
+	commitIndex = leader.state.Volatile.CommitIndex
+
+	leader.mu.Unlock()
+
+	if !advanced {
+		t.Fatal("expected current-term entry to advance commit index")
+	}
+
+	if commitIndex != 2 {
+		t.Fatalf(
+			"expected commit index 2 after current-term entry reaches quorum, got %d",
+			commitIndex,
+		)
+	}
+}
+
+func TestLeaderReplicationConvergesAfterMultipleFailures(t *testing.T) {
+	leader := NewRaftNode("leader")
+	follower := NewRaftNode("follower")
+
+	leader.SetPeers([]Peer{follower})
+	follower.SetPeers([]Peer{leader})
+
+	if err := leader.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap leader membership: %v", err)
+	}
+
+	if err := follower.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap follower membership: %v", err)
+	}
+
+	if _, err := leader.startElection(); err != nil {
+		t.Fatalf("start election: %v", err)
+	}
+
+	leader.becomeLeader()
+
+	leaderEntries := []LogEntry{
+		{
+			Index: 1,
+			Term:  1,
+			Data:  []byte("one"),
+		},
+		{
+			Index: 2,
+			Term:  1,
+			Data:  []byte("two"),
+		},
+		{
+			Index: 3,
+			Term:  2,
+			Data:  []byte("three"),
+		},
+		{
+			Index: 4,
+			Term:  2,
+			Data:  []byte("four"),
+		},
+		{
+			Index: 5,
+			Term:  3,
+			Data:  []byte("five"),
+		},
+	}
+
+	for _, entry := range leaderEntries {
+		if err := leader.Log().Append(entry); err != nil {
+			t.Fatalf("append leader entry %d: %v", entry.Index, err)
+		}
+	}
+
+	followerEntries := []LogEntry{
+		{
+			Index: 1,
+			Term:  1,
+			Data:  []byte("one"),
+		},
+		{
+			Index: 2,
+			Term:  1,
+			Data:  []byte("two"),
+		},
+		{
+			Index: 3,
+			Term:  9,
+			Data:  []byte("conflict-three"),
+		},
+		{
+			Index: 4,
+			Term:  9,
+			Data:  []byte("conflict-four"),
+		},
+	}
+
+	for _, entry := range followerEntries {
+		if err := follower.Log().Append(entry); err != nil {
+			t.Fatalf("append follower entry %d: %v", entry.Index, err)
+		}
+	}
+
+	leader.mu.Lock()
+	leader.state.Leader.NextIndex[follower.ID()] = 5
+	leader.mu.Unlock()
+
+	failures := 0
+
+	for attempts := 0; attempts < 10; attempts++ {
+		args, ok := leader.buildAppendEntries(follower.ID())
+		if !ok {
+			t.Fatal("expected AppendEntries arguments to be built")
+		}
+
+		reply := follower.AppendEntries(args)
+
+		leader.handleAppendEntriesReply(
+			follower.ID(),
+			args,
+			reply,
+		)
+
+		if reply.Success {
+			break
+		}
+
+		failures++
+	}
+
+	if failures < 2 {
+		t.Fatalf(
+			"expected multiple replication failures before convergence, got %d",
+			failures,
+		)
+	}
+
+	for _, expected := range leaderEntries {
+		actual, ok := follower.Log().Get(expected.Index)
+		if !ok {
+			t.Fatalf(
+				"follower missing replicated entry at index %d",
+				expected.Index,
+			)
+		}
+
+		if actual.Term != expected.Term {
+			t.Fatalf(
+				"index %d: expected term %d, got %d",
+				expected.Index,
+				expected.Term,
+				actual.Term,
+			)
+		}
+
+		if string(actual.Data) != string(expected.Data) {
+			t.Fatalf(
+				"index %d: expected data %q, got %q",
+				expected.Index,
+				expected.Data,
+				actual.Data,
+			)
+		}
+	}
+
+	leader.mu.RLock()
+	nextIndex := leader.state.Leader.NextIndex[follower.ID()]
+	matchIndex := leader.state.Leader.MatchIndex[follower.ID()]
+	leader.mu.RUnlock()
+
+	if nextIndex != 6 {
+		t.Fatalf(
+			"expected NextIndex 6 after convergence, got %d",
+			nextIndex,
+		)
+	}
+
+	if matchIndex != 5 {
+		t.Fatalf(
+			"expected MatchIndex 5 after convergence, got %d",
+			matchIndex,
+		)
+	}
+}
