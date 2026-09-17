@@ -517,12 +517,11 @@ func (n *RaftNode) handleAppendEntriesReply(
 	n.mu.Lock()
 
 	if reply.Term > n.state.Persistent.CurrentTerm {
-		n.state.Persistent.CurrentTerm = reply.Term
-		n.state.Role = Follower
-		n.state.Persistent.VotedFor = ""
-		n.state.LeaderID = ""
+		persistentState := n.state.Persistent
+		persistentState.CurrentTerm = reply.Term
+		persistentState.VotedFor = ""
 
-		if err := n.persistStateLocked(); err != nil {
+		if err := n.storage.SaveState(persistentState); err != nil {
 			n.mu.Unlock()
 
 			n.getLogger().Error(
@@ -534,7 +533,26 @@ func (n *RaftNode) handleAppendEntriesReply(
 
 			return
 		}
+
+		if err := n.storage.Sync(); err != nil {
+			n.mu.Unlock()
+
+			n.getLogger().Error(
+				"failed to sync higher-term follower transition",
+				"peer_id", peerID,
+				"higher_term", reply.Term,
+				"error", err,
+			)
+
+			return
+		}
+
+		n.state.Persistent = persistentState
+		n.state.Role = Follower
+		n.state.LeaderID = ""
+
 		n.updateStateMetricsLocked()
+
 		n.mu.Unlock()
 
 		n.getLogger().Info(
@@ -580,8 +598,7 @@ func (n *RaftNode) handleAppendEntriesReply(
 		return
 	}
 
-	lastReplicated :=
-		args.Entries[len(args.Entries)-1].Index
+	lastReplicated := args.Entries[len(args.Entries)-1].Index
 
 	if lastReplicated > n.state.Leader.MatchIndex[peerID] {
 		n.state.Leader.MatchIndex[peerID] = lastReplicated

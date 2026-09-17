@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/sanchar127/raftiq/internal/model"
 	"github.com/sanchar127/raftiq/internal/storage"
 )
 
@@ -480,5 +481,148 @@ func TestProposeDiskFullStepsDownLeader(t *testing.T) {
 	_, err = node.Propose([]byte("second"))
 	if err == nil {
 		t.Fatal("expected proposal to be rejected after step-down")
+	}
+}
+func TestHandleAppendEntriesReplyHigherTermSaveStateFailure(t *testing.T) {
+	baseStore := storage.NewMemoryStorage()
+
+	initialState := model.PersistentState{
+		CurrentTerm: 2,
+		VotedFor:    "old-candidate",
+	}
+
+	if err := baseStore.SaveState(initialState); err != nil {
+		t.Fatalf("persist initial state: %v", err)
+	}
+
+	store := &failingStateStorage{
+		MemoryStorage: baseStore,
+		saveStateErr:  errors.New("injected SaveState failure"),
+	}
+
+	node, err := NewRaftNodeWithStorage("leader", store)
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	node.mu.Lock()
+	node.state.Role = Leader
+	node.state.LeaderID = node.id
+	node.mu.Unlock()
+
+	node.handleAppendEntriesReply(
+		"follower",
+		AppendEntriesArgs{
+			Term: 2,
+		},
+		AppendEntriesReply{
+			Term:       5,
+			FollowerID: "follower",
+			Success:    false,
+		},
+	)
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 2 {
+		t.Fatalf(
+			"expected term to remain 2 after SaveState failure, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != "old-candidate" {
+		t.Fatalf(
+			"expected vote to remain %q, got %q",
+			"old-candidate",
+			state.Persistent.VotedFor,
+		)
+	}
+
+	if state.Role != Leader {
+		t.Fatalf(
+			"expected role to remain Leader after SaveState failure, got %v",
+			state.Role,
+		)
+	}
+
+	if state.LeaderID != node.id {
+		t.Fatalf(
+			"expected LeaderID to remain %q, got %q",
+			node.id,
+			state.LeaderID,
+		)
+	}
+}
+
+func TestHandleAppendEntriesReplyHigherTermSyncFailure(t *testing.T) {
+	baseStore := storage.NewMemoryStorage()
+
+	initialState := model.PersistentState{
+		CurrentTerm: 2,
+		VotedFor:    "old-candidate",
+	}
+
+	if err := baseStore.SaveState(initialState); err != nil {
+		t.Fatalf("persist initial state: %v", err)
+	}
+
+	store := &failingStateStorage{
+		MemoryStorage: baseStore,
+		syncErr:       errors.New("injected Sync failure"),
+	}
+
+	node, err := NewRaftNodeWithStorage("leader", store)
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	node.mu.Lock()
+	node.state.Role = Leader
+	node.state.LeaderID = node.id
+	node.mu.Unlock()
+
+	node.handleAppendEntriesReply(
+		"follower",
+		AppendEntriesArgs{
+			Term: 2,
+		},
+		AppendEntriesReply{
+			Term:       5,
+			FollowerID: "follower",
+			Success:    false,
+		},
+	)
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 2 {
+		t.Fatalf(
+			"expected term to remain 2 after Sync failure, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != "old-candidate" {
+		t.Fatalf(
+			"expected vote to remain %q, got %q",
+			"old-candidate",
+			state.Persistent.VotedFor,
+		)
+	}
+
+	if state.Role != Leader {
+		t.Fatalf(
+			"expected role to remain Leader after Sync failure, got %v",
+			state.Role,
+		)
+	}
+
+	if state.LeaderID != node.id {
+		t.Fatalf(
+			"expected LeaderID to remain %q, got %q",
+			node.id,
+			state.LeaderID,
+		)
 	}
 }
