@@ -1,7 +1,6 @@
 package raft
 
 import (
-	"errors"
 	"fmt"
 	"time"
 )
@@ -97,86 +96,61 @@ func (n *RaftNode) startElection() (Term, error) {
 
 	n.mu.Lock()
 
-	// A node that is not part of the active voting configuration
-	// must never start an election.
-	if !membershipIsVoter(
-		n.state.Persistent.Membership,
-		n.id,
-	) {
+	if !membershipIsVoter(n.state.Persistent.Membership, n.id) {
 		term := n.state.Persistent.CurrentTerm
-
 		n.mu.Unlock()
 
-		err := fmt.Errorf(
-			"election rejected: node %s is not a voter",
-			n.id,
-		)
-
-		logger.Warn(
-			"raft election rejected",
-			"node_id", n.id,
-			"term", term,
-			"reason", "non_voter",
-			"error", err,
-		)
-
-		return term, err
+		return term, fmt.Errorf("node %s is not a voter", n.id)
 	}
 
-	// Do not modify persistent election state when storage is
-	// known to be unhealthy.
 	if n.storageWriteBlocked {
 		term := n.state.Persistent.CurrentTerm
-
 		n.mu.Unlock()
 
-		err := errors.New(
-			"election blocked: storage write is unhealthy",
-		)
-
-		logger.Warn(
-			"raft election rejected",
-			"term", term,
-			"reason", "storage_write_blocked",
-			"error", err,
-		)
-
-		return term, err
+		return term, fmt.Errorf("storage writes are blocked")
 	}
 
-	// Become a candidate and start a new election term.
-	n.state.Role = Candidate
-	n.state.Persistent.CurrentTerm++
-	n.state.Persistent.VotedFor = n.id
-	n.state.LeaderID = ""
+	// Build the new persistent election state without publishing it to memory.
+	persistentState := n.state.Persistent
+	persistentState.CurrentTerm++
+	persistentState.VotedFor = n.id
 
-	n.electionElapsed = 0
-
-	// A candidate votes for itself.
-	n.state.Election.VotesReceived = map[NodeID]struct{}{
-		n.id: {},
-	}
-
-	n.electionStartedAt = time.Now()
-	n.metrics.IncElections()
-
-	// Persist the new term and self-vote before sending RequestVote RPCs.
-	if err := n.persistStateLocked(); err != nil {
-		n.finishElectionLocked("failed")
-
-		term := n.state.Persistent.CurrentTerm
-
+	// The new term and self-vote must be durable before becoming a candidate.
+	if err := n.storage.SaveState(persistentState); err != nil {
 		n.mu.Unlock()
 
 		logger.Error(
-			"raft election failed to persist state",
-			"term", term,
+			"failed to persist election state",
 			"error", err,
 		)
 
 		return 0, err
 	}
 
+	if err := n.storage.Sync(); err != nil {
+		n.mu.Unlock()
+
+		logger.Error(
+			"failed to sync election state",
+			"error", err,
+		)
+
+		return 0, err
+	}
+
+	// Persistence succeeded, so publish the new state.
+	n.state.Persistent = persistentState
+	n.state.Role = Candidate
+	n.state.LeaderID = ""
+
+	n.electionElapsed = 0
+
+	n.state.Election.VotesReceived = map[NodeID]struct{}{
+		n.id: {},
+	}
+
+	n.electionStartedAt = time.Now()
+	n.metrics.IncElections()
 	n.updateStateMetricsLocked()
 
 	term := n.state.Persistent.CurrentTerm

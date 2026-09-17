@@ -1226,3 +1226,119 @@ func TestHandleVoteReplyHigherTermSyncFailure(t *testing.T) {
 		)
 	}
 }
+func TestStartElectionSaveStateFailureDoesNotChangeMemory(t *testing.T) {
+	baseStore := storage.NewMemoryStorage()
+
+	initialState := model.PersistentState{
+		CurrentTerm: 2,
+		VotedFor:    "",
+		Membership: model.Membership{
+			Current: model.Configuration{
+				Voters: []NodeID{
+					"node-1",
+					"node-2",
+				},
+			},
+		},
+	}
+
+	if err := baseStore.SaveState(initialState); err != nil {
+		t.Fatalf("save initial state: %v", err)
+	}
+
+	store := &failingStateStorage{
+		MemoryStorage: baseStore,
+		saveStateErr:  errors.New("injected SaveState failure"),
+	}
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	_, err = node.startElection()
+	if err == nil {
+		t.Fatal("expected startElection to fail")
+	}
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 2 {
+		t.Fatalf(
+			"expected term to remain 2 after SaveState failure, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != "" {
+		t.Fatalf(
+			"expected VotedFor to remain empty, got %q",
+			state.Persistent.VotedFor,
+		)
+	}
+
+	if state.Role != Follower {
+		t.Fatalf(
+			"expected role to remain Follower, got %v",
+			state.Role,
+		)
+	}
+}
+func TestStartElectionSyncFailureDoesNotChangeMemory(t *testing.T) {
+	baseStore := storage.NewMemoryStorage()
+
+	initialState := model.PersistentState{
+		CurrentTerm: 2,
+		VotedFor:    "",
+		Membership: model.Membership{
+			Current: model.Configuration{
+				Voters: []NodeID{
+					"node-1",
+					"node-2",
+				},
+			},
+		},
+	}
+
+	if err := baseStore.SaveState(initialState); err != nil {
+		t.Fatalf("save initial state: %v", err)
+	}
+
+	store := &failingStateStorage{
+		MemoryStorage: baseStore,
+		syncErr:       errors.New("injected Sync failure"),
+	}
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	_, err = node.startElection()
+	if err == nil {
+		t.Fatal("expected startElection to fail")
+	}
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 2 {
+		t.Fatalf(
+			"expected term to remain 2 after Sync failure, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != "" {
+		t.Fatalf(
+			"expected VotedFor to remain empty, got %q",
+			state.Persistent.VotedFor,
+		)
+	}
+
+	if state.Role != Follower {
+		t.Fatalf(
+			"expected role to remain Follower, got %v",
+			state.Role,
+		)
+	}
+}
