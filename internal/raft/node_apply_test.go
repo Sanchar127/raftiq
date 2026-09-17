@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
+
+	"github.com/sanchar127/raftiq/internal/model"
+	"github.com/sanchar127/raftiq/internal/storage"
 )
 
 func TestApplyCommittedDoesNotApplyUncommittedEntry(t *testing.T) {
@@ -136,6 +140,125 @@ func TestWaitAppliedWaitsForRequestedIndex(t *testing.T) {
 		t.Fatalf(
 			"expected context deadline exceeded, got %v",
 			err,
+		)
+	}
+}
+func TestApplyConfigurationEntrySaveStateFailureDoesNotPublishMembership(t *testing.T) {
+	store := &failingStateStorage{
+		MemoryStorage: storage.NewMemoryStorage(),
+		saveStateErr:  errors.New("injected SaveState failure"),
+	}
+
+	node, err := NewRaftNodeWithStorage("A", store)
+	if err != nil {
+		t.Fatalf("create raft node: %v", err)
+	}
+
+	oldMembership := model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{"A", "B", "C"},
+		},
+	}
+
+	newMembership := model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{"A", "B"},
+		},
+	}
+
+	node.mu.Lock()
+	node.state.Persistent.Membership = oldMembership
+	node.state.Volatile.CommitIndex = 1
+	node.mu.Unlock()
+
+	data, err := EncodeConfigurationEntry(newMembership.Current)
+	if err != nil {
+		t.Fatalf("encode configuration entry: %v", err)
+	}
+
+	if err := node.Log().Append(LogEntry{
+		Index: 1,
+		Term:  1,
+		Data:  data,
+	}); err != nil {
+		t.Fatalf("append configuration entry: %v", err)
+	}
+
+	node.applyCommitted()
+
+	state := node.State()
+
+	if !reflect.DeepEqual(state.Persistent.Membership, oldMembership) {
+		t.Fatalf(
+			"expected membership to remain unchanged, got %+v",
+			state.Persistent.Membership,
+		)
+	}
+
+	if state.Volatile.LastApplied != 0 {
+		t.Fatalf(
+			"expected last applied to remain 0, got %d",
+			state.Volatile.LastApplied,
+		)
+	}
+}
+
+func TestApplyConfigurationEntrySyncFailureDoesNotPublishMembership(t *testing.T) {
+	store := &failingStateStorage{
+		MemoryStorage: storage.NewMemoryStorage(),
+		syncErr:       errors.New("injected Sync failure"),
+	}
+
+	node, err := NewRaftNodeWithStorage("A", store)
+	if err != nil {
+		t.Fatalf("create raft node: %v", err)
+	}
+
+	oldMembership := model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{"A", "B", "C"},
+		},
+	}
+
+	newMembership := model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{"A", "B"},
+		},
+	}
+
+	node.mu.Lock()
+	node.state.Persistent.Membership = oldMembership
+	node.state.Volatile.CommitIndex = 1
+	node.mu.Unlock()
+
+	data, err := EncodeConfigurationEntry(newMembership.Current)
+	if err != nil {
+		t.Fatalf("encode configuration entry: %v", err)
+	}
+
+	if err := node.Log().Append(LogEntry{
+		Index: 1,
+		Term:  1,
+		Data:  data,
+	}); err != nil {
+		t.Fatalf("append configuration entry: %v", err)
+	}
+
+	node.applyCommitted()
+
+	state := node.State()
+
+	if !reflect.DeepEqual(state.Persistent.Membership, oldMembership) {
+		t.Fatalf(
+			"expected membership to remain unchanged, got %+v",
+			state.Persistent.Membership,
+		)
+	}
+
+	if state.Volatile.LastApplied != 0 {
+		t.Fatalf(
+			"expected last applied to remain 0, got %d",
+			state.Volatile.LastApplied,
 		)
 	}
 }
