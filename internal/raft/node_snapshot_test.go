@@ -1,11 +1,11 @@
 package raft
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
-	"errors"
 
 	"github.com/sanchar127/raftiq/internal/model"
 	"github.com/sanchar127/raftiq/internal/storage"
@@ -691,4 +691,86 @@ func TestInstallSnapshotHigherTermSyncFailure(t *testing.T) {
 
 	require.Equal(t, Term(2), state.Persistent.CurrentTerm)
 	require.Equal(t, NodeID("old-candidate"), state.Persistent.VotedFor)
+}
+
+func TestHandleInstallSnapshotReplyHigherTermSaveStateFailure(t *testing.T) {
+	baseStore := storage.NewMemoryStorage()
+
+	initialState := model.PersistentState{
+		CurrentTerm: 2,
+		VotedFor:    "old-candidate",
+	}
+
+	require.NoError(t, baseStore.SaveState(initialState))
+
+	store := &failingStateStorage{
+		MemoryStorage: baseStore,
+		saveStateErr:  errors.New("injected SaveState failure"),
+	}
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	require.NoError(t, err)
+
+	args := InstallSnapshotArgs{
+		Term:              2,
+		LeaderID:          "node-1",
+		LastIncludedIndex: 5,
+		LastIncludedTerm:  2,
+		Data:              []byte(`{"key":"value"}`),
+	}
+
+	reply := InstallSnapshotReply{
+		Term:       5,
+		FollowerID: "node-1",
+		Success:    true,
+	}
+
+	node.handleInstallSnapshotReply("node-2", args, reply)
+
+	state := node.State()
+
+	require.Equal(t, Term(2), state.Persistent.CurrentTerm)
+	require.Equal(t, NodeID("old-candidate"), state.Persistent.VotedFor)
+	require.Equal(t, Follower, state.Role)
+}
+
+func TestHandleInstallSnapshotReplyHigherTermSyncFailure(t *testing.T) {
+	baseStore := storage.NewMemoryStorage()
+
+	initialState := model.PersistentState{
+		CurrentTerm: 2,
+		VotedFor:    "old-candidate",
+	}
+
+	require.NoError(t, baseStore.SaveState(initialState))
+
+	store := &failingStateStorage{
+		MemoryStorage: baseStore,
+		syncErr:       errors.New("injected Sync failure"),
+	}
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	require.NoError(t, err)
+
+	args := InstallSnapshotArgs{
+		Term:              2,
+		LeaderID:          "node-1",
+		LastIncludedIndex: 5,
+		LastIncludedTerm:  2,
+		Data:              []byte(`{"key":"value"}`),
+	}
+
+	reply := InstallSnapshotReply{
+		Term:       5,
+		FollowerID: "node-1",
+		Success:    true,
+	}
+
+	node.handleInstallSnapshotReply("node-2", args, reply)
+
+	state := node.State()
+
+	require.Equal(t, Term(2), state.Persistent.CurrentTerm)
+	require.Equal(t, NodeID("old-candidate"), state.Persistent.VotedFor)
+	require.Equal(t, Follower, state.Role)
 }
