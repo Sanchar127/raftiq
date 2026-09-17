@@ -1066,3 +1066,163 @@ func TestRequestVoteHigherTermSyncFailure(t *testing.T) {
 		)
 	}
 }
+
+func TestRequestVoteVotePersistenceFailureDoesNotChangeMemory(t *testing.T) {
+	baseStore := storage.NewMemoryStorage()
+
+	initialState := model.PersistentState{
+		CurrentTerm: 2,
+		VotedFor:    "",
+		Membership: model.Membership{
+			Current: model.Configuration{
+				Voters: []NodeID{
+					"node-1",
+					"node-2",
+				},
+			},
+		},
+	}
+
+	if err := baseStore.SaveState(initialState); err != nil {
+		t.Fatalf("save initial state: %v", err)
+	}
+
+	store := &failingStateStorage{
+		MemoryStorage: baseStore,
+		saveStateErr:  errors.New("injected SaveState failure"),
+	}
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	reply := node.RequestVote(RequestVoteArgs{
+		Term:        2,
+		CandidateID: "node-2",
+	})
+
+	if reply.VoteGranted {
+		t.Fatal("expected vote to be denied when vote persistence fails")
+	}
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 2 {
+		t.Fatalf(
+			"expected term to remain 2, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != "" {
+		t.Fatalf(
+			"expected in-memory vote to remain empty, got %q",
+			state.Persistent.VotedFor,
+		)
+	}
+}
+
+func TestHandleVoteReplyHigherTermSaveStateFailure(t *testing.T) {
+	baseStore := storage.NewMemoryStorage()
+
+	initialState := model.PersistentState{
+		CurrentTerm: 2,
+		VotedFor:    "node-1",
+	}
+
+	if err := baseStore.SaveState(initialState); err != nil {
+		t.Fatalf("save initial state: %v", err)
+	}
+
+	store := &failingStateStorage{
+		MemoryStorage: baseStore,
+		saveStateErr:  errors.New("injected SaveState failure"),
+	}
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	node.mu.Lock()
+	node.state.Role = Candidate
+	node.state.Election.VotesReceived = map[NodeID]struct{}{
+		node.id: {},
+	}
+	node.mu.Unlock()
+
+	node.handleVoteReply(2, RequestVoteReply{
+		Term:        5,
+		VoterID:     "node-2",
+		VoteGranted: false,
+	})
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 2 {
+		t.Fatalf(
+			"expected in-memory term to remain 2 after persistence failure, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != "node-1" {
+		t.Fatalf(
+			"expected in-memory vote to remain node-1, got %q",
+			state.Persistent.VotedFor,
+		)
+	}
+}
+
+func TestHandleVoteReplyHigherTermSyncFailure(t *testing.T) {
+	baseStore := storage.NewMemoryStorage()
+
+	initialState := model.PersistentState{
+		CurrentTerm: 2,
+		VotedFor:    "node-1",
+	}
+
+	if err := baseStore.SaveState(initialState); err != nil {
+		t.Fatalf("save initial state: %v", err)
+	}
+
+	store := &failingStateStorage{
+		MemoryStorage: baseStore,
+		syncErr:       errors.New("injected Sync failure"),
+	}
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	node.mu.Lock()
+	node.state.Role = Candidate
+	node.state.Election.VotesReceived = map[NodeID]struct{}{
+		node.id: {},
+	}
+	node.mu.Unlock()
+
+	node.handleVoteReply(2, RequestVoteReply{
+		Term:        5,
+		VoterID:     "node-2",
+		VoteGranted: false,
+	})
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 2 {
+		t.Fatalf(
+			"expected in-memory term to remain 2 after sync failure, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != "node-1" {
+		t.Fatalf(
+			"expected in-memory vote to remain node-1, got %q",
+			state.Persistent.VotedFor,
+		)
+	}
+}

@@ -388,9 +388,10 @@ func (n *RaftNode) RequestVote(
 		return reply
 	}
 
-	n.state.Persistent.VotedFor = args.CandidateID
+	persistentState := n.state.Persistent
+	persistentState.VotedFor = args.CandidateID
 
-	if err := n.persistStateLocked(); err != nil {
+	if err := n.storage.SaveState(persistentState); err != nil {
 		reply.Term = n.state.Persistent.CurrentTerm
 
 		logger.Error(
@@ -402,6 +403,26 @@ func (n *RaftNode) RequestVote(
 
 		return reply
 	}
+
+	if err := n.storage.Sync(); err != nil {
+		reply.Term = n.state.Persistent.CurrentTerm
+
+		logger.Error(
+			"failed to sync vote",
+			"candidate_id", args.CandidateID,
+			"term", n.state.Persistent.CurrentTerm,
+			"error", err,
+		)
+
+		return reply
+	}
+
+	n.state.Persistent = persistentState
+
+	reply.Term = n.state.Persistent.CurrentTerm
+	reply.VoteGranted = true
+
+	n.electionElapsed = 0
 
 	reply.Term = n.state.Persistent.CurrentTerm
 	reply.VoteGranted = true
@@ -426,15 +447,11 @@ func (n *RaftNode) handleVoteReply(
 	n.mu.Lock()
 
 	if reply.Term > n.state.Persistent.CurrentTerm {
-		n.finishElectionLocked("lost")
+		persistentState := n.state.Persistent
+		persistentState.CurrentTerm = reply.Term
+		persistentState.VotedFor = ""
 
-		n.state.Persistent.CurrentTerm = reply.Term
-		n.state.Role = Follower
-		n.state.Persistent.VotedFor = ""
-		n.state.LeaderID = ""
-		n.state.Election.VotesReceived = make(map[NodeID]struct{})
-
-		if err := n.persistStateLocked(); err != nil {
+		if err := n.storage.SaveState(persistentState); err != nil {
 			n.mu.Unlock()
 
 			logger.Error(
@@ -445,6 +462,24 @@ func (n *RaftNode) handleVoteReply(
 
 			return
 		}
+
+		if err := n.storage.Sync(); err != nil {
+			n.mu.Unlock()
+
+			logger.Error(
+				"failed to sync higher-term follower transition",
+				"higher_term", reply.Term,
+				"error", err,
+			)
+
+			return
+		}
+
+		n.state.Persistent = persistentState
+		n.finishElectionLocked("lost")
+		n.state.Role = Follower
+		n.state.LeaderID = ""
+		n.state.Election.VotesReceived = make(map[NodeID]struct{})
 
 		n.updateStateMetricsLocked()
 		n.mu.Unlock()
