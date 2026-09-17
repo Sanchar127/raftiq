@@ -156,6 +156,7 @@ func (n *RaftNode) InstallSnapshot(
 	logger := n.getLogger()
 
 	n.mu.Lock()
+
 	reply := InstallSnapshotReply{
 		Term:       n.state.Persistent.CurrentTerm,
 		FollowerID: n.id,
@@ -163,12 +164,14 @@ func (n *RaftNode) InstallSnapshot(
 
 	if args.Term < n.state.Persistent.CurrentTerm {
 		n.mu.Unlock()
+
 		logger.Debug(
 			"rejected stale snapshot",
 			"leader_id", args.LeaderID,
 			"term", args.Term,
 			"current_term", reply.Term,
 		)
+
 		return reply
 	}
 
@@ -179,19 +182,23 @@ func (n *RaftNode) InstallSnapshot(
 
 		if err := n.storage.SaveState(persistentState); err != nil {
 			n.mu.Unlock()
+
 			logger.Error(
 				"failed to persist higher term while installing snapshot",
 				"error", err,
 			)
+
 			return reply
 		}
 
 		if err := n.storage.Sync(); err != nil {
 			n.mu.Unlock()
+
 			logger.Error(
 				"failed to sync higher term while installing snapshot",
 				"error", err,
 			)
+
 			return reply
 		}
 
@@ -215,6 +222,18 @@ func (n *RaftNode) InstallSnapshot(
 			"last_included_index", args.LastIncludedIndex,
 			"current_snapshot_index", n.log.LastIncludedIndex(),
 		)
+
+		return reply
+	}
+
+	if n.snapshotRestore == nil {
+		n.mu.Unlock()
+
+		logger.Error(
+			"cannot install snapshot without state machine restore handler",
+			"last_included_index", args.LastIncludedIndex,
+		)
+
 		return reply
 	}
 
@@ -226,29 +245,42 @@ func (n *RaftNode) InstallSnapshot(
 
 	if err := n.persistSnapshotLocked(snapshot); err != nil {
 		n.mu.Unlock()
+
 		logger.Error(
 			"failed to persist installed snapshot",
 			"error", err,
 			"last_included_index", snapshot.LastIncludedIndex,
 		)
+
 		return reply
 	}
 
+	restore := n.snapshotRestore
+
 	n.mu.Unlock()
 
-	if n.snapshotRestore != nil {
-		if err := n.snapshotRestore(snapshot); err != nil {
-			logger.Error(
-				"failed to restore installed snapshot",
-				"error", err,
-				"last_included_index", snapshot.LastIncludedIndex,
-			)
-			return reply
-		}
+	if err := restore(snapshot); err != nil {
+		logger.Error(
+			"failed to restore installed snapshot",
+			"error", err,
+			"last_included_index", snapshot.LastIncludedIndex,
+		)
+
+		return reply
 	}
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
+
+	if err := n.storage.Compact(snapshot); err != nil {
+		logger.Error(
+			"failed to compact durable storage after snapshot restore",
+			"error", err,
+			"last_included_index", snapshot.LastIncludedIndex,
+		)
+
+		return reply
+	}
 
 	if err := n.log.RestoreSnapshot(snapshot); err != nil {
 		logger.Error(
@@ -256,6 +288,7 @@ func (n *RaftNode) InstallSnapshot(
 			"error", err,
 			"last_included_index", snapshot.LastIncludedIndex,
 		)
+
 		return reply
 	}
 
@@ -394,10 +427,8 @@ func (n *RaftNode) handleInstallSnapshotReply(
 		return
 	}
 
-	if args.LastIncludedIndex >
-		n.state.Leader.MatchIndex[peerID] {
-		n.state.Leader.MatchIndex[peerID] =
-			args.LastIncludedIndex
+	if args.LastIncludedIndex > n.state.Leader.MatchIndex[peerID] {
+		n.state.Leader.MatchIndex[peerID] = args.LastIncludedIndex
 	}
 
 	nextIndex := args.LastIncludedIndex + 1
