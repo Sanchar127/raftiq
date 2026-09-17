@@ -126,14 +126,14 @@ func TestApplyWithMetricsDecodeError(t *testing.T) {
 		t.Fatal("expected decode error")
 	}
 
-	if got := metrics.operations[KVOperationDecode]; got != 1 {
+	if got := metrics.operations[kvOperationDecode]; got != 1 {
 		t.Fatalf(
 			"decode operation count = %d, want 1",
 			got,
 		)
 	}
 
-	if got := metrics.operationErrors[KVOperationDecode]; got != 1 {
+	if got := metrics.operationErrors[kvOperationDecode]; got != 1 {
 		t.Fatalf(
 			"decode error count = %d, want 1",
 			got,
@@ -179,10 +179,10 @@ func TestApplyWithMetricsUnknownCommand(t *testing.T) {
 		)
 	}
 
-	if _, ok := metrics.operations[KVOperationUnknown]; ok {
+	if _, ok := metrics.operations[kvOperationUnknown]; ok {
 		t.Fatalf(
 			"unexpected separate %q operation metric",
-			KVOperationUnknown,
+			kvOperationUnknown,
 		)
 	}
 }

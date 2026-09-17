@@ -6,8 +6,10 @@ import (
 	"github.com/sanchar127/raftiq/internal/model"
 )
 
+// CommandType identifies the operation encoded in a Raft command.
 type CommandType string
 
+// Command types supported by the KV state machine.
 const (
 	CommandPut         CommandType = "PUT"
 	CommandDelete      CommandType = "DELETE"
@@ -25,6 +27,7 @@ const (
 	CommandJobFailed    CommandType = "JOB_FAILED"
 )
 
+// Command represents an operation encoded into a Raft log entry.
 type Command struct {
 	Type  CommandType `json:"type"`
 	Key   string      `json:"key"`
@@ -42,10 +45,12 @@ type Command struct {
 	At            int64          `json:"at,omitempty"`
 }
 
+// EncodeCommand serializes a command into JSON.
 func EncodeCommand(command Command) ([]byte, error) {
 	return json.Marshal(command)
 }
 
+// DecodeCommand deserializes a JSON-encoded command.
 func DecodeCommand(data []byte) (Command, error) {
 	var command Command
 

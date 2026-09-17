@@ -1,3 +1,4 @@
+// Package kv implements the replicated key-value state machine and job APIs.
 package kv
 
 import (
@@ -15,11 +16,13 @@ import (
 	"github.com/sanchar127/raftiq/internal/raft"
 )
 
+// ApplyResult contains the result of applying a Raft log entry.
 type ApplyResult struct {
 	Job *model.Job
 	Err error
 }
 
+// Applier applies committed Raft log entries to the KV state machine.
 type Applier struct {
 	store   *Store
 	metrics KVMetrics
@@ -34,6 +37,7 @@ type Applier struct {
 	results map[model.LogIndex]ApplyResult
 }
 
+// NewApplier creates an Applier for the provided KV store.
 func NewApplier(store *Store) *Applier {
 	return &Applier{
 		store:   store,
@@ -43,6 +47,7 @@ func NewApplier(store *Store) *Applier {
 	}
 }
 
+// SetMetrics configures the metrics collector used while applying entries.
 func (a *Applier) SetMetrics(metrics KVMetrics) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -55,6 +60,7 @@ func (a *Applier) SetMetrics(metrics KVMetrics) {
 	a.metrics = metrics
 }
 
+// SetLogger configures the logger used by the applier.
 func (a *Applier) SetLogger(logger *slog.Logger) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -67,6 +73,8 @@ func (a *Applier) SetLogger(logger *slog.Logger) {
 	a.logger = logger
 }
 
+// Run applies entries received from applyCh until the context is canceled
+// or the channel is closed.
 func (a *Applier) Run(
 	ctx context.Context,
 	applyCh <-chan raft.LogEntry,
@@ -169,6 +177,7 @@ func (a *Applier) Run(
 	}
 }
 
+// WaitApplied waits until the specified Raft log index has been applied.
 func (a *Applier) WaitApplied(
 	ctx context.Context,
 	index model.LogIndex,
@@ -205,6 +214,7 @@ func (a *Applier) WaitApplied(
 	}
 }
 
+// WaitResult waits for and returns the application result for a log index.
 func (a *Applier) WaitResult(
 	ctx context.Context,
 	index model.LogIndex,
@@ -267,6 +277,7 @@ func (a *Applier) Snapshot() ([]byte, model.LogIndex, error) {
 	return data, index, nil
 }
 
+// RestoreSnapshot replaces the KV state with the supplied Raft snapshot.
 func (a *Applier) RestoreSnapshot(
 	snapshot model.Snapshot,
 ) error {

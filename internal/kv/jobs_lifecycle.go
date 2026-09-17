@@ -3,6 +3,7 @@ package kv
 import (
 	"fmt"
 
+	"github.com/sanchar127/raftiq/internal/lock"
 	"github.com/sanchar127/raftiq/internal/model"
 )
 
@@ -16,43 +17,8 @@ func (s *Store) ClaimJob(
 ) (model.Job, error) {
 	logger := s.getLogger()
 
-	if id == "" {
-		logger.Warn(
-			"job claim rejected",
-			"operation", "claim_job",
-			"reason", "missing_job_id",
-		)
-
-		return model.Job{}, fmt.Errorf(
-			"%w: missing job ID",
-			ErrInvalidJob,
-		)
-	}
-
-	if workerID == "" {
-		logger.Warn(
-			"job claim rejected",
-			"operation", "claim_job",
-			"reason", "missing_worker_id",
-		)
-
-		return model.Job{}, fmt.Errorf(
-			"%w: missing worker ID",
-			ErrInvalidJob,
-		)
-	}
-
-	if expiresAt <= 0 {
-		logger.Warn(
-			"job claim rejected",
-			"operation", "claim_job",
-			"reason", "invalid_expiration_time",
-		)
-
-		return model.Job{}, fmt.Errorf(
-			"%w: invalid expiration time",
-			ErrInvalidJob,
-		)
+	if err := validateClaimArguments(logger, id, workerID, expiresAt); err != nil {
+		return model.Job{}, err
 	}
 
 	s.mu.Lock()
@@ -69,50 +35,13 @@ func (s *Store) ClaimJob(
 		return model.Job{}, ErrJobNotFound
 	}
 
-	switch job.State {
-	case model.JobPending:
-		// Valid transition.
-
-	case model.JobScheduled:
-		if job.AssignedWorkerID == workerID {
-			logger.Debug(
-				"job claim was idempotent",
-				"operation", "claim_job",
-				"state", job.State,
-				"fencing_token", job.FencingToken,
-			)
-
-			return cloneJob(job), nil
-		}
-
-		logger.Debug(
-			"job claim rejected",
-			"operation", "claim_job",
-			"reason", "job_already_claimed",
-			"state", job.State,
-		)
-
-		return model.Job{}, fmt.Errorf(
-			"%w: job %q is assigned to worker %q",
-			ErrJobAlreadyClaimed,
-			id,
-			job.AssignedWorkerID,
-		)
-
-	default:
-		logger.Debug(
-			"job claim rejected",
-			"operation", "claim_job",
-			"reason", "job_not_claimable",
-			"state", job.State,
-		)
-
-		return model.Job{}, fmt.Errorf(
-			"%w: job %q is in state %q",
-			ErrJobNotClaimable,
-			id,
-			job.State,
-		)
+	if result, handled, err := handleExistingClaim(
+		logger,
+		id,
+		workerID,
+		job,
+	); handled {
+		return result, err
 	}
 
 	currentLock, acquired := s.locks.Acquire(
@@ -123,34 +52,12 @@ func (s *Store) ClaimJob(
 	)
 
 	if !acquired {
-		if currentLock.OwnerID == workerID {
-			job.State = model.JobScheduled
-			job.AssignedWorkerID = workerID
-			job.FencingToken = currentLock.FencingToken
-
-			s.jobs[id] = job
-
-			logger.Debug(
-				"job claim reused existing ownership",
-				"operation", "claim_job",
-				"state", job.State,
-				"fencing_token", job.FencingToken,
-			)
-
-			return cloneJob(job), nil
-		}
-
-		logger.Debug(
-			"job claim rejected because lock is owned by another worker",
-			"operation", "claim_job",
-			"reason", "lock_owned",
-		)
-
-		return model.Job{}, fmt.Errorf(
-			"%w: job %q is owned by worker %q",
-			ErrJobAlreadyClaimed,
+		return s.handleFailedClaim(
+			logger,
 			id,
-			currentLock.OwnerID,
+			workerID,
+			job,
+			currentLock,
 		)
 	}
 
@@ -172,6 +79,152 @@ func (s *Store) ClaimJob(
 	)
 
 	return cloneJob(job), nil
+}
+
+func validateClaimArguments(
+	logger interface {
+		Warn(msg string, args ...any)
+	},
+	id model.JobID,
+	workerID string,
+	expiresAt int64,
+) error {
+	if id == "" {
+		logger.Warn(
+			"job claim rejected",
+			"operation", "claim_job",
+			"reason", "missing_job_id",
+		)
+
+		return fmt.Errorf(
+			"%w: missing job ID",
+			ErrInvalidJob,
+		)
+	}
+
+	if workerID == "" {
+		logger.Warn(
+			"job claim rejected",
+			"operation", "claim_job",
+			"reason", "missing_worker_id",
+		)
+
+		return fmt.Errorf(
+			"%w: missing worker ID",
+			ErrInvalidJob,
+		)
+	}
+
+	if expiresAt <= 0 {
+		logger.Warn(
+			"job claim rejected",
+			"operation", "claim_job",
+			"reason", "invalid_expiration_time",
+		)
+
+		return fmt.Errorf(
+			"%w: invalid expiration time",
+			ErrInvalidJob,
+		)
+	}
+
+	return nil
+}
+
+func handleExistingClaim(
+	logger interface {
+		Debug(msg string, args ...any)
+	},
+	id model.JobID,
+	workerID string,
+	job model.Job,
+) (model.Job, bool, error) {
+	switch job.State {
+	case model.JobPending:
+		return model.Job{}, false, nil
+
+	case model.JobScheduled:
+		if job.AssignedWorkerID == workerID {
+			logger.Debug(
+				"job claim was idempotent",
+				"operation", "claim_job",
+				"state", job.State,
+				"fencing_token", job.FencingToken,
+			)
+
+			return cloneJob(job), true, nil
+		}
+
+		logger.Debug(
+			"job claim rejected",
+			"operation", "claim_job",
+			"reason", "job_already_claimed",
+			"state", job.State,
+		)
+
+		return model.Job{}, true, fmt.Errorf(
+			"%w: job %q is assigned to worker %q",
+			ErrJobAlreadyClaimed,
+			id,
+			job.AssignedWorkerID,
+		)
+
+	default:
+		logger.Debug(
+			"job claim rejected",
+			"operation", "claim_job",
+			"reason", "job_not_claimable",
+			"state", job.State,
+		)
+
+		return model.Job{}, true, fmt.Errorf(
+			"%w: job %q is in state %q",
+			ErrJobNotClaimable,
+			id,
+			job.State,
+		)
+	}
+}
+
+func (s *Store) handleFailedClaim(
+	logger interface {
+		Debug(msg string, args ...any)
+	},
+	id model.JobID,
+	workerID string,
+	job model.Job,
+	currentLock lock.Lock,
+) (model.Job, error) {
+	if currentLock.OwnerID == workerID {
+		job.State = model.JobScheduled
+		job.AssignedWorkerID = workerID
+		job.FencingToken = currentLock.FencingToken
+
+		s.jobs[id] = job
+
+		logger.Debug(
+			"job claim reused existing ownership",
+			"operation", "claim_job",
+			"state", job.State,
+			"fencing_token", job.FencingToken,
+		)
+
+		return cloneJob(job), nil
+	}
+
+	logger.Debug(
+		"job claim rejected",
+		"operation", "claim_job",
+		"reason", "lock_owned_by_another_worker",
+		"owner_id", currentLock.OwnerID,
+	)
+
+	return model.Job{}, fmt.Errorf(
+		"%w: job %q is owned by worker %q",
+		ErrJobAlreadyClaimed,
+		id,
+		currentLock.OwnerID,
+	)
 }
 
 // ReclaimExpiredJob releases an expired job lease and returns the job to
@@ -421,76 +474,23 @@ func (s *Store) TransitionJobState(
 ) (model.Job, error) {
 	logger := s.getLogger()
 
-	if jobID == "" || workerID == "" || executionID == "" || fencingToken == 0 {
-		logger.Warn(
-			"job state transition rejected",
-			"operation", "transition_job_state",
-			"reason", "invalid_arguments",
-		)
-
-		return model.Job{}, ErrInvalidJob
+	if err := validateTransitionArguments(
+		logger,
+		jobID,
+		workerID,
+		executionID,
+		fencingToken,
+		at,
+	); err != nil {
+		return model.Job{}, err
 	}
 
-	if at <= 0 {
-		logger.Warn(
-			"job state transition rejected",
-			"operation", "transition_job_state",
-			"reason", "invalid_timestamp",
-		)
-
-		return model.Job{}, ErrInvalidJob
-	}
-
-	if expectedState != model.JobScheduled &&
-		expectedState != model.JobRunning {
-		logger.Warn(
-			"job state transition rejected",
-			"operation", "transition_job_state",
-			"reason", "invalid_expected_state",
-			"expected_state", expectedState,
-		)
-
-		return model.Job{}, ErrInvalidJobState
-	}
-
-	if nextState != model.JobRunning &&
-		nextState != model.JobSucceeded &&
-		nextState != model.JobFailed {
-		logger.Warn(
-			"job state transition rejected",
-			"operation", "transition_job_state",
-			"reason", "invalid_next_state",
-			"next_state", nextState,
-		)
-
-		return model.Job{}, ErrInvalidJobState
-	}
-
-	if expectedState == model.JobScheduled &&
-		nextState != model.JobRunning {
-		logger.Warn(
-			"job state transition rejected",
-			"operation", "transition_job_state",
-			"reason", "invalid_transition",
-			"expected_state", expectedState,
-			"next_state", nextState,
-		)
-
-		return model.Job{}, ErrInvalidJobState
-	}
-
-	if expectedState == model.JobRunning &&
-		nextState != model.JobSucceeded &&
-		nextState != model.JobFailed {
-		logger.Warn(
-			"job state transition rejected",
-			"operation", "transition_job_state",
-			"reason", "invalid_transition",
-			"expected_state", expectedState,
-			"next_state", nextState,
-		)
-
-		return model.Job{}, ErrInvalidJobState
+	if err := validateTransitionStates(
+		logger,
+		expectedState,
+		nextState,
+	); err != nil {
+		return model.Job{}, err
 	}
 
 	s.mu.Lock()
@@ -507,93 +507,17 @@ func (s *Store) TransitionJobState(
 		return model.Job{}, ErrJobNotFound
 	}
 
-	if job.State != expectedState {
-		logger.Debug(
-			"job state transition rejected",
-			"operation", "transition_job_state",
-			"reason", "state_mismatch",
-			"actual_state", job.State,
-			"expected_state", expectedState,
-		)
-
-		return model.Job{}, ErrInvalidJobState
-	}
-
-	if job.AssignedWorkerID != workerID {
-		logger.Warn(
-			"job state transition rejected",
-			"operation", "transition_job_state",
-			"reason", "worker_ownership_lost",
-		)
-
-		return model.Job{}, ErrJobOwnershipLost
-	}
-
-	if job.ExecutionID != executionID {
-		logger.Warn(
-			"job state transition rejected",
-			"operation", "transition_job_state",
-			"reason", "execution_ownership_lost",
-		)
-
-		return model.Job{}, ErrJobOwnershipLost
-	}
-
-	if job.FencingToken != fencingToken {
-		logger.Warn(
-			"job state transition rejected",
-			"operation", "transition_job_state",
-			"reason", "job_fencing_token_mismatch",
-			"expected_token", fencingToken,
-			"job_token", job.FencingToken,
-		)
-
-		return model.Job{}, ErrJobOwnershipLost
-	}
-
-	currentLock, ok := s.locks.Get(string(jobID))
-	if !ok {
-		logger.Warn(
-			"job state transition rejected",
-			"operation", "transition_job_state",
-			"reason", "lock_not_found",
-		)
-
-		return model.Job{}, ErrJobOwnershipLost
-	}
-
-	if currentLock.OwnerID != workerID {
-		logger.Warn(
-			"job state transition rejected",
-			"operation", "transition_job_state",
-			"reason", "lock_owner_mismatch",
-		)
-
-		return model.Job{}, ErrJobOwnershipLost
-	}
-
-	if currentLock.FencingToken != fencingToken {
-		logger.Warn(
-			"job state transition rejected",
-			"operation", "transition_job_state",
-			"reason", "lock_fencing_token_mismatch",
-			"expected_token", fencingToken,
-			"lock_token", currentLock.FencingToken,
-		)
-
-		return model.Job{}, ErrJobOwnershipLost
-	}
-
-	if currentLock.ExpiresAt <= at {
-		logger.Warn(
-			"job state transition rejected",
-			"operation", "transition_job_state",
-			"reason", "lock_expired",
-			"expires_at", currentLock.ExpiresAt,
-			"timestamp", at,
-		)
-
-		return model.Job{}, ErrJobOwnershipLost
+	if err := s.validateTransitionOwnership(
+		logger,
+		job,
+		jobID,
+		workerID,
+		executionID,
+		fencingToken,
+		at,
+		expectedState,
+	); err != nil {
+		return model.Job{}, err
 	}
 
 	job.State = nextState
@@ -611,6 +535,206 @@ func (s *Store) TransitionJobState(
 	)
 
 	return copied, nil
+}
+
+func validateTransitionArguments(
+	logger interface {
+		Warn(msg string, args ...any)
+	},
+	jobID model.JobID,
+	workerID string,
+	executionID string,
+	fencingToken uint64,
+	at int64,
+) error {
+	if jobID == "" || workerID == "" || executionID == "" || fencingToken == 0 {
+		logger.Warn(
+			"job state transition rejected",
+			"operation", "transition_job_state",
+			"reason", "invalid_arguments",
+		)
+
+		return ErrInvalidJob
+	}
+
+	if at <= 0 {
+		logger.Warn(
+			"job state transition rejected",
+			"operation", "transition_job_state",
+			"reason", "invalid_timestamp",
+		)
+
+		return ErrInvalidJob
+	}
+
+	return nil
+}
+
+func validateTransitionStates(
+	logger interface {
+		Warn(msg string, args ...any)
+	},
+	expectedState model.JobState,
+	nextState model.JobState,
+) error {
+	if expectedState != model.JobScheduled &&
+		expectedState != model.JobRunning {
+		logger.Warn(
+			"job state transition rejected",
+			"operation", "transition_job_state",
+			"reason", "invalid_expected_state",
+			"expected_state", expectedState,
+		)
+
+		return ErrInvalidJobState
+	}
+
+	if nextState != model.JobRunning &&
+		nextState != model.JobSucceeded &&
+		nextState != model.JobFailed {
+		logger.Warn(
+			"job state transition rejected",
+			"operation", "transition_job_state",
+			"reason", "invalid_next_state",
+			"next_state", nextState,
+		)
+
+		return ErrInvalidJobState
+	}
+
+	if expectedState == model.JobScheduled &&
+		nextState != model.JobRunning {
+		logger.Warn(
+			"job state transition rejected",
+			"operation", "transition_job_state",
+			"reason", "invalid_transition",
+			"expected_state", expectedState,
+			"next_state", nextState,
+		)
+
+		return ErrInvalidJobState
+	}
+
+	if expectedState == model.JobRunning &&
+		nextState != model.JobSucceeded &&
+		nextState != model.JobFailed {
+		logger.Warn(
+			"job state transition rejected",
+			"operation", "transition_job_state",
+			"reason", "invalid_transition",
+			"expected_state", expectedState,
+			"next_state", nextState,
+		)
+
+		return ErrInvalidJobState
+	}
+
+	return nil
+}
+
+func (s *Store) validateTransitionOwnership(
+	logger interface {
+		Debug(msg string, args ...any)
+		Warn(msg string, args ...any)
+	},
+	job model.Job,
+	jobID model.JobID,
+	workerID string,
+	executionID string,
+	fencingToken uint64,
+	at int64,
+	expectedState model.JobState,
+) error {
+	if job.State != expectedState {
+		logger.Debug(
+			"job state transition rejected",
+			"operation", "transition_job_state",
+			"reason", "state_mismatch",
+			"actual_state", job.State,
+			"expected_state", expectedState,
+		)
+
+		return ErrInvalidJobState
+	}
+
+	if job.AssignedWorkerID != workerID {
+		logger.Warn(
+			"job state transition rejected",
+			"operation", "transition_job_state",
+			"reason", "worker_ownership_lost",
+		)
+
+		return ErrJobOwnershipLost
+	}
+
+	if job.ExecutionID != executionID {
+		logger.Warn(
+			"job state transition rejected",
+			"operation", "transition_job_state",
+			"reason", "execution_ownership_lost",
+		)
+
+		return ErrJobOwnershipLost
+	}
+
+	if job.FencingToken != fencingToken {
+		logger.Warn(
+			"job state transition rejected",
+			"operation", "transition_job_state",
+			"reason", "job_fencing_token_mismatch",
+			"expected_token", fencingToken,
+			"job_token", job.FencingToken,
+		)
+
+		return ErrJobOwnershipLost
+	}
+
+	currentLock, ok := s.locks.Get(string(jobID))
+	if !ok {
+		logger.Warn(
+			"job state transition rejected",
+			"operation", "transition_job_state",
+			"reason", "lock_not_found",
+		)
+
+		return ErrJobOwnershipLost
+	}
+
+	if currentLock.OwnerID != workerID {
+		logger.Warn(
+			"job state transition rejected",
+			"operation", "transition_job_state",
+			"reason", "lock_owner_mismatch",
+		)
+
+		return ErrJobOwnershipLost
+	}
+
+	if currentLock.FencingToken != fencingToken {
+		logger.Warn(
+			"job state transition rejected",
+			"operation", "transition_job_state",
+			"reason", "lock_fencing_token_mismatch",
+			"expected_token", fencingToken,
+			"lock_token", currentLock.FencingToken,
+		)
+
+		return ErrJobOwnershipLost
+	}
+
+	if currentLock.ExpiresAt <= at {
+		logger.Warn(
+			"job state transition rejected",
+			"operation", "transition_job_state",
+			"reason", "lock_expired",
+			"expires_at", currentLock.ExpiresAt,
+			"timestamp", at,
+		)
+
+		return ErrJobOwnershipLost
+	}
+
+	return nil
 }
 
 func executionID(jobID model.JobID, attempt uint32) string {
