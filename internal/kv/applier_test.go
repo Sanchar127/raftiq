@@ -691,3 +691,78 @@ func TestApplierSnapshotConcurrentWithApply(t *testing.T) {
 		t.Fatal("Applier.Run() did not stop")
 	}
 }
+
+func TestApplierRestoreSnapshotResetsApplicationState(t *testing.T) {
+	store := NewStore()
+	applier := NewApplier(store)
+
+	// Seed state that should be replaced by the snapshot.
+	store.Put("old-key", []byte("old-value"))
+
+	applier.mu.Lock()
+	applier.lastApplied = 100
+	applier.applyErr = errors.New("previous apply error")
+	applier.results[99] = ApplyResult{
+		Err: errors.New("stale result"),
+	}
+	applier.mu.Unlock()
+
+	snapshotStore := NewStore()
+	snapshotStore.Put("snapshot-key", []byte("snapshot-value"))
+
+	snapshotData, err := snapshotStore.Snapshot()
+	if err != nil {
+		t.Fatalf("snapshot Store.Snapshot() error = %v", err)
+	}
+
+	snapshot := model.Snapshot{
+		LastIncludedIndex: 42,
+		LastIncludedTerm:  7,
+		Data:              snapshotData,
+	}
+
+	if err := applier.RestoreSnapshot(snapshot); err != nil {
+		t.Fatalf("RestoreSnapshot() error = %v", err)
+	}
+
+	if _, ok := store.Get("old-key"); ok {
+		t.Fatal("old state survived snapshot restore")
+	}
+
+	value, ok := store.Get("snapshot-key")
+	if !ok {
+		t.Fatal("snapshot state was not restored")
+	}
+
+	if string(value) != "snapshot-value" {
+		t.Fatalf(
+			"restored value = %q, want %q",
+			value,
+			"snapshot-value",
+		)
+	}
+
+	applier.mu.Lock()
+	defer applier.mu.Unlock()
+
+	if applier.lastApplied != 42 {
+		t.Fatalf(
+			"lastApplied = %d, want 42",
+			applier.lastApplied,
+		)
+	}
+
+	if applier.applyErr != nil {
+		t.Fatalf(
+			"applyErr = %v, want nil after snapshot restore",
+			applier.applyErr,
+		)
+	}
+
+	if len(applier.results) != 0 {
+		t.Fatalf(
+			"results contains %d entries, want 0 after snapshot restore",
+			len(applier.results),
+		)
+	}
+}
