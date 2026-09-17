@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"errors"
 
 	"github.com/sanchar127/raftiq/internal/model"
 	"github.com/sanchar127/raftiq/internal/storage"
@@ -614,4 +615,80 @@ func TestInstallSnapshotCompactsWALAndRecovers(t *testing.T) {
 		NodeID(""),
 		state.VotedFor,
 	)
+}
+
+func TestInstallSnapshotHigherTermSaveStateFailure(t *testing.T) {
+	baseStore := storage.NewMemoryStorage()
+
+	initialState := model.PersistentState{
+		CurrentTerm: 2,
+		VotedFor:    "old-candidate",
+	}
+
+	require.NoError(t, baseStore.SaveState(initialState))
+
+	store := &failingStateStorage{
+		MemoryStorage: baseStore,
+		saveStateErr:  errors.New("injected SaveState failure"),
+	}
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	require.NoError(t, err)
+
+	node.SetSnapshotRestore(func(snapshot model.Snapshot) error {
+		return nil
+	})
+
+	reply := node.InstallSnapshot(InstallSnapshotArgs{
+		Term:              5,
+		LeaderID:          "node-2",
+		LastIncludedIndex: 1,
+		LastIncludedTerm:  5,
+		Data:              []byte(`{"key":"value"}`),
+	})
+
+	require.False(t, reply.Success)
+
+	state := node.State()
+
+	require.Equal(t, Term(2), state.Persistent.CurrentTerm)
+	require.Equal(t, NodeID("old-candidate"), state.Persistent.VotedFor)
+}
+
+func TestInstallSnapshotHigherTermSyncFailure(t *testing.T) {
+	baseStore := storage.NewMemoryStorage()
+
+	initialState := model.PersistentState{
+		CurrentTerm: 2,
+		VotedFor:    "old-candidate",
+	}
+
+	require.NoError(t, baseStore.SaveState(initialState))
+
+	store := &failingStateStorage{
+		MemoryStorage: baseStore,
+		syncErr:       errors.New("injected Sync failure"),
+	}
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	require.NoError(t, err)
+
+	node.SetSnapshotRestore(func(snapshot model.Snapshot) error {
+		return nil
+	})
+
+	reply := node.InstallSnapshot(InstallSnapshotArgs{
+		Term:              5,
+		LeaderID:          "node-2",
+		LastIncludedIndex: 1,
+		LastIncludedTerm:  5,
+		Data:              []byte(`{"key":"value"}`),
+	})
+
+	require.False(t, reply.Success)
+
+	state := node.State()
+
+	require.Equal(t, Term(2), state.Persistent.CurrentTerm)
+	require.Equal(t, NodeID("old-candidate"), state.Persistent.VotedFor)
 }

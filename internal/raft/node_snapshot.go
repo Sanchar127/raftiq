@@ -156,7 +156,6 @@ func (n *RaftNode) InstallSnapshot(
 	logger := n.getLogger()
 
 	n.mu.Lock()
-
 	reply := InstallSnapshotReply{
 		Term:       n.state.Persistent.CurrentTerm,
 		FollowerID: n.id,
@@ -164,34 +163,39 @@ func (n *RaftNode) InstallSnapshot(
 
 	if args.Term < n.state.Persistent.CurrentTerm {
 		n.mu.Unlock()
-
 		logger.Debug(
-			"snapshot rejected",
+			"rejected stale snapshot",
 			"leader_id", args.LeaderID,
-			"request_term", args.Term,
+			"term", args.Term,
 			"current_term", reply.Term,
-			"reason", "stale_term",
 		)
-
 		return reply
 	}
 
 	if args.Term > n.state.Persistent.CurrentTerm {
-		n.state.Persistent.CurrentTerm = args.Term
-		n.state.Persistent.VotedFor = ""
+		persistentState := n.state.Persistent
+		persistentState.CurrentTerm = args.Term
+		persistentState.VotedFor = ""
 
-		if err := n.persistStateLocked(); err != nil {
+		if err := n.storage.SaveState(persistentState); err != nil {
 			n.mu.Unlock()
-
 			logger.Error(
-				"failed to persist term from snapshot",
-				"leader_id", args.LeaderID,
-				"term", args.Term,
+				"failed to persist higher term while installing snapshot",
 				"error", err,
 			)
-
 			return reply
 		}
+
+		if err := n.storage.Sync(); err != nil {
+			n.mu.Unlock()
+			logger.Error(
+				"failed to sync higher term while installing snapshot",
+				"error", err,
+			)
+			return reply
+		}
+
+		n.state.Persistent = persistentState
 	}
 
 	n.state.Role = Follower
@@ -206,11 +210,11 @@ func (n *RaftNode) InstallSnapshot(
 		n.mu.Unlock()
 
 		logger.Debug(
-			"snapshot already installed",
+			"ignored stale snapshot",
 			"leader_id", args.LeaderID,
 			"last_included_index", args.LastIncludedIndex,
+			"current_snapshot_index", n.log.LastIncludedIndex(),
 		)
-
 		return reply
 	}
 
@@ -222,101 +226,55 @@ func (n *RaftNode) InstallSnapshot(
 
 	if err := n.persistSnapshotLocked(snapshot); err != nil {
 		n.mu.Unlock()
-
 		logger.Error(
 			"failed to persist installed snapshot",
-			"leader_id", args.LeaderID,
-			"last_included_index", args.LastIncludedIndex,
 			"error", err,
+			"last_included_index", snapshot.LastIncludedIndex,
 		)
-
 		return reply
 	}
-
-	restore := n.snapshotRestore
 
 	n.mu.Unlock()
 
-	if restore == nil {
-		logger.Error(
-			"snapshot installation rejected: state machine restore is not configured",
-			"leader_id", args.LeaderID,
-			"last_included_index", args.LastIncludedIndex,
-		)
-
-		return reply
-	}
-
-	if err := restore(snapshot); err != nil {
-		logger.Error(
-			"failed to restore state machine from snapshot",
-			"leader_id", args.LeaderID,
-			"last_included_index", args.LastIncludedIndex,
-			"error", err,
-		)
-
-		return reply
+	if n.snapshotRestore != nil {
+		if err := n.snapshotRestore(snapshot); err != nil {
+			logger.Error(
+				"failed to restore installed snapshot",
+				"error", err,
+				"last_included_index", snapshot.LastIncludedIndex,
+			)
+			return reply
+		}
 	}
 
 	n.mu.Lock()
-
-	if err := n.storage.Compact(snapshot); err != nil {
-		wrappedErr := fmt.Errorf(
-			"compact durable storage after snapshot install: %w",
-			err,
-		)
-
-		n.mu.Unlock()
-
-		logger.Error(
-			"failed to compact durable storage after snapshot install",
-			"leader_id", args.LeaderID,
-			"last_included_index", args.LastIncludedIndex,
-			"last_included_term", args.LastIncludedTerm,
-			"error", wrappedErr,
-		)
-
-		return reply
-	}
+	defer n.mu.Unlock()
 
 	if err := n.log.RestoreSnapshot(snapshot); err != nil {
-		n.mu.Unlock()
-
 		logger.Error(
-			"failed to restore raft log snapshot boundary",
-			"last_included_index", args.LastIncludedIndex,
+			"failed to restore snapshot into log",
 			"error", err,
+			"last_included_index", snapshot.LastIncludedIndex,
 		)
-
 		return reply
 	}
 
-	if n.state.Volatile.CommitIndex <
-		snapshot.LastIncludedIndex {
-		n.state.Volatile.CommitIndex =
-			snapshot.LastIncludedIndex
+	if n.state.Volatile.CommitIndex < snapshot.LastIncludedIndex {
+		n.state.Volatile.CommitIndex = snapshot.LastIncludedIndex
 	}
 
-	if n.state.Volatile.LastApplied <
-		snapshot.LastIncludedIndex {
-		n.state.Volatile.LastApplied =
-			snapshot.LastIncludedIndex
+	if n.state.Volatile.LastApplied < snapshot.LastIncludedIndex {
+		n.state.Volatile.LastApplied = snapshot.LastIncludedIndex
 	}
 
-	reply.Term = n.state.Persistent.CurrentTerm
+	n.updateStateMetricsLocked()
 	reply.Success = true
 
-	n.mu.Unlock()
-
-	n.metrics.IncSnapshotsInstalled()
-
 	logger.Info(
-		"raft snapshot installed",
+		"installed snapshot",
 		"leader_id", args.LeaderID,
-		"term", args.Term,
-		"last_included_index", args.LastIncludedIndex,
-		"last_included_term", args.LastIncludedTerm,
-		"snapshot_size", len(args.Data),
+		"last_included_index", snapshot.LastIncludedIndex,
+		"last_included_term", snapshot.LastIncludedTerm,
 	)
 
 	return reply
