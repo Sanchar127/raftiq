@@ -228,6 +228,13 @@ func (s *WALStorage) recover() error {
 				return fmt.Errorf("decode snapshot: %w", err)
 			}
 
+			if err := validateRecoveredSnapshot(s.snapshot, snapshot); err != nil {
+				return fmt.Errorf(
+					"validate recovered snapshot: %w",
+					err,
+				)
+			}
+
 			snapshot.Data = cloneBytes(snapshot.Data)
 			s.snapshot = &snapshot
 
@@ -237,16 +244,14 @@ func (s *WALStorage) recover() error {
 				return fmt.Errorf("decode suffix replacement: %w", err)
 			}
 
-			if err := validateEntries(entries); err != nil {
-				return fmt.Errorf("validate recovered replacement entries: %w", err)
-			}
-
-			if len(entries) > 0 && entries[0].Index != from {
+			if err := validateReplaceSuffix(
+				s.snapshot,
+				from,
+				entries,
+			); err != nil {
 				return fmt.Errorf(
-					"%w: replacement starts at %d, want %d",
-					ErrInvalidLog,
-					entries[0].Index,
-					from,
+					"validate recovered suffix replacement: %w",
+					err,
 				)
 			}
 

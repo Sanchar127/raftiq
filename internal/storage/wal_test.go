@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"testing"
 	"syscall"
+	"testing"
 
 	"github.com/sanchar127/raftiq/internal/model"
 )
@@ -1518,5 +1518,326 @@ func TestWALStorageWriteDiskFull(t *testing.T) {
 
 	if len(entries) != 0 {
 		t.Fatalf("LoadEntries() returned %d entries, want 0", len(entries))
+	}
+}
+
+func TestWALStorageReplaceSuffixRejectsSnapshotBoundary(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("OpenWAL() error = %v", err)
+	}
+	defer storage.Close()
+
+	snapshot := model.Snapshot{
+		LastIncludedIndex: 5,
+		LastIncludedTerm:  2,
+		Data:              []byte("snapshot"),
+	}
+
+	if err := storage.SaveSnapshot(snapshot); err != nil {
+		t.Fatalf("SaveSnapshot() error = %v", err)
+	}
+
+	replacement := []model.LogEntry{
+		{Index: 5, Term: 3, Data: []byte("conflict")},
+	}
+
+	for _, from := range []model.LogIndex{1, 5} {
+		err := storage.ReplaceSuffix(from, replacement)
+		if err == nil {
+			t.Fatalf(
+				"ReplaceSuffix(%d) error = nil, want snapshot-boundary error",
+				from,
+			)
+		}
+
+		if !errors.Is(err, ErrInvalidLog) {
+			t.Fatalf(
+				"ReplaceSuffix(%d) error = %v, want ErrInvalidLog",
+				from,
+				err,
+			)
+		}
+	}
+}
+
+func TestWALStorageReplaceSuffixAllowsAfterSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("OpenWAL() error = %v", err)
+	}
+	defer storage.Close()
+
+	snapshot := model.Snapshot{
+		LastIncludedIndex: 5,
+		LastIncludedTerm:  2,
+		Data:              []byte("snapshot"),
+	}
+
+	if err := storage.SaveSnapshot(snapshot); err != nil {
+		t.Fatalf("SaveSnapshot() error = %v", err)
+	}
+
+	entries := []model.LogEntry{
+		{Index: 6, Term: 3, Data: []byte("six")},
+		{Index: 7, Term: 3, Data: []byte("seven")},
+	}
+
+	if err := storage.ReplaceSuffix(6, entries); err != nil {
+		t.Fatalf("ReplaceSuffix() error = %v", err)
+	}
+
+	got, err := storage.LoadEntries()
+	if err != nil {
+		t.Fatalf("LoadEntries() error = %v", err)
+	}
+
+	assertEntriesEqual(t, got, entries)
+}
+
+func TestWALRecoveryRejectsReplaceSuffixBeforeSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("OpenWAL() error = %v", err)
+	}
+
+	snapshot := model.Snapshot{
+		LastIncludedIndex: 5,
+		LastIncludedTerm:  2,
+		Data:              []byte("snapshot"),
+	}
+
+	if err := storage.SaveSnapshot(snapshot); err != nil {
+		t.Fatalf("SaveSnapshot() error = %v", err)
+	}
+
+	if err := storage.Sync(); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+
+	record, err := encodeReplaceSuffixRecord(
+		5,
+		[]model.LogEntry{
+			{Index: 5, Term: 3, Data: []byte("conflict")},
+		},
+	)
+	if err != nil {
+		t.Fatalf("encodeReplaceSuffixRecord() error = %v", err)
+	}
+
+	if _, err := storage.file.Write(record); err != nil {
+		t.Fatalf("write invalid suffix record: %v", err)
+	}
+
+	if err := storage.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	_, err = OpenWAL(path)
+	if err == nil {
+		t.Fatal("OpenWAL() error = nil, want recovery validation error")
+	}
+
+	if !errors.Is(err, ErrInvalidLog) {
+		t.Fatalf(
+			"OpenWAL() error = %v, want ErrInvalidLog",
+			err,
+		)
+	}
+}
+
+func TestMemoryStorageReplaceSuffixRejectsSnapshotBoundary(t *testing.T) {
+	storage := NewMemoryStorage()
+
+	snapshot := model.Snapshot{
+		LastIncludedIndex: 5,
+		LastIncludedTerm:  2,
+		Data:              []byte("snapshot"),
+	}
+
+	if err := storage.SaveSnapshot(snapshot); err != nil {
+		t.Fatalf("SaveSnapshot() error = %v", err)
+	}
+
+	replacement := []model.LogEntry{
+		{Index: 5, Term: 3, Data: []byte("conflict")},
+	}
+
+	err := storage.ReplaceSuffix(5, replacement)
+	if err == nil {
+		t.Fatal("ReplaceSuffix() error = nil, want snapshot-boundary error")
+	}
+
+	if !errors.Is(err, ErrInvalidLog) {
+		t.Fatalf(
+			"ReplaceSuffix() error = %v, want ErrInvalidLog",
+			err,
+		)
+	}
+}
+
+func TestWALRecoveryRejectsZeroSnapshotIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+
+	if err := storage.Close(); err != nil {
+		t.Fatalf("close WAL: %v", err)
+	}
+
+	file, err := os.OpenFile(
+		path,
+		os.O_WRONLY|os.O_APPEND,
+		0o600,
+	)
+	if err != nil {
+		t.Fatalf("open WAL for append: %v", err)
+	}
+
+	payload, err := encodeSnapshotPayload(model.Snapshot{
+		LastIncludedIndex: 0,
+		LastIncludedTerm:  1,
+		Data:              []byte("invalid"),
+	})
+	if err != nil {
+		file.Close()
+		t.Fatalf("encode snapshot: %v", err)
+	}
+
+	record, err := encodeRecord(recordSnapshot, payload)
+	if err != nil {
+		file.Close()
+		t.Fatalf("encode snapshot record: %v", err)
+	}
+
+	if _, err := file.Write(record); err != nil {
+		file.Close()
+		t.Fatalf("write snapshot record: %v", err)
+	}
+
+	if err := file.Close(); err != nil {
+		t.Fatalf("close WAL file: %v", err)
+	}
+
+	_, err = OpenWAL(path)
+	if err == nil {
+		t.Fatal("OpenWAL() error = nil, want invalid snapshot error")
+	}
+
+	if !strings.Contains(err.Error(), "snapshot index must be greater than zero") {
+		t.Fatalf(
+			"OpenWAL() error = %v, want invalid snapshot index error",
+			err,
+		)
+	}
+}
+
+func TestWALRecoveryRejectsBackwardSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+
+	first := model.Snapshot{
+		LastIncludedIndex: 10,
+		LastIncludedTerm:  3,
+		Data:              []byte("first"),
+	}
+
+	second := model.Snapshot{
+		LastIncludedIndex: 5,
+		LastIncludedTerm:  2,
+		Data:              []byte("backward"),
+	}
+
+	if err := storage.SaveSnapshot(first); err != nil {
+		t.Fatalf("save first snapshot: %v", err)
+	}
+
+	if err := storage.SaveSnapshot(second); err != nil {
+		t.Fatalf("save second snapshot: %v", err)
+	}
+
+	if err := storage.Sync(); err != nil {
+		t.Fatalf("sync WAL: %v", err)
+	}
+
+	if err := storage.Close(); err != nil {
+		t.Fatalf("close WAL: %v", err)
+	}
+
+	_, err = OpenWAL(path)
+	if err == nil {
+		t.Fatal("OpenWAL() error = nil, want backward snapshot error")
+	}
+
+	if !strings.Contains(err.Error(), "snapshot index moved backwards") {
+		t.Fatalf(
+			"OpenWAL() error = %v, want backward snapshot error",
+			err,
+		)
+	}
+}
+
+func TestWALRecoveryRejectsSnapshotTermChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "raftiq.wal")
+
+	storage, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("open WAL: %v", err)
+	}
+
+	first := model.Snapshot{
+		LastIncludedIndex: 10,
+		LastIncludedTerm:  3,
+		Data:              []byte("first"),
+	}
+
+	second := model.Snapshot{
+		LastIncludedIndex: 10,
+		LastIncludedTerm:  4,
+		Data:              []byte("conflicting"),
+	}
+
+	if err := storage.SaveSnapshot(first); err != nil {
+		t.Fatalf("save first snapshot: %v", err)
+	}
+
+	if err := storage.SaveSnapshot(second); err != nil {
+		t.Fatalf("save second snapshot: %v", err)
+	}
+
+	if err := storage.Sync(); err != nil {
+		t.Fatalf("sync WAL: %v", err)
+	}
+
+	if err := storage.Close(); err != nil {
+		t.Fatalf("close WAL: %v", err)
+	}
+
+	_, err = OpenWAL(path)
+	if err == nil {
+		t.Fatal("OpenWAL() error = nil, want snapshot term conflict")
+	}
+
+	if !strings.Contains(err.Error(), "snapshot term changed") {
+		t.Fatalf(
+			"OpenWAL() error = %v, want snapshot term conflict",
+			err,
+		)
 	}
 }

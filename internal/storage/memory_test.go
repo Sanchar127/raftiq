@@ -154,3 +154,46 @@ func TestMemoryStorageAppendEntriesCopiesInput(t *testing.T) {
 		)
 	}
 }
+func TestMemoryStorageAppendEntriesRejectsInvalidAppend(t *testing.T) {
+	storage := NewMemoryStorage()
+
+	if err := storage.AppendEntries([]model.LogEntry{
+		{
+			Index: 1,
+			Term:  1,
+			Data:  []byte("first"),
+		},
+	}); err != nil {
+		t.Fatalf("initial AppendEntries() error = %v", err)
+	}
+
+	err := storage.AppendEntries([]model.LogEntry{
+		{
+			Index: 3,
+			Term:  1,
+			Data:  []byte("gap"),
+		},
+	})
+	if err == nil {
+		t.Fatal("AppendEntries() error = nil, want invalid append error")
+	}
+
+	entries, err := storage.LoadEntries()
+	if err != nil {
+		t.Fatalf("LoadEntries() error = %v", err)
+	}
+
+	if len(entries) != 1 {
+		t.Fatalf(
+			"entry count after rejected append = %d, want 1",
+			len(entries),
+		)
+	}
+
+	if entries[0].Index != 1 {
+		t.Fatalf(
+			"stored entry index = %d, want 1",
+			entries[0].Index,
+		)
+	}
+}

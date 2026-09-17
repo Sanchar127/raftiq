@@ -146,6 +146,18 @@ func (s *MemoryStorage) AppendEntries(entries []model.LogEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if len(entries) == 0 {
+		return nil
+	}
+
+	if err := validateEntries(entries); err != nil {
+		return fmt.Errorf("validate entries: %w", err)
+	}
+
+	if err := validateAppend(s.entries, entries); err != nil {
+		return err
+	}
+
 	for _, entry := range entries {
 		entry.Data = append([]byte(nil), entry.Data...)
 		s.entries = append(s.entries, entry)
@@ -159,7 +171,6 @@ func (s *MemoryStorage) AppendEntries(entries []model.LogEntry) error {
 
 	return nil
 }
-
 func (s *MemoryStorage) LoadEntries() ([]model.LogEntry, error) {
 	startedAt := time.Now()
 	logger := s.getLogger()
@@ -203,38 +214,20 @@ func (s *MemoryStorage) ReplaceSuffix(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if fromIndex == 0 {
+	if err := validateReplaceSuffix(
+		s.snapshot,
+		fromIndex,
+		entries,
+	); err != nil {
 		logger.Error(
 			"memory log suffix replacement rejected",
 			"from_index", fromIndex,
-			"reason", "invalid replacement index",
+			"entry_count", len(entries),
+			"reason", err,
 			"duration", time.Since(startedAt),
 		)
 
-		return fmt.Errorf("invalid replacement index: %d", fromIndex)
-	}
-
-	if len(entries) > 0 {
-		for i, entry := range entries {
-			expected := fromIndex + model.LogIndex(i)
-			if entry.Index != expected {
-				logger.Error(
-					"memory log suffix replacement rejected",
-					"from_index", fromIndex,
-					"entry_count", len(entries),
-					"expected_index", expected,
-					"actual_index", entry.Index,
-					"reason", "non-contiguous replacement entries",
-					"duration", time.Since(startedAt),
-				)
-
-				return fmt.Errorf(
-					"non-contiguous replacement entries: expected index %d, got %d",
-					expected,
-					entry.Index,
-				)
-			}
-		}
+		return err
 	}
 
 	keep := 0

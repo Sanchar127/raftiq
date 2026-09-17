@@ -117,29 +117,12 @@ func (s *WALStorage) ReplaceSuffix(
 		return err
 	}
 
-	if from == 0 {
-		return fmt.Errorf(
-			"%w: suffix replacement index must be greater than zero",
-			ErrInvalidLog,
-		)
-	}
-
-	if err = validateEntries(entries); err != nil {
-		return fmt.Errorf(
-			"validate replacement entries: %w",
-			err,
-		)
-	}
-
-	if len(entries) > 0 {
-		if entries[0].Index != from {
-			return fmt.Errorf(
-				"%w: replacement starts at index %d, want %d",
-				ErrInvalidLog,
-				entries[0].Index,
-				from,
-			)
-		}
+	if err = validateReplaceSuffix(
+		s.snapshot,
+		from,
+		entries,
+	); err != nil {
+		return err
 	}
 
 	record, err := encodeReplaceSuffixRecord(from, entries)
