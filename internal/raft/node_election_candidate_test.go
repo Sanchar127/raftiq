@@ -227,3 +227,144 @@ func TestStartElectionRejectsNonVoter(t *testing.T) {
 	require.Equal(t, Term(7), state.Persistent.CurrentTerm)
 	require.Empty(t, state.Persistent.VotedFor)
 }
+func TestSingleNodeElection(t *testing.T) {
+	node := NewRaftNode("A")
+
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
+	if _, err := node.startElection(); err != nil {
+		t.Fatalf("start election: %v", err)
+	}
+
+	if !node.tryBecomeLeader() {
+		t.Fatal("single-node candidate should become leader with its own vote")
+	}
+
+	state := node.State()
+
+	if state.Role != Leader {
+		t.Fatalf("expected Leader, got %v", state.Role)
+	}
+
+	if state.LeaderID != "A" {
+		t.Fatalf("expected leader A, got %q", state.LeaderID)
+	}
+
+	if state.Persistent.CurrentTerm != 1 {
+		t.Fatalf(
+			"expected term 1, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+}
+
+func TestFourNodeElectionRequiresThreeVotes(t *testing.T) {
+	node := NewRaftNode("A")
+
+	node.SetPeers([]Peer{
+		NewRaftNode("B"),
+		NewRaftNode("C"),
+		NewRaftNode("D"),
+	})
+
+	if err := node.BootstrapMembership(); err != nil {
+		t.Fatalf("bootstrap membership: %v", err)
+	}
+
+	if _, err := node.startElection(); err != nil {
+		t.Fatalf("start election: %v", err)
+	}
+
+	term := node.State().Persistent.CurrentTerm
+
+	node.recordVote("B", term, true)
+
+	if node.tryBecomeLeader() {
+		t.Fatal("candidate must not become leader with 2/4 votes")
+	}
+
+	if node.State().Role != Candidate {
+		t.Fatalf("expected Candidate, got %v", node.State().Role)
+	}
+
+	node.recordVote("C", term, true)
+
+	if !node.tryBecomeLeader() {
+		t.Fatal("candidate should become leader with 3/4 votes")
+	}
+
+	state := node.State()
+
+	if state.Role != Leader {
+		t.Fatalf("expected Leader, got %v", state.Role)
+	}
+
+	if state.LeaderID != "A" {
+		t.Fatalf("expected leader A, got %q", state.LeaderID)
+	}
+}
+
+func TestJointElectionRequiresBothMajorities(t *testing.T) {
+	node := NewRaftNode("A")
+
+	node.mu.Lock()
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{
+				"A",
+				"B",
+				"C",
+			},
+		},
+		Joint: &model.JointConfiguration{
+			Old: model.Configuration{
+				Voters: []NodeID{
+					"A",
+					"B",
+					"C",
+				},
+			},
+			New: model.Configuration{
+				Voters: []NodeID{
+					"A",
+					"D",
+					"E",
+				},
+			},
+		},
+	}
+	node.mu.Unlock()
+
+	if _, err := node.startElection(); err != nil {
+		t.Fatalf("start election: %v", err)
+	}
+
+	term := node.State().Persistent.CurrentTerm
+
+	// A + B satisfies the old majority but not the new majority.
+	node.recordVote("B", term, true)
+
+	if node.tryBecomeLeader() {
+		t.Fatal("candidate must not become leader with only old-config majority")
+	}
+
+	// A + D satisfies the new majority but not the old majority.
+	// B remains recorded, so A+B+D now satisfies both configurations.
+	node.recordVote("D", term, true)
+
+	if !node.tryBecomeLeader() {
+		t.Fatal("candidate should become leader after both majorities")
+	}
+
+	state := node.State()
+
+	if state.Role != Leader {
+		t.Fatalf("expected Leader, got %v", state.Role)
+	}
+
+	if state.LeaderID != "A" {
+		t.Fatalf("expected leader A, got %q", state.LeaderID)
+	}
+}

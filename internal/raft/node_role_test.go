@@ -1,9 +1,11 @@
 package raft
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/sanchar127/raftiq/internal/model"
+	"github.com/sanchar127/raftiq/internal/storage"
 )
 
 func TestBecomeLeader(t *testing.T) {
@@ -140,7 +142,6 @@ func TestHigherTermVoteReplyMakesCandidateFollower(t *testing.T) {
 	}
 
 	node.handleVoteReply(currentTerm, reply)
-
 }
 
 func TestLeaderDoesNotStartElectionOnTimeout(t *testing.T) {
@@ -267,16 +268,21 @@ func TestInitializeReplicationStateLocked(t *testing.T) {
 func TestInitializeNewPeerReplicationStateLocked(t *testing.T) {
 	node := NewRaftNode("A")
 
-	node.log.Append(LogEntry{
+	if err := node.log.Append(LogEntry{
 		Index: 1,
 		Term:  1,
 		Data:  []byte("entry-1"),
-	})
-	node.log.Append(LogEntry{
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := node.log.Append(LogEntry{
 		Index: 2,
 		Term:  1,
 		Data:  []byte("entry-2"),
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	node.mu.Lock()
 	node.state.Role = Leader
@@ -299,6 +305,148 @@ func TestInitializeNewPeerReplicationStateLocked(t *testing.T) {
 		t.Fatalf(
 			"expected new peer D MatchIndex=0, got %d",
 			matchIndex,
+		)
+	}
+}
+
+func TestBecomeFollowerSaveStateFailureDoesNotChangeMemory(t *testing.T) {
+	initialState := model.PersistentState{
+		CurrentTerm: 2,
+		VotedFor:    "node-1",
+		Membership: model.Membership{
+			Current: model.Configuration{
+				Voters: []NodeID{
+					"node-1",
+					"node-2",
+				},
+			},
+		},
+	}
+
+	memoryStorage := storage.NewMemoryStorage()
+
+	if err := memoryStorage.SaveState(initialState); err != nil {
+		t.Fatalf("save initial state: %v", err)
+	}
+
+	stateStorage := &failingStateStorage{
+		MemoryStorage: memoryStorage,
+		saveStateErr:  errors.New("save state failed"),
+	}
+
+	node, err := NewRaftNodeWithStorage("node-1", stateStorage)
+	if err != nil {
+		t.Fatalf("create raft node: %v", err)
+	}
+
+	node.mu.Lock()
+	node.state.Role = Leader
+	node.state.LeaderID = "node-1"
+	node.mu.Unlock()
+
+	err = node.becomeFollower(3)
+	if err == nil {
+		t.Fatal("expected becomeFollower to fail")
+	}
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 2 {
+		t.Fatalf(
+			"expected term to remain 2 after SaveState failure, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != "node-1" {
+		t.Fatalf(
+			"expected vote to remain node-1 after SaveState failure, got %q",
+			state.Persistent.VotedFor,
+		)
+	}
+
+	if state.Role != Leader {
+		t.Fatalf(
+			"expected role to remain Leader after SaveState failure, got %v",
+			state.Role,
+		)
+	}
+
+	if state.LeaderID != "node-1" {
+		t.Fatalf(
+			"expected leader ID to remain node-1 after SaveState failure, got %q",
+			state.LeaderID,
+		)
+	}
+}
+
+func TestBecomeFollowerSyncFailureDoesNotChangeMemory(t *testing.T) {
+	initialState := model.PersistentState{
+		CurrentTerm: 2,
+		VotedFor:    "node-1",
+		Membership: model.Membership{
+			Current: model.Configuration{
+				Voters: []NodeID{
+					"node-1",
+					"node-2",
+				},
+			},
+		},
+	}
+
+	memoryStorage := storage.NewMemoryStorage()
+
+	if err := memoryStorage.SaveState(initialState); err != nil {
+		t.Fatalf("save initial state: %v", err)
+	}
+
+	stateStorage := &failingStateStorage{
+		MemoryStorage: memoryStorage,
+		syncErr:       errors.New("sync failed"),
+	}
+
+	node, err := NewRaftNodeWithStorage("node-1", stateStorage)
+	if err != nil {
+		t.Fatalf("create raft node: %v", err)
+	}
+
+	node.mu.Lock()
+	node.state.Role = Leader
+	node.state.LeaderID = "node-1"
+	node.mu.Unlock()
+
+	err = node.becomeFollower(3)
+	if err == nil {
+		t.Fatal("expected becomeFollower to fail")
+	}
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 2 {
+		t.Fatalf(
+			"expected term to remain 2 after Sync failure, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != "node-1" {
+		t.Fatalf(
+			"expected vote to remain node-1 after Sync failure, got %q",
+			state.Persistent.VotedFor,
+		)
+	}
+
+	if state.Role != Leader {
+		t.Fatalf(
+			"expected role to remain Leader after Sync failure, got %v",
+			state.Role,
+		)
+	}
+
+	if state.LeaderID != "node-1" {
+		t.Fatalf(
+			"expected leader ID to remain node-1 after Sync failure, got %q",
+			state.LeaderID,
 		)
 	}
 }

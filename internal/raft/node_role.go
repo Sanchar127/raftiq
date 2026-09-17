@@ -10,18 +10,23 @@ func (n *RaftNode) becomeFollower(term Term) error {
 }
 
 func (n *RaftNode) becomeFollowerLocked(term Term) error {
+	persistentState := n.state.Persistent
+	persistentState.CurrentTerm = term
+	persistentState.VotedFor = ""
+
+	if err := n.storage.SaveState(persistentState); err != nil {
+		return fmt.Errorf("persist follower transition: %w", err)
+	}
+
+	if err := n.storage.Sync(); err != nil {
+		return fmt.Errorf("sync follower transition: %w", err)
+	}
+
+	// Persistence succeeded, so publish the new state.
+	n.state.Persistent = persistentState
 	n.state.Role = Follower
-	n.state.Persistent.CurrentTerm = term
-	n.state.Persistent.VotedFor = ""
 	n.state.LeaderID = ""
 	n.electionElapsed = 0
-
-	if err := n.persistStateLocked(); err != nil {
-		return fmt.Errorf(
-			"persist follower transition: %w",
-			err,
-		)
-	}
 
 	n.updateStateMetricsLocked()
 
@@ -37,18 +42,14 @@ func (n *RaftNode) stepDownForStorageFailureLocked() {
 	n.metrics.SetRole(Follower)
 }
 
-func (n *RaftNode) initializeReplicationStateLocked(
-	peerID NodeID,
-) {
+func (n *RaftNode) initializeReplicationStateLocked(peerID NodeID) {
 	nextIndex := n.log.LastIndex() + 1
 
 	n.state.Leader.NextIndex[peerID] = nextIndex
 	n.state.Leader.MatchIndex[peerID] = 0
 }
 
-func (n *RaftNode) initializeNewPeerReplicationStateLocked(
-	peerID NodeID,
-) {
+func (n *RaftNode) initializeNewPeerReplicationStateLocked(peerID NodeID) {
 	n.state.Leader.NextIndex[peerID] = 1
 	n.state.Leader.MatchIndex[peerID] = 0
 }

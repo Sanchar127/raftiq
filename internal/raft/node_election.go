@@ -362,6 +362,7 @@ func (n *RaftNode) RequestVote(
 		return reply
 	}
 
+	// Persist the vote before publishing it to in-memory state.
 	persistentState := n.state.Persistent
 	persistentState.VotedFor = args.CandidateID
 
@@ -395,12 +396,6 @@ func (n *RaftNode) RequestVote(
 
 	reply.Term = n.state.Persistent.CurrentTerm
 	reply.VoteGranted = true
-
-	n.electionElapsed = 0
-
-	reply.Term = n.state.Persistent.CurrentTerm
-	reply.VoteGranted = true
-
 	n.electionElapsed = 0
 
 	logger.Debug(
