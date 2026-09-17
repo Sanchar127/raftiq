@@ -299,16 +299,14 @@ func (n *RaftNode) RequestVote(
 		return reply
 	}
 
-	// A higher-term request advances our term and makes us a follower.
+	// A higher-term request must be durable before the new
+	// persistent state becomes visible in memory.
 	if args.Term > n.state.Persistent.CurrentTerm {
-		n.state.Persistent.CurrentTerm = args.Term
-		n.state.Role = Follower
-		n.state.Persistent.VotedFor = ""
-		n.state.LeaderID = ""
+		persistentState := n.state.Persistent
+		persistentState.CurrentTerm = args.Term
+		persistentState.VotedFor = ""
 
-		if err := n.persistStateLocked(); err != nil {
-			reply.Term = n.state.Persistent.CurrentTerm
-
+		if err := n.storage.SaveState(persistentState); err != nil {
 			logger.Error(
 				"failed to persist higher-term vote state",
 				"candidate_id", args.CandidateID,
@@ -318,6 +316,21 @@ func (n *RaftNode) RequestVote(
 
 			return reply
 		}
+
+		if err := n.storage.Sync(); err != nil {
+			logger.Error(
+				"failed to sync higher-term vote state",
+				"candidate_id", args.CandidateID,
+				"term", args.Term,
+				"error", err,
+			)
+
+			return reply
+		}
+
+		n.state.Persistent = persistentState
+		n.state.Role = Follower
+		n.state.LeaderID = ""
 
 		n.updateStateMetricsLocked()
 	}
@@ -528,7 +541,7 @@ func (n *RaftNode) runElection() {
 	if !n.runPreVote() {
 		// The PreVote failed, so wait for another complete election
 		// timeout before retrying.
-
+		n.resetElectionTimer()
 		return
 	}
 

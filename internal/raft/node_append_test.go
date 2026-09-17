@@ -270,6 +270,22 @@ func TestAppendEntriesHigherTermSaveStateFailure(t *testing.T) {
 			persisted.VotedFor,
 		)
 	}
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 2 {
+		t.Fatalf(
+			"expected in-memory term to remain 2 after persistence failure, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != "old-candidate" {
+		t.Fatalf(
+			"expected in-memory vote to remain old-candidate after persistence failure, got %q",
+			state.Persistent.VotedFor,
+		)
+	}
 }
 
 func TestAppendEntriesHigherTermSyncFailure(t *testing.T) {

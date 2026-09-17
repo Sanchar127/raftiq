@@ -393,12 +393,11 @@ func (n *RaftNode) AppendEntries(
 	}
 
 	if args.Term > n.state.Persistent.CurrentTerm {
-		n.state.Persistent.CurrentTerm = args.Term
-		n.state.Role = Follower
-		n.state.Persistent.VotedFor = ""
-		n.state.LeaderID = ""
+		persistentState := n.state.Persistent
+		persistentState.CurrentTerm = args.Term
+		persistentState.VotedFor = ""
 
-		if err := n.persistStateLocked(); err != nil {
+		if err := n.storage.SaveState(persistentState); err != nil {
 			n.mu.Unlock()
 
 			n.getLogger().Error(
@@ -410,7 +409,26 @@ func (n *RaftNode) AppendEntries(
 
 			return reply
 		}
+
+		if err := n.storage.Sync(); err != nil {
+			n.mu.Unlock()
+
+			n.getLogger().Error(
+				"failed to sync higher-term append entries state",
+				"leader_id", args.LeaderID,
+				"term", args.Term,
+				"error", err,
+			)
+
+			return reply
+		}
+
+		n.state.Persistent = persistentState
+		n.state.Role = Follower
+		n.state.LeaderID = ""
 	}
+
+	reply.Term = n.state.Persistent.CurrentTerm
 
 	if args.PrevLogIndex > 0 {
 		prevEntry, ok := n.log.Get(args.PrevLogIndex)

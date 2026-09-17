@@ -1,10 +1,10 @@
 package raft
 
 import (
-	"testing"
-
+	"errors"
 	"github.com/sanchar127/raftiq/internal/model"
 	"github.com/sanchar127/raftiq/internal/storage"
+	"testing"
 )
 
 func TestRequestVoteGrantsVote(t *testing.T) {
@@ -920,6 +920,149 @@ func TestPreVoteGrantsAfterElectionTimeout(t *testing.T) {
 		t.Fatalf(
 			"expected node to remain Follower, got %v",
 			state.Role,
+		)
+	}
+}
+
+func TestRunElectionResetsTimerAfterPreVoteFailure(t *testing.T) {
+	node := NewRaftNode("node-1")
+	node.SetElectionTimeout(10)
+
+	node.mu.Lock()
+	node.state.Persistent.Membership = model.Membership{
+		Current: model.Configuration{
+			Voters: []NodeID{
+				"node-1",
+				"node-2",
+			},
+		},
+	}
+	node.electionElapsed = node.electionTimeout
+	node.mu.Unlock()
+
+	// No transport means the PreVote cannot obtain a quorum.
+	node.runElection()
+
+	node.mu.RLock()
+	elapsed := node.electionElapsed
+	node.mu.RUnlock()
+
+	if elapsed != 0 {
+		t.Fatalf(
+			"expected election timer to reset after failed PreVote, got %d",
+			elapsed,
+		)
+	}
+}
+
+func TestRequestVoteHigherTermSaveStateFailure(t *testing.T) {
+	baseStore := storage.NewMemoryStorage()
+
+	initialState := model.PersistentState{
+		CurrentTerm: 2,
+		VotedFor:    "old-candidate",
+		Membership: model.Membership{
+			Current: model.Configuration{
+				Voters: []NodeID{
+					"node-1",
+					"node-2",
+				},
+			},
+		},
+	}
+
+	if err := baseStore.SaveState(initialState); err != nil {
+		t.Fatalf("save initial state: %v", err)
+	}
+
+	store := &failingStateStorage{
+		MemoryStorage: baseStore,
+		saveStateErr:  errors.New("injected SaveState failure"),
+	}
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	reply := node.RequestVote(RequestVoteArgs{
+		Term:        5,
+		CandidateID: "node-2",
+	})
+
+	if reply.VoteGranted {
+		t.Fatal("expected vote to be denied when higher-term persistence fails")
+	}
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 2 {
+		t.Fatalf(
+			"expected in-memory term to remain 2 after persistence failure, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != "old-candidate" {
+		t.Fatalf(
+			"expected in-memory vote to remain old-candidate after persistence failure, got %q",
+			state.Persistent.VotedFor,
+		)
+	}
+}
+
+func TestRequestVoteHigherTermSyncFailure(t *testing.T) {
+	baseStore := storage.NewMemoryStorage()
+
+	initialState := model.PersistentState{
+		CurrentTerm: 2,
+		VotedFor:    "old-candidate",
+		Membership: model.Membership{
+			Current: model.Configuration{
+				Voters: []NodeID{
+					"node-1",
+					"node-2",
+				},
+			},
+		},
+	}
+
+	if err := baseStore.SaveState(initialState); err != nil {
+		t.Fatalf("save initial state: %v", err)
+	}
+
+	store := &failingStateStorage{
+		MemoryStorage: baseStore,
+		syncErr:       errors.New("injected Sync failure"),
+	}
+
+	node, err := NewRaftNodeWithStorage("node-1", store)
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+
+	reply := node.RequestVote(RequestVoteArgs{
+		Term:        5,
+		CandidateID: "node-2",
+	})
+
+	if reply.VoteGranted {
+		t.Fatal("expected vote to be denied when higher-term sync fails")
+	}
+
+	state := node.State()
+
+	if state.Persistent.CurrentTerm != 2 {
+		t.Fatalf(
+			"expected in-memory term to remain 2 after sync failure, got %d",
+			state.Persistent.CurrentTerm,
+		)
+	}
+
+	if state.Persistent.VotedFor != "old-candidate" {
+		t.Fatalf(
+			"expected in-memory vote to remain old-candidate after sync failure, got %q",
+			state.Persistent.VotedFor,
 		)
 	}
 }
