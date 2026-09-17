@@ -91,3 +91,6 @@ benchmarks/results/
 *.pb.gw.go
 
 tls/
+
+# RaftIQ local runtime state
+data-node*/
