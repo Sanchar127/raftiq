@@ -60,7 +60,14 @@ func (n *RaftNode) runTick() {
 	electionDue, heartbeatDue := n.tick()
 
 	if heartbeatDue {
-		go n.heartbeat()
+		n.runMu.Lock()
+		n.runWG.Add(1)
+		n.runMu.Unlock()
+
+		go func() {
+			defer n.runWG.Done()
+			n.heartbeat()
+		}()
 	}
 
 	if electionDue {
@@ -77,10 +84,13 @@ func (n *RaftNode) startElectionIfNeeded() {
 	}
 
 	n.electionInFlight = true
+	n.runWG.Add(1)
 
 	n.runMu.Unlock()
 
 	go func() {
+		defer n.runWG.Done()
+
 		defer func() {
 			n.runMu.Lock()
 			n.electionInFlight = false
@@ -106,6 +116,7 @@ func (n *RaftNode) Stop() {
 	n.runMu.Unlock()
 
 	<-doneCh
+	n.runWG.Wait()
 
 	n.getLogger().Info(
 		"raft node stopped",

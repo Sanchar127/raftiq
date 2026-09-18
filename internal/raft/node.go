@@ -17,6 +17,7 @@ type RaftNode struct {
 	applyMu sync.Mutex
 
 	runMu   sync.Mutex
+	runWG   sync.WaitGroup
 	running bool
 	stopCh  chan struct{}
 	doneCh  chan struct{}

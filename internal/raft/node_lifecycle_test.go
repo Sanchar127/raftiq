@@ -331,3 +331,39 @@ func TestRaftNodeStopCancelsRPC(t *testing.T) {
 		t.Fatal("node Stop did not cancel the in-flight RPC")
 	}
 }
+
+func TestRaftNodeStopWaitsForElectionGoroutine(t *testing.T) {
+	transport := &blockingTransport{}
+
+	node := NewRaftNode("node-1")
+
+	require.NoError(t, node.SetTransport(
+		transport,
+		[]NodeID{"node-2"},
+	))
+
+	require.NoError(t, node.BootstrapMembership())
+	require.NoError(t, node.SetRPCTimeout(50*time.Millisecond))
+
+	node.SetElectionTimeout(1)
+
+	require.NoError(t, node.Start())
+
+	waitForCondition(t, time.Second, func() bool {
+		node.runMu.Lock()
+		defer node.runMu.Unlock()
+
+		return node.electionInFlight
+	})
+
+	start := time.Now()
+	node.Stop()
+	elapsed := time.Since(start)
+
+	require.GreaterOrEqual(
+		t,
+		elapsed,
+		40*time.Millisecond,
+		"Stop returned before the in-flight election goroutine completed",
+	)
+}
