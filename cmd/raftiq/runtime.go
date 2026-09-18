@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -56,9 +57,11 @@ type runtime struct {
 	executionCtx    context.Context
 	executionCancel context.CancelFunc
 
+	backgroundWG sync.WaitGroup
+
 	errCh chan error
 
-	shutdownOnce bool
+	shutdownOnce sync.Once
 }
 
 func newRuntime(
@@ -591,6 +594,10 @@ func (r *runtime) initializeHealthServer() error {
 }
 
 func (r *runtime) Start(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("runtime context is required")
+	}
+
 	r.executionCtx, r.executionCancel = context.WithCancel(ctx)
 
 	if err := r.startServers(); err != nil {
@@ -704,7 +711,11 @@ func (r *runtime) serveHealthServer() {
 }
 
 func (r *runtime) startScheduler() {
+	r.backgroundWG.Add(1)
+
 	go func() {
+		defer r.backgroundWG.Done()
+
 		r.logger.Info(
 			"starting scheduler",
 			"interval", scheduler.DefaultInterval,
@@ -726,7 +737,11 @@ func (r *runtime) startScheduler() {
 
 func (r *runtime) startWorkers() {
 	for _, w := range r.workers {
+		r.backgroundWG.Add(1)
+
 		go func(w *worker.Worker) {
+			defer r.backgroundWG.Done()
+
 			r.logger.Info(
 				"starting worker",
 				"worker_id", w.ID(),
@@ -767,27 +782,25 @@ func (r *runtime) Errors() <-chan error {
 }
 
 func (r *runtime) Shutdown() {
-	if r.shutdownOnce {
-		return
-	}
+	r.shutdownOnce.Do(func() {
+		if r.executionCancel != nil {
+			r.executionCancel()
+		}
 
-	r.shutdownOnce = true
+		r.backgroundWG.Wait()
 
-	if r.executionCancel != nil {
-		r.executionCancel()
-	}
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			10*time.Second,
+		)
+		defer cancel()
 
-	ctx, cancel := context.WithTimeout(
-		context.Background(),
-		10*time.Second,
-	)
-	defer cancel()
-
-	r.shutdownServers(ctx)
-	r.shutdownApplication()
-	r.shutdownNode()
-	r.shutdownRuntimeServices(ctx)
-	r.shutdownPersistence()
+		r.shutdownServers(ctx)
+		r.shutdownApplication()
+		r.shutdownNode()
+		r.shutdownRuntimeServices(ctx)
+		r.shutdownPersistence()
+	})
 }
 
 func (r *runtime) shutdownServers(ctx context.Context) {
