@@ -9,6 +9,7 @@ import (
 	"github.com/sanchar127/raftiq/internal/kv"
 	"github.com/sanchar127/raftiq/internal/model"
 	"github.com/sanchar127/raftiq/internal/raft"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewRejectsInvalidConfiguration(t *testing.T) {
@@ -253,7 +254,7 @@ func TestSchedulerSchedulesDueJob(t *testing.T) {
 		t.Fatalf("CreateJob() error = %v", err)
 	}
 
-	node.Start()
+	require.NoError(t, node.Start())
 	defer node.Stop()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -338,7 +339,7 @@ func TestSchedulerIgnoresFutureJob(t *testing.T) {
 		t.Fatalf("CreateJob() error = %v", err)
 	}
 
-	node.Start()
+	require.NoError(t, node.Start())
 	defer node.Stop()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -523,7 +524,7 @@ func TestSchedulerHandlesClaimConflict(t *testing.T) {
 		)
 	}
 
-	node.Start()
+	require.NoError(t, node.Start())
 	defer node.Stop()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -611,7 +612,7 @@ func TestSchedulerReclaimsExpiredScheduledJob(t *testing.T) {
 		t.Fatalf("ClaimJob() error = %v", err)
 	}
 
-	node.Start()
+	require.NoError(t, node.Start())
 	defer node.Stop()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -728,7 +729,7 @@ func TestSchedulerReclaimsExpiredRunningJob(t *testing.T) {
 		t.Fatalf("TransitionJobState() error = %v", err)
 	}
 
-	node.Start()
+	require.NoError(t, node.Start())
 	defer node.Stop()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -825,7 +826,7 @@ func TestSchedulerDoesNotReclaimUnexpiredJob(t *testing.T) {
 		t.Fatalf("ClaimJob() error = %v", err)
 	}
 
-	node.Start()
+	require.NoError(t, node.Start())
 	defer node.Stop()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -914,7 +915,7 @@ func TestSchedulerReclaimedJobGetsNewFencingToken(t *testing.T) {
 		t.Fatalf("first ClaimJob() error = %v", err)
 	}
 
-	node.Start()
+	require.NoError(t, node.Start())
 	defer node.Stop()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1028,7 +1029,7 @@ func TestSchedulerStaleReclaimCannotRemoveNewClaim(t *testing.T) {
 		t.Fatalf("first ClaimJob() error = %v", err)
 	}
 
-	node.Start()
+	require.NoError(t, node.Start())
 	defer node.Stop()
 
 	ctx, cancel := context.WithCancel(context.Background())

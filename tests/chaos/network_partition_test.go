@@ -94,17 +94,28 @@ func TestNetworkPartition(t *testing.T) {
 		initialTerm,
 	)
 
-	time.Sleep(250 * time.Millisecond)
+	// Continuously verify that the isolated leader does not commit the
+	// entry without a majority. A bounded observation window is used because
+	// this is a negative safety property: there is no successful condition
+	// to wait for.
+	const uncommittedObservationWindow = 250 * time.Millisecond
+	const observationInterval = 10 * time.Millisecond
 
-	isolatedState := initialLeader.State()
+	deadline := time.Now().Add(uncommittedObservationWindow)
 
-	if isolatedState.Volatile.CommitIndex >= isolatedIndex {
-		t.Fatalf(
-			"isolated leader committed entry without majority: node=%s commit_index=%d isolated_index=%d",
-			initialLeaderID,
-			isolatedState.Volatile.CommitIndex,
-			isolatedIndex,
-		)
+	for time.Now().Before(deadline) {
+		isolatedState := initialLeader.State()
+
+		if isolatedState.Volatile.CommitIndex >= isolatedIndex {
+			t.Fatalf(
+				"isolated leader committed entry without majority: node=%s commit_index=%d isolated_index=%d",
+				initialLeaderID,
+				isolatedState.Volatile.CommitIndex,
+				isolatedIndex,
+			)
+		}
+
+		time.Sleep(observationInterval)
 	}
 
 	// The two followers still have a majority and can communicate with

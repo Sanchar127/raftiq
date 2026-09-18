@@ -19,7 +19,7 @@ func TestServerStartsAndStops(t *testing.T) {
 	store := kv.NewStore()
 	server := NewServer(raftNode, store)
 
-	server.Start()
+	require.NoError(t, server.Start())
 	server.Stop()
 }
 
@@ -30,10 +30,10 @@ func TestServerGetReturnsValue(t *testing.T) {
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
 
-	nodeA.Start()
+	require.NoError(t, nodeA.Start())
 	defer nodeA.Stop()
 
-	server.Start()
+	require.NoError(t, server.Start())
 	defer server.Stop()
 
 	waitForLeader(t, nodeA)
@@ -112,10 +112,10 @@ func TestServerPutAndGet(t *testing.T) {
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
 
-	nodeA.Start()
+	require.NoError(t, nodeA.Start())
 	defer nodeA.Stop()
 
-	server.Start()
+	require.NoError(t, server.Start())
 	defer server.Stop()
 
 	waitForLeader(t, nodeA)
@@ -168,10 +168,10 @@ func TestServerDeleteAndGet(t *testing.T) {
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
 
-	nodeA.Start()
+	require.NoError(t, nodeA.Start())
 	defer nodeA.Stop()
 
-	server.Start()
+	require.NoError(t, server.Start())
 	defer server.Stop()
 
 	waitForLeader(t, nodeA)
@@ -229,10 +229,10 @@ func TestServerAcquireLock(t *testing.T) {
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
 
-	nodeA.Start()
+	require.NoError(t, nodeA.Start())
 	defer nodeA.Stop()
 
-	server.Start()
+	require.NoError(t, server.Start())
 	defer server.Stop()
 
 	waitForLeader(t, nodeA)
@@ -289,10 +289,10 @@ func TestServerAcquireLockBusy(t *testing.T) {
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
 
-	nodeA.Start()
+	require.NoError(t, nodeA.Start())
 	defer nodeA.Stop()
 
-	server.Start()
+	require.NoError(t, server.Start())
 	defer server.Stop()
 
 	waitForLeader(t, nodeA)
@@ -363,10 +363,10 @@ func TestServerAcquireLockFencingTokensAreGlobal(t *testing.T) {
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
 
-	nodeA.Start()
+	require.NoError(t, nodeA.Start())
 	defer nodeA.Stop()
 
-	server.Start()
+	require.NoError(t, server.Start())
 	defer server.Stop()
 
 	waitForLeader(t, nodeA)
@@ -585,10 +585,10 @@ func TestServerLockExpiresAutomatically(t *testing.T) {
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
 
-	nodeA.Start()
+	require.NoError(t, nodeA.Start())
 	defer nodeA.Stop()
 
-	server.Start()
+	require.NoError(t, server.Start())
 	defer server.Stop()
 
 	waitForLeader(t, nodeA)
@@ -639,10 +639,10 @@ func TestServerExpiredLockCanBeReacquired(t *testing.T) {
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
 
-	nodeA.Start()
+	require.NoError(t, nodeA.Start())
 	defer nodeA.Stop()
 
-	server.Start()
+	require.NoError(t, server.Start())
 	defer server.Stop()
 
 	waitForLeader(t, nodeA)
@@ -716,10 +716,10 @@ func TestServerRejectsZombieWorkerWithStaleFencingToken(t *testing.T) {
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
 
-	nodeA.Start()
+	require.NoError(t, nodeA.Start())
 	defer nodeA.Stop()
 
-	server.Start()
+	require.NoError(t, server.Start())
 	defer server.Stop()
 
 	waitForLeader(t, nodeA)
@@ -849,10 +849,10 @@ func TestServerGetDoesNotAppendRaftLogEntry(t *testing.T) {
 	store := kv.NewStore()
 	server := NewServer(nodeA, store)
 
-	nodeA.Start()
+	require.NoError(t, nodeA.Start())
 	defer nodeA.Stop()
 
-	server.Start()
+	require.NoError(t, server.Start())
 	defer server.Stop()
 
 	waitForLeader(t, nodeA)

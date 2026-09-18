@@ -79,7 +79,7 @@ func TestMaybeCreateSnapshotRespectsThreshold(t *testing.T) {
 	store := kv.NewStore()
 	server := NewServer(node, store)
 
-	node.Start()
+	require.NoError(t, node.Start())
 	defer node.Stop()
 
 	require.NoError(t, server.SetSnapshotConfig(SnapshotConfig{
@@ -127,7 +127,7 @@ func TestSnapshotWorkerCreatesSnapshotAutomatically(t *testing.T) {
 		Threshold: 1,
 	}))
 
-	node.Start()
+	require.NoError(t, node.Start())
 	defer node.Stop()
 
 	require.NoError(t, server.Start())
