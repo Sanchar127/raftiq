@@ -923,8 +923,7 @@ func TestPreVoteGrantsAfterElectionTimeout(t *testing.T) {
 		)
 	}
 }
-
-func TestRunElectionResetsTimerAfterPreVoteFailure(t *testing.T) {
+func TestRunElectionKeepsTimerAfterPreVoteFailure(t *testing.T) {
 	node := NewRaftNode("node-1")
 	node.SetElectionTimeout(10)
 
@@ -947,9 +946,9 @@ func TestRunElectionResetsTimerAfterPreVoteFailure(t *testing.T) {
 	elapsed := node.electionElapsed
 	node.mu.RUnlock()
 
-	if elapsed != 0 {
+	if elapsed != node.electionTimeout {
 		t.Fatalf(
-			"expected election timer to reset after failed PreVote, got %d",
+			"expected election timer to remain expired after failed PreVote, got %d",
 			elapsed,
 		)
 	}

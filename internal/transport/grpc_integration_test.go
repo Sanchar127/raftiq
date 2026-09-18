@@ -50,8 +50,11 @@ func TestRaftServiceGRPCIntegration(t *testing.T) {
 
 		select {
 		case err := <-serveErr:
-			require.ErrorIs(t, err, grpc.ErrServerStopped)
-		default:
+			if err != nil {
+				require.ErrorIs(t, err, grpc.ErrServerStopped)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("gRPC Serve did not return after Stop")
 		}
 	})
 
@@ -136,8 +139,11 @@ func TestKVServiceGRPCIntegration(t *testing.T) {
 
 		select {
 		case err := <-serveErr:
-			require.ErrorIs(t, err, grpc.ErrServerStopped)
-		default:
+			if err != nil {
+				require.ErrorIs(t, err, grpc.ErrServerStopped)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("gRPC Serve did not return after Stop")
 		}
 	})
 

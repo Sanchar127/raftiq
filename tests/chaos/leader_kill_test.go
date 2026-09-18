@@ -2,6 +2,8 @@ package chaos_test
 
 import (
 	"fmt"
+	"log/slog"
+	"os"
 	"testing"
 	"time"
 
@@ -114,6 +116,22 @@ func newLeaderKillCluster(t *testing.T) *leaderKillCluster {
 		raft.NewRaftNode("node-1"),
 		raft.NewRaftNode("node-2"),
 		raft.NewRaftNode("node-3"),
+	}
+
+	// Temporary debug logger for diagnosing the deterministic
+	// leader-kill election failure. Remove this instrumentation once
+	// the underlying election issue is fixed.
+	logger := slog.New(
+		slog.NewTextHandler(
+			os.Stdout,
+			&slog.HandlerOptions{
+				Level: slog.LevelDebug,
+			},
+		),
+	)
+
+	for _, node := range nodes {
+		node.SetLogger(logger)
 	}
 
 	peerIDs := []raft.NodeID{

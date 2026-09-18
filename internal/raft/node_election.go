@@ -543,9 +543,10 @@ func (n *RaftNode) runElection() {
 	n.mu.RUnlock()
 
 	if !n.runPreVote() {
-		// The PreVote failed, so wait for another complete election
-		// timeout before retrying.
-		n.resetElectionTimer()
+		// PreVote failure means this election attempt did not obtain
+		// quorum. Keep the current election timer so the node retries
+		// according to its normal election timeout rather than resetting
+		// the timer and potentially suppressing another candidate.
 		return
 	}
 
