@@ -2,8 +2,6 @@ package chaos_test
 
 import (
 	"fmt"
-	"log/slog"
-	"os"
 	"testing"
 	"time"
 
@@ -28,9 +26,17 @@ func TestLeaderKill(t *testing.T) {
 	initialTerm := leader.State().Persistent.CurrentTerm
 	initialLeaderID := leader.ID()
 
-	if _, err := leader.Propose([]byte("before-leader-kill")); err != nil {
+	beforeKillIndex, err := leader.Propose([]byte("before-leader-kill"))
+	if err != nil {
 		t.Fatalf("initial leader proposal failed: %v", err)
 	}
+
+	cluster.waitForCommit(
+		t,
+		leader,
+		leaderKillWaitTimeout,
+		beforeKillIndex,
+	)
 
 	cluster.waitForLogEntry(
 		t,
@@ -89,9 +95,17 @@ func TestLeaderKill(t *testing.T) {
 		newTerm,
 	)
 
-	if _, err := newLeader.Propose([]byte("after-leader-kill")); err != nil {
+	afterKillIndex, err := newLeader.Propose([]byte("after-leader-kill"))
+	if err != nil {
 		t.Fatalf("new leader proposal failed: %v", err)
 	}
+
+	cluster.waitForCommit(
+		t,
+		newLeader,
+		leaderKillWaitTimeout,
+		afterKillIndex,
+	)
 
 	cluster.waitForLogEntry(
 		t,
@@ -116,22 +130,6 @@ func newLeaderKillCluster(t *testing.T) *leaderKillCluster {
 		raft.NewRaftNode("node-1"),
 		raft.NewRaftNode("node-2"),
 		raft.NewRaftNode("node-3"),
-	}
-
-	// Temporary debug logger for diagnosing the deterministic
-	// leader-kill election failure. Remove this instrumentation once
-	// the underlying election issue is fixed.
-	logger := slog.New(
-		slog.NewTextHandler(
-			os.Stdout,
-			&slog.HandlerOptions{
-				Level: slog.LevelDebug,
-			},
-		),
-	)
-
-	for _, node := range nodes {
-		node.SetLogger(logger)
 	}
 
 	peerIDs := []raft.NodeID{
@@ -277,6 +275,37 @@ func (c *leaderKillCluster) waitForNewLeader(
 	}
 
 	return nil
+}
+
+func (c *leaderKillCluster) waitForCommit(
+	t *testing.T,
+	node *raft.RaftNode,
+	timeout time.Duration,
+	index raft.LogIndex,
+) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		state := node.State()
+
+		if state.Volatile.CommitIndex >= index {
+			return
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	state := node.State()
+
+	t.Fatalf(
+		"node %s did not commit expected index: commit_index=%d expected_at_least=%d term=%d",
+		node.ID(),
+		state.Volatile.CommitIndex,
+		index,
+		state.Persistent.CurrentTerm,
+	)
 }
 
 func (c *leaderKillCluster) waitForLogEntry(

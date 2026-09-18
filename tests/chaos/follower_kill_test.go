@@ -103,12 +103,26 @@ func TestFollowerKill(t *testing.T) {
 		data,
 	)
 
+	cluster.waitForCommit(
+		t,
+		leader,
+		followerKillWaitTimeout,
+		index,
+	)
+
 	cluster.waitForLogEntry(
 		t,
 		survivingFollower,
 		followerKillWaitTimeout,
 		index,
 		data,
+	)
+
+	cluster.waitForCommit(
+		t,
+		survivingFollower,
+		followerKillWaitTimeout,
+		index,
 	)
 
 	// The removed follower must not receive the post-failure entry.
@@ -264,6 +278,37 @@ func (c *followerKillCluster) waitForLeader(
 	}
 
 	return nil
+}
+
+func (c *followerKillCluster) waitForCommit(
+	t *testing.T,
+	node *raft.RaftNode,
+	timeout time.Duration,
+	index raft.LogIndex,
+) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		state := node.State()
+
+		if state.Volatile.CommitIndex >= index {
+			return
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	state := node.State()
+
+	t.Fatalf(
+		"node %s did not commit expected index: commit_index=%d expected_at_least=%d term=%d",
+		node.ID(),
+		state.Volatile.CommitIndex,
+		index,
+		state.Persistent.CurrentTerm,
+	)
 }
 
 func (c *followerKillCluster) waitForLogEntry(
