@@ -14,7 +14,8 @@ import (
 )
 
 func TestHealthServerHealthz(t *testing.T) {
-	server := NewHealthServer("127.0.0.1:0")
+	server, err := NewHealthServer("127.0.0.1:0")
+	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -27,7 +28,8 @@ func TestHealthServerHealthz(t *testing.T) {
 }
 
 func TestHealthServerReadyzWithoutProbes(t *testing.T) {
-	server := NewHealthServer("127.0.0.1:0")
+	server, err := NewHealthServer("127.0.0.1:0")
+	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
@@ -39,9 +41,10 @@ func TestHealthServerReadyzWithoutProbes(t *testing.T) {
 }
 
 func TestHealthServerReadyzHealthyProbe(t *testing.T) {
-	server := NewHealthServer("127.0.0.1:0")
+	server, err := NewHealthServer("127.0.0.1:0")
+	require.NoError(t, err)
 
-	err := server.RegisterReadinessProbe("raft", func() error {
+	err = server.RegisterReadinessProbe("raft", func() error {
 		return nil
 	})
 	require.NoError(t, err)
@@ -65,9 +68,10 @@ func TestHealthServerReadyzHealthyProbe(t *testing.T) {
 }
 
 func TestHealthServerReadyzFailedProbe(t *testing.T) {
-	server := NewHealthServer("127.0.0.1:0")
+	server, err := NewHealthServer("127.0.0.1:0")
+	require.NoError(t, err)
 
-	err := server.RegisterReadinessProbe("raft", func() error {
+	err = server.RegisterReadinessProbe("raft", func() error {
 		return errors.New("raft is not ready")
 	})
 	require.NoError(t, err)
@@ -91,7 +95,8 @@ func TestHealthServerReadyzFailedProbe(t *testing.T) {
 }
 
 func TestHealthServerReadyzMultipleProbes(t *testing.T) {
-	server := NewHealthServer("127.0.0.1:0")
+	server, err := NewHealthServer("127.0.0.1:0")
+	require.NoError(t, err)
 
 	require.NoError(t, server.RegisterReadinessProbe("raft", func() error {
 		return nil
@@ -126,7 +131,8 @@ func TestHealthServerReadyzMultipleProbes(t *testing.T) {
 }
 
 func TestHealthServerRegisterReadinessProbeValidation(t *testing.T) {
-	server := NewHealthServer("127.0.0.1:0")
+	server, err := NewHealthServer("127.0.0.1:0")
+	require.NoError(t, err)
 
 	require.Error(t, server.RegisterReadinessProbe("", func() error {
 		return nil
@@ -136,7 +142,8 @@ func TestHealthServerRegisterReadinessProbeValidation(t *testing.T) {
 }
 
 func TestHealthServerUnregisterReadinessProbe(t *testing.T) {
-	server := NewHealthServer("127.0.0.1:0")
+	server, err := NewHealthServer("127.0.0.1:0")
+	require.NoError(t, err)
 
 	require.NoError(t, server.RegisterReadinessProbe("raft", func() error {
 		return errors.New("raft unavailable")
@@ -154,7 +161,8 @@ func TestHealthServerUnregisterReadinessProbe(t *testing.T) {
 }
 
 func TestHealthServerReadinessProbeCanRegisterWhileChecking(t *testing.T) {
-	server := NewHealthServer("127.0.0.1:0")
+	server, err := NewHealthServer("127.0.0.1:0")
+	require.NoError(t, err)
 
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -195,21 +203,27 @@ func TestHealthServerReadinessProbeCanRegisterWhileChecking(t *testing.T) {
 }
 
 func TestHealthServerServeAndShutdown(t *testing.T) {
-	server := NewHealthServer("127.0.0.1:0")
-
-	listener, err := newTestListener()
+	server, err := NewHealthServer("127.0.0.1:0")
 	require.NoError(t, err)
-
-	server.server.Addr = listener.Addr().String()
 
 	done := make(chan error, 1)
 
 	go func() {
-		done <- server.server.Serve(listener)
+		done <- server.Serve()
 	}()
 
+	client := &http.Client{}
+	url := "http://" + server.Address() + "/healthz"
+
 	require.Eventually(t, func() bool {
-		return server.server.Addr != ""
+		resp, err := client.Get(url)
+		if err != nil {
+			return false
+		}
+
+		_ = resp.Body.Close()
+
+		return resp.StatusCode == http.StatusOK
 	}, time.Second, 10*time.Millisecond)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -219,14 +233,15 @@ func TestHealthServerServeAndShutdown(t *testing.T) {
 
 	select {
 	case err := <-done:
-		require.ErrorIs(t, err, http.ErrServerClosed)
+		require.NoError(t, err)
 	case <-time.After(time.Second):
 		t.Fatal("health server did not shut down")
 	}
 }
 
 func TestHealthServerConcurrentProbeRegistration(t *testing.T) {
-	server := NewHealthServer("127.0.0.1:0")
+	server, err := NewHealthServer("127.0.0.1:0")
+	require.NoError(t, err)
 
 	const workers = 20
 

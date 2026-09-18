@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -21,7 +23,8 @@ type HealthProbe func() error
 type HealthServer struct {
 	mu sync.RWMutex
 
-	server *http.Server
+	server   *http.Server
+	listener net.Listener
 
 	readinessProbes map[string]HealthProbe
 }
@@ -31,13 +34,23 @@ type healthResponse struct {
 	Checks map[string]string `json:"checks,omitempty"`
 }
 
-func NewHealthServer(address string) *HealthServer {
+func NewHealthServer(address string) (*HealthServer, error) {
+	if address == "" {
+		return nil, errors.New("health server address is required")
+	}
+
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, fmt.Errorf("listen for health server: %w", err)
+	}
+
 	mux := http.NewServeMux()
 
 	server := &HealthServer{
 		readinessProbes: make(map[string]HealthProbe),
+		listener:        listener,
 		server: &http.Server{
-			Addr:              address,
+			Addr:              listener.Addr().String(),
 			Handler:           mux,
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       10 * time.Second,
@@ -49,7 +62,7 @@ func NewHealthServer(address string) *HealthServer {
 	mux.HandleFunc(healthPath, server.handleHealth)
 	mux.HandleFunc(readinessPath, server.handleReadiness)
 
-	return server
+	return server, nil
 }
 
 func (s *HealthServer) RegisterReadinessProbe(
@@ -92,16 +105,16 @@ func (s *HealthServer) UnregisterReadinessProbe(name string) {
 }
 
 func (s *HealthServer) Serve() error {
-	if s == nil || s.server == nil {
+	if s == nil || s.server == nil || s.listener == nil {
 		return ErrHealthServerClosed
 	}
 
-	err := s.server.ListenAndServe()
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
+	if err := s.server.Serve(s.listener); err != nil &&
+		!errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("serve health: %w", err)
 	}
 
-	return err
+	return nil
 }
 
 func (s *HealthServer) Shutdown(ctx context.Context) error {
@@ -113,11 +126,11 @@ func (s *HealthServer) Shutdown(ctx context.Context) error {
 }
 
 func (s *HealthServer) Address() string {
-	if s == nil || s.server == nil {
+	if s == nil || s.listener == nil {
 		return ""
 	}
 
-	return s.server.Addr
+	return s.listener.Addr().String()
 }
 
 func (s *HealthServer) handleHealth(

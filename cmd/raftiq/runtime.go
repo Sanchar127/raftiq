@@ -597,14 +597,22 @@ func (r *runtime) initializeMetricsServer() error {
 }
 
 func (r *runtime) initializeHealthServer() error {
-	healthServer := observability.NewHealthServer(
+	healthServer, err := observability.NewHealthServer(
 		r.cfg.healthAddr,
 	)
+	if err != nil {
+		return fmt.Errorf(
+			"create health server: %w",
+			err,
+		)
+	}
 
 	if err := healthServer.RegisterReadinessProbe(
 		"raft",
 		observability.RaftReadinessProbe(r.node),
 	); err != nil {
+		_ = healthServer.Shutdown(context.Background())
+
 		return fmt.Errorf(
 			"register Raft readiness probe: %w",
 			err,
