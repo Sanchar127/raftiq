@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -66,50 +67,52 @@ func BenchmarkWALSync(b *testing.B) {
 }
 
 func BenchmarkWALRecovery(b *testing.B) {
-	dir := b.TempDir()
-	path := filepath.Join(dir, "benchmark-recovery.wal")
+	for _, entryCount := range []int{100, 1000, 10000} {
+		b.Run(fmt.Sprintf("%d", entryCount), func(b *testing.B) {
+			dir := b.TempDir()
+			path := filepath.Join(dir, "benchmark-recovery.wal")
 
-	store, err := OpenWAL(path)
-	if err != nil {
-		b.Fatal(err)
-	}
+			store, err := OpenWAL(path)
+			if err != nil {
+				b.Fatal(err)
+			}
 
-	const entryCount = 100
+			entries := make([]model.LogEntry, entryCount)
+			for i := range entries {
+				entries[i] = model.LogEntry{
+					Index: model.LogIndex(i + 1),
+					Term:  1,
+					Data:  []byte("raftiq-benchmark-value"),
+				}
+			}
 
-	entries := make([]model.LogEntry, entryCount)
-	for i := range entries {
-		entries[i] = model.LogEntry{
-			Index: model.LogIndex(i + 1),
-			Term:  1,
-			Data:  []byte("raftiq-benchmark-value"),
-		}
-	}
+			if err := store.AppendEntries(entries); err != nil {
+				store.Close()
+				b.Fatal(err)
+			}
 
-	if err := store.AppendEntries(entries); err != nil {
-		store.Close()
-		b.Fatal(err)
-	}
+			if err := store.Sync(); err != nil {
+				store.Close()
+				b.Fatal(err)
+			}
 
-	if err := store.Sync(); err != nil {
-		store.Close()
-		b.Fatal(err)
-	}
+			if err := store.Close(); err != nil {
+				b.Fatal(err)
+			}
 
-	if err := store.Close(); err != nil {
-		b.Fatal(err)
-	}
+			b.ReportAllocs()
+			b.ResetTimer()
 
-	b.ReportAllocs()
-	b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				recovered, err := OpenWAL(path)
+				if err != nil {
+					b.Fatal(err)
+				}
 
-	for i := 0; i < b.N; i++ {
-		recovered, err := OpenWAL(path)
-		if err != nil {
-			b.Fatal(err)
-		}
-
-		if err := recovered.Close(); err != nil {
-			b.Fatal(err)
-		}
+				if err := recovered.Close(); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
