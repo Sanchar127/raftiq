@@ -29,8 +29,9 @@ type runtime struct {
 	logger *slog.Logger
 	cfg    config
 
-	clientTLS *tls.Config
-	serverTLS *tls.Config
+	clientTLS   *tls.Config
+	serverTLS   *tls.Config
+	kvServerTLS *tls.Config
 
 	metricsRegistry *prometheus.Registry
 	metrics         *observability.Metrics
@@ -161,13 +162,32 @@ func (r *runtime) initializeTLS() error {
 		)
 	}
 
+	kvServerTLS, err := transport.LoadTLSKVServerConfig(
+		transport.TLSConfig{
+			CAFile:   r.cfg.tlsCA,
+			CertFile: r.cfg.tlsCert,
+			KeyFile:  r.cfg.tlsKey,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"load KV server TLS configuration: %w",
+			err,
+		)
+	}
+
 	r.logger.Info(
 		"Raft mutual TLS configured",
 		"allowed_peer_sans", len(allowedPeerSANs),
 	)
 
+	r.logger.Info(
+		"KV mutual TLS configured",
+	)
+
 	r.clientTLS = clientTLS
 	r.serverTLS = serverTLS
+	r.kvServerTLS = kvServerTLS
 
 	return nil
 }
@@ -510,6 +530,9 @@ func (r *runtime) initializeRaftGRPCServer() error {
 func (r *runtime) initializeKVGRPCServer() error {
 	kvGRPCServer, err := transport.NewServer(
 		r.cfg.kvAddr,
+		grpc.Creds(
+			credentials.NewTLS(r.kvServerTLS),
+		),
 	)
 	if err != nil {
 		return fmt.Errorf(

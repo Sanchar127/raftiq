@@ -528,6 +528,199 @@ func TestLoadTLSConfigRequiresAllFields(t *testing.T) {
 	}
 }
 
+func TestLoadTLSKVServerConfig(t *testing.T) {
+	dir := t.TempDir()
+
+	files := writeTestCertificateFiles(
+		t,
+		dir,
+		"node-1.raftiq",
+		"client.example",
+	)
+
+	cfg, err := LoadTLSKVServerConfig(TLSConfig{
+		CAFile:   files.caFile,
+		CertFile: files.serverCertFile,
+		KeyFile:  files.serverKeyFile,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	require.EqualValues(
+		t,
+		tls.VersionTLS13,
+		cfg.MinVersion,
+	)
+
+	require.Equal(
+		t,
+		tls.RequireAndVerifyClientCert,
+		cfg.ClientAuth,
+	)
+
+	require.NotNil(t, cfg.ClientCAs)
+	require.Len(t, cfg.Certificates, 1)
+
+	// KV authentication uses the CA for client authentication but does not
+	// apply the Raft peer-SAN restriction.
+	require.Nil(t, cfg.VerifyConnection)
+}
+
+func TestLoadTLSKVServerConfigRequiresAllFields(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  TLSConfig
+		want error
+	}{
+		{
+			name: "missing CA",
+			cfg: TLSConfig{
+				CertFile: "cert",
+				KeyFile:  "key",
+			},
+			want: ErrTLSCACertificate,
+		},
+		{
+			name: "missing certificate",
+			cfg: TLSConfig{
+				CAFile:  "ca",
+				KeyFile: "key",
+			},
+			want: ErrTLSCertificate,
+		},
+		{
+			name: "missing private key",
+			cfg: TLSConfig{
+				CAFile:   "ca",
+				CertFile: "cert",
+			},
+			want: ErrTLSPrivateKey,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := LoadTLSKVServerConfig(tt.cfg)
+			require.ErrorIs(t, err, tt.want)
+		})
+	}
+}
+
+func TestTLSKVServerAcceptsValidClientCertificate(t *testing.T) {
+	dir := t.TempDir()
+
+	files := writeTestCertificateFiles(
+		t,
+		dir,
+		"kv-server.raftiq",
+		"arbitrary-client.example",
+	)
+
+	serverTLS, err := LoadTLSKVServerConfig(TLSConfig{
+		CAFile:   files.caFile,
+		CertFile: files.serverCertFile,
+		KeyFile:  files.serverKeyFile,
+	})
+	require.NoError(t, err)
+
+	clientTLS, err := LoadTLSClientConfig(TLSConfig{
+		CAFile:         files.caFile,
+		CertFile:       files.clientCertFile,
+		KeyFile:        files.clientKeyFile,
+		PeerServerName: "kv-server.raftiq",
+	})
+	require.NoError(t, err)
+
+	listener, err := tls.Listen(
+		"tcp",
+		"127.0.0.1:0",
+		serverTLS,
+	)
+	require.NoError(t, err)
+	defer listener.Close()
+
+	serverErr := make(chan error, 1)
+
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+
+		serverErr <- conn.(*tls.Conn).Handshake()
+	}()
+
+	clientConn, err := tls.Dial(
+		"tcp",
+		listener.Addr().String(),
+		&tls.Config{
+			Certificates: clientTLS.Certificates,
+			RootCAs:      clientTLS.RootCAs,
+			ServerName:   "kv-server.raftiq",
+			MinVersion:   tls.VersionTLS13,
+		},
+	)
+	require.NoError(t, err)
+	defer clientConn.Close()
+
+	require.NoError(t, clientConn.Handshake())
+	require.NoError(t, <-serverErr)
+}
+
+func TestTLSKVServerRejectsClientWithoutCertificate(t *testing.T) {
+	dir := t.TempDir()
+
+	files := writeTestCertificateFiles(
+		t,
+		dir,
+		"kv-server.raftiq",
+		"client.example",
+	)
+
+	serverTLS, err := LoadTLSKVServerConfig(TLSConfig{
+		CAFile:   files.caFile,
+		CertFile: files.serverCertFile,
+		KeyFile:  files.serverKeyFile,
+	})
+	require.NoError(t, err)
+
+	listener, err := tls.Listen(
+		"tcp",
+		"127.0.0.1:0",
+		serverTLS,
+	)
+	require.NoError(t, err)
+	defer listener.Close()
+
+	serverErr := make(chan error, 1)
+
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+
+		serverErr <- conn.(*tls.Conn).Handshake()
+	}()
+
+	_, err = tls.Dial(
+		"tcp",
+		listener.Addr().String(),
+		&tls.Config{
+			RootCAs:    nil,
+			ServerName: "kv-server.raftiq",
+			MinVersion: tls.VersionTLS13,
+		},
+	)
+
+	require.Error(t, err)
+	require.Error(t, <-serverErr)
+}
+
 func TestTLSMutualHandshake(t *testing.T) {
 	dir := t.TempDir()
 

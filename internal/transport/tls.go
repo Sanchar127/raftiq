@@ -143,6 +143,66 @@ func LoadTLSClientConfig(
 	}, nil
 }
 
+// LoadTLSKVServerConfig loads a TLS configuration for the client-facing KV API.
+//
+// The KV server requires client certificates signed by the configured CA,
+// but does not apply Raft peer SAN restrictions. Authorization is intentionally
+// outside the transport layer.
+func LoadTLSKVServerConfig(
+	cfg TLSConfig,
+) (*tls.Config, error) {
+	if cfg.CAFile == "" {
+		return nil, ErrTLSCACertificate
+	}
+
+	if cfg.CertFile == "" {
+		return nil, ErrTLSCertificate
+	}
+
+	if cfg.KeyFile == "" {
+		return nil, ErrTLSPrivateKey
+	}
+
+	caPEM, err := os.ReadFile(cfg.CAFile)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"read TLS CA certificate: %w",
+			err,
+		)
+	}
+
+	caPool := x509.NewCertPool()
+
+	if !caPool.AppendCertsFromPEM(caPEM) {
+		return nil, errors.New(
+			"parse TLS CA certificate",
+		)
+	}
+
+	certificate, err := tls.LoadX509KeyPair(
+		cfg.CertFile,
+		cfg.KeyFile,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"load TLS certificate and key: %w",
+			err,
+		)
+	}
+
+	return &tls.Config{
+		MinVersion: tls.VersionTLS13,
+
+		Certificates: []tls.Certificate{
+			certificate,
+		},
+
+		ClientCAs: caPool,
+
+		ClientAuth: tls.RequireAndVerifyClientCert,
+	}, nil
+}
+
 func verifyPeerSAN(expectedSAN string) func(tls.ConnectionState) error {
 	return func(state tls.ConnectionState) error {
 		if expectedSAN == "" {
