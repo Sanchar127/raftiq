@@ -384,4 +384,3 @@ func TestAppendEntriesStaleTermDoesNotChangeState(t *testing.T) {
 		)
 	}
 }
-

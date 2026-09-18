@@ -813,7 +813,7 @@ func TestApplierConcurrentSetLoggerAndRestoreSnapshot(t *testing.T) {
 	snapshot := model.Snapshot{
 		LastIncludedIndex: 42,
 		LastIncludedTerm:  7,
-		Data:               snapshotData,
+		Data:              snapshotData,
 	}
 
 	done := make(chan struct{})
