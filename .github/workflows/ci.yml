@@ -16,10 +16,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Go Tests
+  quality:
+    name: Code Quality
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -45,17 +45,74 @@ jobs:
       - name: Verify dependencies
         run: go mod verify
 
-      - name: Check generated modules
+      - name: Verify go.mod and go.sum
         run: go mod tidy -diff
 
       - name: Run go vet
         run: go vet ./...
 
-      - name: Run unit and integration tests
+  test:
+    name: Unit and Package Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: quality
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run tests
         run: go test ./... -count=1
+
+  race:
+    name: Race Detector
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: quality
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
 
       - name: Run race detector
         run: go test -race ./... -count=1
+
+  chaos:
+    name: Chaos Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: quality
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
 
       - name: Run chaos tests
         run: go test ./tests/chaos/... -count=1
@@ -63,31 +120,42 @@ jobs:
       - name: Run chaos tests with race detector
         run: go test -race ./tests/chaos/... -count=1
 
-  # lint:
-  #   name: Go Lint
-  #   runs-on: ubuntu-latest
-  #   timeout-minutes: 10
+  e2e:
+    name: E2E Smoke Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: quality
 
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
 
-  #     - name: Set up Go
-  #       uses: actions/setup-go@v6
-  #       with:
-  #         go-version-file: go.mod
-  #         cache: true
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
 
-  #     - name: Run golangci-lint
-  #       uses: golangci/golangci-lint-action@v8
-  #       with:
-  #         version: v2.5.0
-  #         args: ./...
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run process-level E2E smoke tests
+        run: |
+          go test ./tests/e2e \
+            -run 'TestE2E(ProcessLifecycle|KVLeaderFailover)$' \
+            -count=1 \
+            -v
 
   build:
     name: Build
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs:
+      - quality
+      - test
+      - race
+      - chaos
+      - e2e
 
     steps:
       - name: Checkout
@@ -105,12 +173,8 @@ jobs:
       - name: Build all packages
         run: go build ./...
 
-      - name: Build binaries
-        run: |
-          if [ -d "./cmd/raftiq" ] && [ "$(find ./cmd/raftiq -type f -name '*.go' -print -quit)" ]; then
-            go build ./cmd/raftiq
-          fi
+      - name: Build RaftIQ binary
+        run: go build -o raftiq ./cmd/raftiq
 
-          if [ -d "./cmd/scheduler" ] && [ "$(find ./cmd/scheduler -type f -name '*.go' -print -quit)" ]; then
-            go build ./cmd/scheduler
-          fi
+      - name: Verify binary
+        run: ./raftiq --help
